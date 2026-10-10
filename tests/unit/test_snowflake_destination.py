@@ -310,6 +310,117 @@ class TestSnowflakeDestinationLoad:
         assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
         assert any("WHEN MATCHED THEN UPDATE" in s for s in sqls)
 
+    def test_merge_fill_empty_uses_case_in_bulk_chunk_and_honours_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        records = [
+            {"id": 1, "industry": "Software", "score": 10},
+            {"id": 2, "industry": "Retail", "score": 20},
+        ]
+        options = _options(
+            write_policy="fill_empty",
+            write_policy_overrides={"score": "overwrite"},
+        )
+
+        with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
+            result = SnowflakeDestination().load(
+                records,
+                _config(mode="merge", upsert_key=["id"]),
+                options,
+            )
+
+        assert result.success == 2
+        merge_sql = next(s for s in _sqls(conn._cur) if "MERGE INTO" in s)
+        assert merge_sql.count("(%s, %s, %s)") == 2  # one bulk chunk
+        assert (
+            "industry = CASE WHEN target.industry IS NULL OR "
+            "TRIM(target.industry::STRING) = '' THEN source.industry "
+            "ELSE target.industry END"
+        ) in merge_sql
+        assert "score = source.score" in merge_sql
+        assert merge_sql.count("CASE WHEN") == 1
+
+    def test_merge_fill_empty_is_kept_in_per_row_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        calls = {"count": 0}
+
+        def fail_bulk_once(sql: str, *args: Any) -> None:
+            del sql, args
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise Exception("bulk rejected")
+
+        conn._cur.execute.side_effect = fail_bulk_once
+        records = [
+            {"id": 1, "industry": "Software"},
+            {"id": 2, "industry": "Retail"},
+        ]
+
+        with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
+            result = SnowflakeDestination().load(
+                records,
+                _config(mode="merge", upsert_key=["id"]),
+                _options(write_policy="fill_empty", on_error="skip"),
+            )
+
+        assert result.success == 2 and result.failed == 0
+        merge_sqls = [s for s in _sqls(conn._cur) if "MERGE INTO" in s]
+        assert len(merge_sqls) == 3  # failed bulk statement, then two fallback rows
+        assert merge_sqls[0].count("(%s, %s)") == 2
+        assert all("TRIM(target.industry::STRING) = ''" in s for s in merge_sqls)
+        assert all(s.count("(%s, %s)") == 1 for s in merge_sqls[1:])
+
+    def test_write_policy_override_typo_is_rejected_before_merge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        options = _options(write_policy_overrides={"industy": "fill_empty"})
+
+        with (
+            patch.dict("sys.modules", _mocked_snowflake_modules(conn)),
+            patch(
+                "drt.destinations.schema.describe_columns",
+                return_value={"ID": "scalar", "INDUSTRY": "scalar"},
+            ),
+            pytest.raises(
+                ValueError,
+                match=r"\['industy'\].*not columns of the destination",
+            ),
+        ):
+            SnowflakeDestination().load(
+                [{"id": 1, "industry": "Software"}],
+                _config(introspect_schema=True, mode="merge", upsert_key=["id"]),
+                options,
+            )
+
+        assert not conn._cur.execute.called
+
+    def test_mirror_fill_empty_merges_before_unchanged_delete_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        destination = SnowflakeDestination()
+        config = _config(mode="insert", upsert_key=["id"])
+        options = _options(mode="mirror", write_policy="fill_empty")
+
+        with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
+            result = destination.load([{"id": 1, "industry": "Software"}], config, options)
+            finalized = destination.finalize_sync(config, options)
+
+        assert result.success == 1 and finalized is not None
+        sqls = _sqls(conn._cur)
+        merge_sql = next(s for s in sqls if "MERGE INTO" in s)
+        delete_sql = next(s for s in sqls if s.startswith("DELETE FROM"))
+        assert "TRIM(target.industry::STRING) = ''" in merge_sql
+        assert "CASE WHEN" not in delete_sql
+
     def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

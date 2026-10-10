@@ -11,9 +11,10 @@ from drt.config.models import SyncOptions
 from drt.destinations.base import WritePolicyCapable
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
+from drt.destinations.snowflake import SnowflakeDestination, _build_merge_sql
 from drt.engine.diff import DiffResult, compute_diff
 from drt.engine.plan import build_plan, render_markdown, render_text
-from drt.engine.sync import _check_write_policy_supported
+from drt.engine.sync import _check_match_policy_supported, _check_write_policy_supported
 
 # --- config ---------------------------------------------------------------
 
@@ -117,6 +118,30 @@ def test_mysql_default_upsert_sql_is_unchanged() -> None:
     assert "IF(" not in sql and "`a` = VALUES(`a`)" in sql
 
 
+def test_snowflake_merge_keeps_a_non_empty_value_for_fill_columns_only() -> None:
+    sql = _build_merge_sql(
+        "DB.PUBLIC.CONTACTS",
+        ["id", "industry", "score"],
+        ["id"],
+        "SELECT v0 AS id, v1 AS industry, v2 AS score",
+        {"industry"},
+    )
+
+    assert (
+        "industry = CASE WHEN target.industry IS NULL OR "
+        "TRIM(target.industry::STRING) = '' THEN source.industry "
+        "ELSE target.industry END"
+    ) in sql
+    assert "score = source.score" in sql
+    assert sql.count("CASE WHEN") == 1
+
+
+def test_snowflake_default_merge_sql_is_unchanged() -> None:
+    sql = _build_merge_sql("DB.PUBLIC.T", ["id", "a"], ["id"], "SELECT v0 AS id, v1 AS a")
+
+    assert "CASE WHEN" not in sql and "a = source.a" in sql
+
+
 # --- engine guard ----------------------------------------------------------
 
 
@@ -124,10 +149,18 @@ class _NoPolicy:
     pass
 
 
-def test_postgres_and_mysql_declare_the_capability() -> None:
-    for destination in (PostgresDestination(), MySQLDestination()):
+def test_sql_destinations_with_fill_empty_declare_the_capability() -> None:
+    for destination in (PostgresDestination(), MySQLDestination(), SnowflakeDestination()):
         assert isinstance(destination, WritePolicyCapable)
-        assert "fill_empty" in destination.supported_write_policies()
+        assert destination.supported_write_policies() == frozenset({"overwrite", "fill_empty"})
+
+
+def test_snowflake_accepts_fill_empty_but_still_rejects_update_only() -> None:
+    destination = SnowflakeDestination()
+
+    _check_write_policy_supported(SyncOptions(write_policy="fill_empty"), destination)
+    with pytest.raises(ValueError, match="match_policy: update_only.*SnowflakeDestination"):
+        _check_match_policy_supported("update_only", destination)
 
 
 def test_the_default_policy_needs_no_capability() -> None:

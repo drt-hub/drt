@@ -129,12 +129,27 @@ def _merge_using_subquery(
 
 
 def _build_merge_sql(
-    table_fq: str, columns: list[str], upsert_key: list[str], using_subquery: str
+    table_fq: str,
+    columns: list[str],
+    upsert_key: list[str],
+    using_subquery: str,
+    fill_cols: set[str] | frozenset[str] = frozenset(),
 ) -> str:
-    """Build the full ``MERGE INTO ... USING (<subquery>) AS source`` statement."""
+    """Build the full ``MERGE INTO ... USING (<subquery>) AS source`` statement.
+
+    ``fill_cols`` (``write_policy: fill_empty``, #1238) keep a stored value
+    unless it is NULL, ``''`` or only spaces. The STRING cast is for the
+    comparison only, so non-text values such as ``0`` remain non-empty.
+    """
     key_clause = " AND ".join([f"target.{k} = source.{k}" for k in upsert_key])
     update_cols = [c for c in columns if c not in upsert_key]
-    update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
+    update_clause = ", ".join(
+        f"{c} = CASE WHEN target.{c} IS NULL OR TRIM(target.{c}::STRING) = '' "
+        f"THEN source.{c} ELSE target.{c} END"
+        if c in fill_cols
+        else f"{c} = source.{c}"
+        for c in update_cols
+    )
     insert_cols = ", ".join(columns)
     insert_vals = ", ".join([f"source.{c}" for c in columns])
     matched_clause = f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
@@ -334,6 +349,8 @@ class SnowflakeDestination(BaseSqlDestination):
         if effective_mode == "merge" and not upsert_key:
             raise ValueError("upsert_key is required for merge mode")
 
+        self._validate_write_policy_overrides(sync_options, schema_map)
+
         # Built per contiguous key-signature run (#1091), not once for the
         # whole batch: a column absent from a run is omitted from that
         # run's statement, letting the destination's own DEFAULT apply,
@@ -371,6 +388,10 @@ class SnowflakeDestination(BaseSqlDestination):
 
             else:  # merge
                 assert upsert_key  # guarded above
+                update_cols = [c for c in run_columns if c not in upsert_key]
+                # write_policy: fill_empty (#1238): these columns keep a
+                # non-empty destination value in both bulk and fallback MERGEs.
+                fill_cols = sync_options.fill_empty_columns(update_cols)
                 # #988: chunked MERGE ... USING (VALUES ...) replaces the old
                 # CREATE TEMP TABLE staging step — no DDL privilege needed at
                 # all now. A chunk-level failure falls back to one MERGE per
@@ -380,7 +401,9 @@ class SnowflakeDestination(BaseSqlDestination):
                     chunk = run_records[chunk_start : chunk_start + chunk_size]
                     try:
                         using_sql = _merge_using_subquery(run_columns, schema_map, len(chunk))
-                        merge_sql = _build_merge_sql(table_fq, run_columns, upsert_key, using_sql)
+                        merge_sql = _build_merge_sql(
+                            table_fq, run_columns, upsert_key, using_sql, fill_cols
+                        )
                         flat_params: list[Any] = [
                             v for row in chunk for v in _bind_row(row, run_columns, json_cols)
                         ]
@@ -392,7 +415,11 @@ class SnowflakeDestination(BaseSqlDestination):
                             try:
                                 using_sql = _merge_using_subquery(run_columns, schema_map, 1)
                                 merge_sql = _build_merge_sql(
-                                    table_fq, run_columns, upsert_key, using_sql
+                                    table_fq,
+                                    run_columns,
+                                    upsert_key,
+                                    using_sql,
+                                    fill_cols,
                                 )
                                 cur.execute(merge_sql, _bind_row(row, run_columns, json_cols))
                                 result.success += 1
@@ -462,6 +489,10 @@ class SnowflakeDestination(BaseSqlDestination):
     def supported_modes(self) -> frozenset[str]:
         """Declare the advanced sync modes implemented by Snowflake (#1042)."""
         return frozenset({"replace", "mirror"})
+
+    def supported_write_policies(self) -> frozenset[str]:
+        """Snowflake honours ``fill_empty`` in the MERGE update clause (#1238)."""
+        return frozenset({"overwrite", "fill_empty"})
 
     def _shadow_name(self, table: str) -> str:
         return f"{table}{_SWAP_SUFFIX}"

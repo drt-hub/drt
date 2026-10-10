@@ -403,7 +403,9 @@ tests:                      # optional: post-sync validation (DB destinations on
 NULL, an empty string or only spaces; an existing value is never replaced (new rows
 are inserted in full). `write_policy_overrides` sets one column the other way. A
 non-text column is empty only when NULL; a stored `0` is a value. Supported on
-**PostgreSQL and MySQL** (upsert and `update_only`); other destinations fail fast.
+**PostgreSQL and MySQL** (upsert and `update_only`) and **Snowflake** (the upsert
+`MERGE` path, including mirror; Snowflake does not support `update_only`); other
+destinations fail fast.
 Rejected for `mode: replace`. A name in `write_policy_overrides` that is not a
 column of the destination table is an error (nothing written; needs introspection),
 and plan/diff report it as unavailable when the source does not produce it. `--dry-run --diff` and `drt plan` count
