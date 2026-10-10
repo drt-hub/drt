@@ -140,12 +140,15 @@ def _file_name(index: int, total: int, name: str) -> str:
 
 
 def _write_new_file(path: Path, text: str) -> None:
-    """Write a file without ever following a symlink that was left at its name."""
+    """Write a private (0600) file without following a symlink left at its name.
+
+    Plans hold the keys of changed records, so they are not world-readable.
+    """
     import os
 
     if path.is_symlink():
         path.unlink()  # removes the link, never its target
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
 

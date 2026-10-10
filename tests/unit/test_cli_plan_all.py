@@ -422,3 +422,12 @@ def test_a_directory_planned_with_another_key_says_how_to_share_the_key(
     assert result.exit_code == 1 and "same DRT_PLAN_KEY secret" in flat
     assert "empty secret makes each runner invent its own key" in flat.replace("an unset or ", "")
     assert world.writes == []
+
+
+def test_plan_files_are_private(project: Path, world: _World) -> None:
+    import stat
+
+    assert runner.invoke(app, ["plan", "--all", "--out-dir", "plans"]).exit_code == 0
+
+    for path in (project / "plans").glob("*.json"):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, path.name
