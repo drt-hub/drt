@@ -378,6 +378,28 @@ class BaseSqlDestination:
             self._schema_cache[config.table] = describe_columns(config)
         return self._schema_cache[config.table]
 
+    @staticmethod
+    def _validate_write_policy_overrides(
+        sync_options: Any, schema_map: dict[str, str] | None
+    ) -> None:
+        """``write_policy_overrides`` must name real columns of the target table (#1238).
+
+        A typo would apply the default policy to the column meant, which overwrites when
+        the default is overwrite. This runs against the destination's own column list, so
+        it is exact however the source batches its rows, and it needs introspection: with
+        ``introspect_schema: false`` (or ``json_columns``) there is no list to check, and
+        ``drt plan`` / ``--dry-run --diff`` still check the names against the source.
+        """
+        if schema_map is None or not sync_options.write_policy_overrides:
+            return
+        known = {name.lower() for name in schema_map}
+        unknown = sorted(c for c in sync_options.write_policy_overrides if c.lower() not in known)
+        if unknown:
+            raise ValueError(
+                f"sync.write_policy_overrides names column(s) {unknown} that are not columns "
+                "of the destination table; check the spelling."
+            )
+
     def _validate_records_not_empty(self, records: list[dict[str, Any]]) -> None:
         """A record with zero populated fields carries nothing to write --
         fail fast rather than let it become a signature run with

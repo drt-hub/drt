@@ -397,6 +397,26 @@ tests:                      # optional: post-sync validation (DB destinations on
     severity: warn                    # optional on every type: "warn" | "error" (default)
 ```
 
+### Write policy (`sync.write_policy`, #1238)
+
+`write_policy: fill_empty` writes a column only when the destination's value is
+NULL, an empty string or only spaces; an existing value is never replaced (new rows
+are inserted in full). `write_policy_overrides` sets one column the other way. A
+non-text column is empty only when NULL; a stored `0` is a value. Supported on
+**PostgreSQL and MySQL** (upsert and `update_only`); other destinations fail fast.
+Rejected for `mode: replace`. A name in `write_policy_overrides` that is not a
+column of the destination table is an error (nothing written; needs introspection),
+and plan/diff report it as unavailable when the source does not produce it. `--dry-run --diff` and `drt plan` count
+the kept values (`kept_values`).
+
+```yaml
+sync:
+  mode: upsert
+  write_policy: fill_empty
+  write_policy_overrides:
+    lifecycle_stage: overwrite
+```
+
 ### Change guards (`sync.guards`, #1218)
 
 Limits on how much one run may change. They are evaluated against the change set

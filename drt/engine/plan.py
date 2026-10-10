@@ -77,6 +77,7 @@ class Plan:
     total_source_rows: int = 0
     total_destination_rows: int | None = None
     delete_baseline: int | None = None
+    kept_values: int = 0
     guards_configured: dict[str, Any] | None = None
     guard_trips: list[GuardTrip] = field(default_factory=list)
     entries: list[PlanEntry] = field(default_factory=list)
@@ -140,6 +141,7 @@ class Plan:
                 **self.summary,
                 "total_source_rows": self.total_source_rows,
                 "total_destination_rows": self.total_destination_rows,
+                "kept_values": self.kept_values,
             },
             "guards": {
                 "configured": self.guards_configured,
@@ -286,6 +288,7 @@ def build_plan(
         total_source_rows=diff.total_source_rows,
         total_destination_rows=diff.total_destination_rows,
         delete_baseline=diff.delete_baseline,
+        kept_values=diff.kept_values,
     )
 
     if not diff.supported:
@@ -573,6 +576,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
                 **{action: {"type": "integer", "minimum": 0} for action in _ACTION_ORDER},
                 "total_source_rows": {"type": "integer", "minimum": 0},
                 "total_destination_rows": {"type": ["integer", "null"], "minimum": 0},
+                "kept_values": {"type": "integer", "minimum": 0},
             },
         },
         "guards": {
@@ -665,6 +669,8 @@ def render_markdown(plan: Plan) -> str:
                 f"\n_{hidden} more entries not shown; the full list is in the JSON plan "
                 "(`drt plan ... --out plan.json`)._"
             )
+    if plan.kept_values:
+        lines += ["", f"{plan.kept_values} existing value(s) kept (`write_policy: fill_empty`)."]
     for trip in plan.guard_trips:
         lines += ["", f"**Guard tripped:** {_code(trip.message, _MARKDOWN_REASON_LIMIT)}"]
     lines += ["", f"{_code(plan.plan_id)} - digest {_code(plan.digest[:23])}", ""]
@@ -680,6 +686,8 @@ def render_text(plan: Plan) -> str:
     summary = plan.summary
     parts = [f"{summary[a]} to {a}" for a in _ACTION_ORDER if summary[a]]
     lines.append("  " + (", ".join(parts) if parts else "No changes."))
+    if plan.kept_values:
+        lines.append(f"  {plan.kept_values} existing value(s) kept (write_policy: fill_empty)")
     lines.append(f"  Source rows: {plan.total_source_rows}")
     if plan.total_destination_rows is not None:
         lines.append(f"  Destination rows read: {plan.total_destination_rows}")

@@ -727,9 +727,13 @@ class PostgresDestination(BaseSqlDestination):
         use_savepoint = sync_options.on_error == "skip"
         no_match_indices: set[int] = set()
 
+        self._validate_write_policy_overrides(sync_options, schema_map)
+
         base_index = 0
         for run_columns, run_records in self._contiguous_signature_runs(records):
             update_cols = [c for c in run_columns if c not in config.upsert_key]
+            # write_policy: fill_empty (#1238): these columns keep a non-empty destination value.
+            fill_cols = sync_options.fill_empty_columns(update_cols)
 
             # match_policy (#757) picks the write shape and, for the narrowed
             # policies, the parameter order. Postgres has clean rowcount
@@ -750,7 +754,7 @@ class PostgresDestination(BaseSqlDestination):
                         "column to update, but every column is in upsert_key."
                     )
                 query = PostgresDestination._build_update_only_sql(
-                    config.table, update_cols, config.upsert_key
+                    config.table, update_cols, config.upsert_key, fill_cols
                 )
                 # UPDATE ... SET <update_cols> WHERE <upsert_key>: SET params
                 # first, then the WHERE key params.
@@ -761,6 +765,7 @@ class PostgresDestination(BaseSqlDestination):
                     run_columns,
                     config.upsert_key,
                     update_cols,
+                    fill_cols,
                 )
                 value_cols = run_columns
 
@@ -843,20 +848,38 @@ class PostgresDestination(BaseSqlDestination):
         columns: list[str],
         upsert_key: list[str],
         update_cols: list[str],
+        fill_cols: set[str] | frozenset[str] = frozenset(),
     ) -> Any:
         from psycopg2 import sql as _pgsql
 
+        # fill_empty (#1238): in ON CONFLICT ... DO UPDATE an unqualified column name is
+        # ambiguous between the target row and EXCLUDED, so the target gets an alias.
+        alias = _pgsql.Identifier("_drt_target")
         if update_cols:
             set_clause = _pgsql.SQL(", ").join(
-                _pgsql.SQL("{} = EXCLUDED.{}").format(_pgsql.Identifier(c), _pgsql.Identifier(c))
+                # Keep the stored value unless it is NULL, '' or only spaces. The ::text cast
+                # is for the comparison only, so it is valid for every column type (a
+                # number or boolean is "empty" only when NULL); btrim also makes a CHAR(n)
+                # column's padding irrelevant, matching how the diff reads the value.
+                _pgsql.SQL(
+                    "{col} = CASE WHEN {t}.{col} IS NULL OR btrim({t}.{col}::text) = '' "
+                    "THEN EXCLUDED.{col} ELSE {t}.{col} END"
+                ).format(col=_pgsql.Identifier(c), t=alias)
+                if c in fill_cols
+                else _pgsql.SQL("{} = EXCLUDED.{}").format(
+                    _pgsql.Identifier(c), _pgsql.Identifier(c)
+                )
                 for c in update_cols
             )
             conflict_action = _pgsql.SQL("DO UPDATE SET ") + set_clause
         else:
             conflict_action = _pgsql.SQL("DO NOTHING")
 
+        target = _qualified_ident(table)
+        if fill_cols and update_cols:
+            target = _pgsql.SQL("{} AS {}").format(target, alias)
         return _pgsql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {}").format(
-            _qualified_ident(table),
+            target,
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
             _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_key),
@@ -881,7 +904,12 @@ class PostgresDestination(BaseSqlDestination):
         )
 
     @staticmethod
-    def _build_update_only_sql(table: str, update_cols: list[str], upsert_key: list[str]) -> Any:
+    def _build_update_only_sql(
+        table: str,
+        update_cols: list[str],
+        upsert_key: list[str],
+        fill_cols: set[str] | frozenset[str] = frozenset(),
+    ) -> Any:
         """``match_policy: update_only`` (#757) — update only rows that exist.
 
         A plain ``UPDATE ... SET <cols> WHERE <key>`` never inserts, so rows
@@ -892,7 +920,12 @@ class PostgresDestination(BaseSqlDestination):
         from psycopg2 import sql as _pgsql
 
         set_clause = _pgsql.SQL(", ").join(
-            _pgsql.SQL("{} = {}").format(_pgsql.Identifier(c), _pgsql.Placeholder())
+            _pgsql.SQL(
+                "{col} = CASE WHEN {col} IS NULL OR btrim({col}::text) = '' "
+                "THEN {ph} ELSE {col} END"
+            ).format(col=_pgsql.Identifier(c), ph=_pgsql.Placeholder())
+            if c in fill_cols
+            else _pgsql.SQL("{} = {}").format(_pgsql.Identifier(c), _pgsql.Placeholder())
             for c in update_cols
         )
         where_clause = _pgsql.SQL(" AND ").join(
@@ -906,6 +939,10 @@ class PostgresDestination(BaseSqlDestination):
     def supported_match_policies(self) -> frozenset[str]:
         """Postgres honours all three ``match_policy`` values (#757)."""
         return frozenset({"upsert", "update_only", "create_only"})
+
+    def supported_write_policies(self) -> frozenset[str]:
+        """Postgres honours ``write_policy: fill_empty`` in the upsert update clause (#1238)."""
+        return frozenset({"overwrite", "fill_empty"})
 
     # --- dialect hooks (#719) ---------------------------------------------
     def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:

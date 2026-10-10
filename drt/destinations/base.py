@@ -160,6 +160,24 @@ class MatchPolicyCapable(Protocol):
 
 
 @runtime_checkable
+class WritePolicyCapable(Protocol):
+    """Destination that honours ``sync.write_policy: fill_empty`` (#1238).
+
+    Stability: Evolving (added after the v1.0 freeze as an additive capability, ADR 0007).
+
+    ``fill_empty`` writes a column only when the destination's current value is NULL
+    or an empty string. That needs either a read-before-write or a conditional update
+    expression, so it is an opt-in capability the engine checks structurally; a
+    destination that does not implement it fails fast rather than silently
+    overwriting values the policy exists to protect.
+    """
+
+    def supported_write_policies(self) -> frozenset[str]:
+        """Return the ``write_policy`` values this destination honours."""
+        ...
+
+
+@runtime_checkable
 class ModeCapable(Protocol):
     """Destination that honours advanced ``sync.mode`` values (#1042).
 

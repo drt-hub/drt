@@ -6,6 +6,7 @@ the three ``destinations_*`` modules and consumed by :class:`SyncConfig`.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
@@ -345,6 +346,19 @@ class SyncOptions(BaseModel):
     # fails fast on destinations that don't implement it (see the engine's
     # MatchPolicyCapable guard). Prior art: Census / Hightouch sync behaviours.
     match_policy: Literal["upsert", "update_only", "create_only"] = "upsert"
+    # Column write policy (#1238), the per-column sibling of match_policy:
+    #   - "overwrite" (default): an upsert replaces every non-key column.
+    #   - "fill_empty": write a column only when the destination's current value is
+    #     NULL or an empty string; a value that is already there is never replaced
+    #     (enrichment: the warehouse value is a best guess, an existing value may have
+    #     been entered or verified by someone). New rows are still inserted in full.
+    # ``write_policy_overrides`` sets a column's policy against the default, either
+    # way round. Rejected for mode: replace and on destinations that cannot honour it
+    # (see the engine's WritePolicyCapable guard).
+    write_policy: Literal["overwrite", "fill_empty"] = "overwrite"
+    write_policy_overrides: dict[str, Literal["overwrite", "fill_empty"]] = Field(
+        default_factory=dict
+    )
     cursor_field: str | None = None  # required when mode=incremental
     # Incremental strategy (#755): "cursor" (default) filters server-side via
     # cursor_field/watermark, same as always. "diff" instead snapshots the
@@ -522,6 +536,37 @@ class SyncOptions(BaseModel):
         if self.replace_strategy == "swap" and self.mode != "replace":
             raise ValueError("replace_strategy='swap' requires mode='replace'.")
         return self
+
+    @model_validator(mode="after")
+    def _check_write_policy_mode(self) -> SyncOptions:
+        if self.uses_fill_empty and self.mode == "replace":
+            raise ValueError(
+                "sync.write_policy: fill_empty is not compatible with mode: replace — replace "
+                "rebuilds the table, so there is no existing value to keep."
+            )
+        return self
+
+    @property
+    def uses_fill_empty(self) -> bool:
+        """True when any column is written fill-only (the default or an override)."""
+        return (
+            self.write_policy == "fill_empty"
+            or "fill_empty" in self.write_policy_overrides.values()
+        )
+
+    def fill_empty_columns(self, columns: Iterable[str]) -> set[str]:
+        """The subset of ``columns`` written only when the destination value is empty."""
+        return {
+            column
+            for column in columns
+            if self.write_policy_overrides.get(column, self.write_policy) == "fill_empty"
+        }
+
+    def unseen_write_policy_overrides(self, seen_columns: Iterable[str]) -> list[str]:
+        """Override columns that no written record carried: almost certainly a typo, and
+        a typo on a ``fill_empty`` override would silently overwrite."""
+        seen = set(seen_columns)
+        return sorted(c for c in self.write_policy_overrides if c not in seen)
 
     @model_validator(mode="after")
     def _check_match_policy_mode(self) -> SyncOptions:

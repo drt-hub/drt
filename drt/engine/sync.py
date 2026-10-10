@@ -113,6 +113,24 @@ def _apply_watermark_lag(value: str, lag: str | int) -> str:
     return _stringify_cursor_value(lagged)
 
 
+def _check_write_policy_supported(sync_options: Any, destination: Any) -> None:
+    """Fail fast on ``fill_empty`` for a destination that cannot honour it (#1238)."""
+    from drt.destinations.base import WritePolicyCapable
+
+    if not sync_options.uses_fill_empty:
+        return
+    supported: frozenset[str] = frozenset()
+    if isinstance(destination, WritePolicyCapable):
+        supported = destination.supported_write_policies()
+    if "fill_empty" not in supported:
+        raise ValueError(
+            f"sync.write_policy: fill_empty is not supported by {type(destination).__name__}. "
+            "It writes a column only when the destination's value is empty, which this "
+            "destination cannot do; remove write_policy / write_policy_overrides, or use a "
+            "destination that supports it."
+        )
+
+
 def _check_match_policy_supported(
     match_policy: str, destination: Destination | StagedDestination
 ) -> None:
@@ -620,6 +638,7 @@ def _run_sync_body(
     # inside the engine boundary.
     _check_mode_supported(sync.sync.mode, destination)
     _check_match_policy_supported(sync.sync.match_policy, destination)
+    _check_write_policy_supported(sync.sync, destination)
     # SyncOptions can be reused across invocations. Reset the private
     # finalize-time signal before extraction, then flip it only when the
     # cooperative stop path actually truncates the source stream.

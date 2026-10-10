@@ -175,6 +175,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "kept_values": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "replace": {
           "minimum": 0,
           "type": "integer"

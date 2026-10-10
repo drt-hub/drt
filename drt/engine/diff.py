@@ -131,6 +131,9 @@ class DiffResult:
     # How many rows the delete pass looked at: the denominator for a delete
     # percentage (#1218). ``None`` when the strategy cannot report it.
     delete_baseline: int | None = None
+    # Values a ``write_policy: fill_empty`` run keeps because the destination already holds
+    # one (#1238): counted, never written, and left out of ``updated``.
+    kept_values: int = 0
 
     @staticmethod
     def changed_fields(
@@ -155,6 +158,16 @@ class DiffResult:
                 if col not in new:
                     changed[col] = (old[col], RESET_TO_DESTINATION_DEFAULT)
         return changed
+
+
+def _is_empty(value: Any) -> bool:
+    """Empty for ``write_policy: fill_empty``: NULL, ``''`` or only spaces.
+
+    Mirrors the SQL (``IS NULL OR btrim(col::text) = ''`` / ``TRIM(CAST(col AS CHAR)) = ''``):
+    spaces only, so a CHAR(n) column's padding is irrelevant and a tab or a newline is a
+    value. A non-text value (a number, ``False``) is never empty.
+    """
+    return value is None or (isinstance(value, str) and value.strip(" ") == "")
 
 
 def _writes_full_row(config: DestinationConfig, sync_options: SyncOptions) -> bool:
@@ -480,6 +493,21 @@ def compute_diff(
             ),
         )
 
+    unseen = sync_options.unseen_write_policy_overrides({c for r in records for c in r})
+    if unseen:
+        # Judged on every record, so unlike a per-batch write it cannot misfire on a column
+        # that is merely absent from one batch; a typo here would apply the default policy.
+        return DiffResult(
+            sample=list(records[:limit]),
+            total_source_rows=len(records),
+            truncated=len(records) > limit,
+            supported=False,
+            fallback_reason=(
+                f"sync.write_policy_overrides names column(s) {unseen} that the source does "
+                "not produce; check the spelling"
+            ),
+        )
+
     table = get_table_name(config)
 
     # Pre-compute the source key set. In non-replace modes this lets us fetch
@@ -554,17 +582,40 @@ def compute_diff(
     replaced: list[tuple[dict[str, Any], dict[str, Any]]] = []
     writes_full_row = _writes_full_row(config, sync_options)
 
+    kept_values = 0
+    # With fill_empty the writes are order-dependent when a key repeats in the source: the
+    # first row fills an empty column and the next row finds it taken. Track the destination
+    # as the writes would leave it so the diff (and the plan hashes) match the real run.
+    track_writes = sync_options.uses_fill_empty and not writes_full_row
     for record in records:
         key = tuple(record.get(c) for c in upsert_key)
         existing = dest_by_key.get(key)
         if existing is None:
             added.append(record)
-        elif DiffResult.changed_fields(existing, record, include_removed=writes_full_row):
-            if writes_full_row:
-                replaced.append((existing, record))
-            else:
-                updated.append((existing, record))
-        # else: row matches destination exactly — no entry
+            if track_writes:
+                dest_by_key[key] = record  # a later duplicate sees the inserted row
+            continue
+        changed = DiffResult.changed_fields(existing, record, include_removed=writes_full_row)
+        if not changed:
+            continue  # row matches destination exactly — no entry
+        if writes_full_row:
+            replaced.append((existing, record))
+            continue
+        # write_policy: fill_empty (#1238): a column the destination already holds is not
+        # written, so it is kept (and counted) instead of being reported as an update.
+        kept = {
+            column
+            for column in sync_options.fill_empty_columns(changed)
+            if not _is_empty(existing.get(column))
+        }
+        if kept:
+            kept_values += len(kept)
+            record = {**record, **{column: existing.get(column) for column in kept}}
+            if not DiffResult.changed_fields(existing, record):
+                continue  # every difference was a kept value: nothing is written
+        updated.append((existing, record))
+        if track_writes:
+            dest_by_key[key] = {**existing, **record}
 
     # Deleted is meaningful only when the engine would actually drop rows.
     # In replace mode, the destination table is rebuilt; rows that aren't
@@ -643,4 +694,5 @@ def compute_diff(
         delete_preview_unavailable_reason=delete_preview_unavailable_reason,
         writes_full_row=writes_full_row,
         delete_baseline=delete_baseline,
+        kept_values=kept_values,
     )
