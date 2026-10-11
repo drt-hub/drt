@@ -13,6 +13,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.base import WritePolicyCapable
+from drt.destinations.bigquery import BigQueryDestination
 from drt.destinations.databricks import DatabricksDestination
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
@@ -169,12 +170,17 @@ def test_sql_destinations_with_fill_empty_declare_the_capability() -> None:
         MySQLDestination(),
         SnowflakeDestination(),
         DatabricksDestination(),
+        BigQueryDestination(),
     ):
         assert isinstance(destination, WritePolicyCapable)
         assert destination.supported_write_policies() == frozenset({"overwrite", "fill_empty"})
+    assert BigQueryDestination.identifiers_case_insensitive is True
 
 
-@pytest.mark.parametrize("destination", [SnowflakeDestination(), DatabricksDestination()])
+@pytest.mark.parametrize(
+    "destination",
+    [SnowflakeDestination(), DatabricksDestination(), BigQueryDestination()],
+)
 def test_merge_destination_accepts_fill_empty_but_still_rejects_update_only(
     destination: Any,
 ) -> None:
@@ -530,7 +536,10 @@ def test_an_override_naming_a_column_the_source_does_not_produce_makes_the_plan_
     assert not fetch.called
 
 
-@pytest.mark.parametrize("config", [_snowflake_config(), _databricks_config()])
+@pytest.mark.parametrize(
+    "config",
+    [_snowflake_config(), _databricks_config()],
+)
 def test_diff_and_plan_fold_overrides_for_case_insensitive_destinations(config: Any) -> None:
     options = SyncOptions(write_policy_overrides={"INDUSTRY": "fill_empty"})
 

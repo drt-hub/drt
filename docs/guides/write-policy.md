@@ -54,6 +54,23 @@ without collapsing repeated keys. If multiple source rows in that batch match
 the same existing target row, Delta rejects the ambiguous update; keep model
 output unique per `upsert_key`.
 
+BigQuery also requires destination `mode: merge` for an ordinary upsert;
+`sync.mode: mirror` forces that MERGE path. BigQuery has no `typeof()` function,
+so drt reads the target table schema once and trims only scalar `STRING` columns.
+`BYTES`, `JSON`, `STRUCT` / `RECORD`, repeated fields, numeric, boolean,
+date/time, and `GEOGRAPHY` columns are empty only when SQL `NULL`. If the target
+schema is unavailable, every fill column is treated as NULL-only rather than
+risking an invalid `TRIM` on a non-STRING type. BigQuery's no-argument `TRIM`
+uses BigQuery's native whitespace definition, so a STRING containing only other
+whitespace can also count as empty there.
+
+BigQuery does not collapse repeated source keys. Rows with the same signature
+are loaded into one temp table and one `MERGE`; if multiple source rows match an
+existing target row, BigQuery rejects the ambiguous update. Rows separated into
+different sparse-signature runs execute as separate MERGEs, but model output
+should still be unique per `upsert_key`. This differs from diff/plan's generic
+first-writer-wins model for repeated keys.
+
 ## Behaviour
 
 - **New rows are inserted in full.** The policy only applies when the row
@@ -61,9 +78,9 @@ output unique per `upsert_key`.
 - **Key columns** are never updated, so the policy never applies to them.
 - Works with `match_policy: upsert` on every destination listed below, and with
   `update_only` on PostgreSQL and MySQL (a missing row is still skipped, never
-  created). Snowflake and Databricks do not implement `update_only`; their
-  existing engine guard refuses that policy before any I/O. `create_only` never
-  updates, so there is nothing to fill.
+  created). Snowflake, Databricks, and BigQuery do not implement `update_only`;
+  their existing engine guard refuses that policy before any I/O. `create_only`
+  never updates, so there is nothing to fill.
 - `mode: replace` is rejected: it rebuilds the table, so there is no existing
   value to keep.
 - A name in `write_policy_overrides` that is not a column of the destination
@@ -75,9 +92,9 @@ output unique per `upsert_key`.
   `drt run --dry-run --diff` also check the names against the columns the source
   produces and report the sync as unavailable, with the reason, when one is
   missing.
-- A key that repeats in the source behaves as the real writes do: the first row
-  fills an empty column, and a later row finds it taken. The diff and the plan model
-  that order too.
+- The diff and plan model repeated source keys in first-writer-wins order. Live
+  PostgreSQL/MySQL writes match that model; MERGE destinations can reject an
+  ambiguous same-batch match, as noted above for Databricks and BigQuery.
 
 ## Where it works
 
@@ -87,7 +104,8 @@ output unique per `upsert_key`.
 | MySQL | yes: in the `ON DUPLICATE KEY UPDATE` expression (and `UPDATE` for `update_only`) |
 | Snowflake | yes: in the VALUES-sourced `MERGE` update expression (including `mode: mirror` before its unchanged delete pass); requires the destination's `mode: merge` for ordinary upserts |
 | Databricks | yes: in the staging-sourced Delta `MERGE`, composed with sparse-row presence flags (including `mode: mirror` before its unchanged delete pass); requires the destination's `mode: merge` for ordinary upserts |
-| Others | refused up front with a clear message, never silently overwritten. BigQuery and HubSpot follow ([#1238](https://github.com/drt-hub/drt/issues/1238)). |
+| BigQuery | yes: in each typed-temp-table `MERGE`, with sparse runs preserved (including `mode: mirror` before its unchanged delete pass); requires the destination's `mode: merge` for ordinary upserts |
+| Others | refused up front with a clear message, never silently overwritten. HubSpot follows ([#1238](https://github.com/drt-hub/drt/issues/1238)). |
 
 The generated SQL for a fill column is, for Postgres (the target is aliased,
 because an unqualified column is ambiguous with `EXCLUDED`),
@@ -99,6 +117,9 @@ equivalent is
 Databricks uses
 `col = CASE WHEN target.col IS NULL OR ((typeof(target.col) LIKE 'string%' OR typeof(target.col) LIKE 'varchar%' OR typeof(target.col) LIKE 'char%') AND TRIM(CAST(target.col AS STRING)) = '') THEN <presence-aware source expression> ELSE target.col END`,
 so a sparse row that omitted the column still preserves the target value.
+BigQuery uses
+``col = CASE WHEN T.col IS NULL OR TRIM(T.col) = '' THEN S.col ELSE T.col END``
+for scalar `STRING` columns and omits the `TRIM` branch for every other type.
 
 ## Seeing what is kept
 

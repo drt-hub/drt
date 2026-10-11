@@ -105,9 +105,11 @@ def _mocked_bq_modules(
     }
 
 
-def _schema_field(name: str) -> MagicMock:
+def _schema_field(name: str, field_type: str = "STRING", mode: str = "NULLABLE") -> MagicMock:
     field = MagicMock()
     field.name = name
+    field.field_type = field_type
+    field.mode = mode
     return field
 
 
@@ -331,6 +333,202 @@ class TestBigQueryDestinationLoad:
                 autodetect=False,
             ),
         ]
+
+    def test_merge_fill_empty_uses_target_types_and_case_folded_override(self) -> None:
+        client = _fake_client()
+        fields = {
+            "id": _schema_field("id", "INT64"),
+            "industry": _schema_field("industry", "STRING"),
+            "score": _schema_field("score", "INT64"),
+        }
+        client.get_table.return_value.schema = list(fields.values())
+        modules = _mocked_bq_modules(client)
+        records = [{"id": 1, "industry": "Software", "score": 99}]
+
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(
+                records,
+                _config(mode="merge", upsert_key=["id"]),
+                _options(
+                    write_policy="fill_empty",
+                    write_policy_overrides={"SCORE": "overwrite"},
+                ),
+            )
+
+        assert result.success == 1
+        bq = modules["google.cloud.bigquery"]
+        bq.LoadJobConfig.assert_called_once_with(
+            write_disposition=bq.WriteDisposition.WRITE_TRUNCATE,
+            schema=[fields["id"], fields["industry"], fields["score"]],
+            autodetect=False,
+        )
+        merge = next(sql for sql in _sqls(client) if sql.startswith("MERGE"))
+        assert (
+            "`industry` = CASE WHEN T.`industry` IS NULL OR TRIM(T.`industry`) = '' "
+            "THEN S.`industry` ELSE T.`industry` END"
+        ) in merge
+        assert "`score` = S.`score`" in merge
+        assert merge.count("CASE WHEN") == 1
+
+    def test_merge_fill_empty_sparse_run_omits_the_absent_column(self) -> None:
+        client = _fake_client()
+        client.get_table.return_value.schema = [
+            _schema_field("id", "INT64"),
+            _schema_field("industry", "STRING"),
+            _schema_field("score", "INT64"),
+        ]
+        modules = _mocked_bq_modules(client)
+        records: list[dict[str, Any]] = [
+            {"id": 1, "industry": "Software", "score": 10},
+            {"id": 2, "score": 20},
+        ]
+
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(
+                records,
+                _config(mode="merge", upsert_key=["id"]),
+                _options(write_policy="fill_empty"),
+            )
+
+        assert result.success == 2
+        merges = [sql for sql in _sqls(client) if sql.startswith("MERGE")]
+        assert len(merges) == 2
+        assert "TRIM(T.`industry`)" in merges[0]
+        assert "`industry`" not in merges[1]
+        assert "`score` = CASE WHEN T.`score` IS NULL" in merges[1]
+
+    def test_merge_fill_empty_non_string_types_are_null_only(self) -> None:
+        client = _fake_client()
+        client.get_table.return_value.schema = [
+            _schema_field("id", "INT64"),
+            _schema_field("name", "STRING"),
+            _schema_field("payload", "BYTES"),
+            _schema_field("document", "JSON"),
+            _schema_field("details", "RECORD"),
+            _schema_field("tags", "STRING", "REPEATED"),
+        ]
+        modules = _mocked_bq_modules(client)
+        records = [
+            {
+                "id": 1,
+                "name": "new",
+                "payload": "c291cmNl",
+                "document": {"value": "new"},
+                "details": {"value": "new"},
+                "tags": ["new"],
+            }
+        ]
+
+        with patch.dict("sys.modules", modules):
+            BigQueryDestination().load(
+                records,
+                _config(mode="merge", upsert_key=["id"]),
+                _options(write_policy="fill_empty"),
+            )
+
+        merge = next(sql for sql in _sqls(client) if sql.startswith("MERGE"))
+        assert "TRIM(T.`name`) = ''" in merge
+        for column in ("payload", "document", "details", "tags"):
+            assert (
+                f"`{column}` = CASE WHEN T.`{column}` IS NULL "
+                f"THEN S.`{column}` ELSE T.`{column}` END"
+            ) in merge
+            assert f"TRIM(T.`{column}`)" not in merge
+
+    def test_merge_fill_empty_schema_unavailable_is_null_only(self) -> None:
+        client = _fake_client()
+        client.get_table.side_effect = _NotFound("absent")
+        modules = _mocked_bq_modules(client)
+
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(
+                [{"id": 1, "industry": "Software"}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(write_policy="fill_empty"),
+            )
+
+        assert result.success == 1
+        merge = next(sql for sql in _sqls(client) if sql.startswith("MERGE"))
+        assert (
+            "`industry` = CASE WHEN T.`industry` IS NULL THEN S.`industry` ELSE T.`industry` END"
+        ) in merge
+        assert "TRIM(" not in merge
+
+    def test_default_merge_sql_is_byte_identical_to_sparse_merge(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+
+        with patch.dict("sys.modules", modules):
+            BigQueryDestination().load(
+                [{"id": 1, "score": 10, "note": "set"}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(),
+            )
+
+        merge = next(sql for sql in _sqls(client) if sql.startswith("MERGE"))
+        assert merge == (
+            "MERGE `my-proj.analytics.user_scores` T "
+            "USING `my-proj.analytics.user_scores_drt_tmp_a1b2c3d4` S "
+            "ON T.`id` = S.`id` "
+            "WHEN MATCHED THEN UPDATE SET `score` = S.`score`, `note` = S.`note` "
+            "WHEN NOT MATCHED THEN INSERT (`id`, `score`, `note`) "
+            "VALUES (S.`id`, S.`score`, S.`note`)"
+        )
+
+    def test_write_policy_override_typo_is_rejected_before_any_write(self) -> None:
+        client = _fake_client()
+        client.get_table.return_value.schema = [
+            _schema_field("ID", "INT64"),
+            _schema_field("INDUSTRY", "STRING"),
+        ]
+        modules = _mocked_bq_modules(client)
+
+        with (
+            patch.dict("sys.modules", modules),
+            pytest.raises(
+                ValueError,
+                match=r"\['industy'\].*not columns of the destination",
+            ),
+        ):
+            BigQueryDestination().load(
+                [{"id": 1, "industry": "Software"}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(write_policy_overrides={"industy": "fill_empty"}),
+            )
+
+        client.load_table_from_json.assert_not_called()
+        client.query.assert_not_called()
+        client.delete_table.assert_not_called()
+
+    def test_fill_empty_is_refused_in_insert_mode_before_client(self) -> None:
+        with pytest.raises(ValueError, match="needs destination.mode: merge"):
+            BigQueryDestination().load(
+                [{"id": 1, "industry": "Software"}],
+                _config(mode="insert"),
+                _options(write_policy="fill_empty"),
+            )
+
+    def test_mirror_fill_empty_merges_before_unchanged_delete_pass(self) -> None:
+        client = _fake_client()
+        client.get_table.return_value.schema = [
+            _schema_field("id", "INT64"),
+            _schema_field("industry", "STRING"),
+        ]
+        modules = _mocked_bq_modules(client)
+        destination = BigQueryDestination()
+        config = _config(mode="insert", upsert_key=["id"])
+        options = _options(mode="mirror", write_policy="fill_empty")
+
+        with patch.dict("sys.modules", modules):
+            result = destination.load([{"id": 1, "industry": "Software"}], config, options)
+            finalized = destination.finalize_sync(config, options)
+
+        assert result.success == 1 and finalized is not None
+        sqls = _sqls(client)
+        merge = next(sql for sql in sqls if sql.startswith("MERGE"))
+        delete = next(sql for sql in sqls if sql.startswith("DELETE FROM"))
+        assert "TRIM(T.`industry`) = ''" in merge
+        assert "CASE WHEN" not in delete
 
     def test_sparse_merge_writes_later_field_and_distinguishes_none_from_omitted(self) -> None:
         client = _fake_client()

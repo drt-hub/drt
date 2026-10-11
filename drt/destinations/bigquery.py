@@ -63,6 +63,8 @@ _TMP_SUFFIX = "_drt_tmp"
 class BigQueryDestination:
     """Write records into BigQuery tables."""
 
+    identifiers_case_insensitive = True
+
     def __init__(self) -> None:
         self._replace_started = False
         self._swap_shadow_created = False
@@ -190,8 +192,36 @@ class BigQueryDestination:
         mirror_keys_staged = False
 
         try:
+            target_schema = self._get_target_schema(client, table_id)
+        except Exception as e:
+            if mirror and not mirror_keys_staged:
+                # Without a complete source-key staging set, the final
+                # anti-join could delete rows this run actually observed.
+                self._mirror_aborted = True
+            result.failed += len(records)
+            result.row_errors.extend(
+                RowError(
+                    batch_index=i,
+                    record_preview=str(record)[:200],
+                    http_status=None,
+                    error_message=str(e),
+                )
+                for i, record in enumerate(records)
+            )
+            client.delete_table(tmp_table_id, not_found_ok=True)
+            if sync_options.on_error == "fail":
+                if mirror:
+                    self._cleanup_mirror_staging(client)
+                raise
+            return result
+
+        # A typo in an override must fail before staging or MERGE. BigQuery
+        # identifiers are case-insensitive, so validation follows the same
+        # folding used to resolve the policy below.
+        self._validate_write_policy_overrides(sync_options, target_schema)
+
+        try:
             try:
-                target_schema = self._get_target_schema(client, table_id)
                 if mirror:
                     # Mirror deletion needs the complete source-key set even
                     # though the upserts below are split by sparse signature.
@@ -243,12 +273,28 @@ class BigQueryDestination:
                         [f"T.{self._quote_column(k)} = S.{self._quote_column(k)}" for k in keys]
                     )
                     update_cols = [c for c in merge_columns if c not in keys]
-                    update_set = ", ".join(
-                        [
-                            f"{self._quote_column(c)} = S.{self._quote_column(c)}"
-                            for c in update_cols
-                        ]
+                    fill_cols = sync_options.fill_empty_columns(
+                        update_cols,
+                        case_insensitive=self.identifiers_case_insensitive,
                     )
+                    string_cols = self._target_string_columns(target_schema)
+
+                    def update_assignment(column: str) -> str:
+                        quoted = self._quote_column(column)
+                        if column not in fill_cols:
+                            # Keep default-policy SQL byte-identical to the
+                            # sparse MERGE introduced by #1134/#1137.
+                            return f"{quoted} = S.{quoted}"
+                        target = f"T.{quoted}"
+                        empty = f"{target} IS NULL"
+                        if column.lower() in string_cols:
+                            # BigQuery has no typeof(). TRIM is legal only for
+                            # STRING, so schema decides whether blank text is
+                            # empty; every other type is NULL-only.
+                            empty += f" OR TRIM({target}) = ''"
+                        return f"{quoted} = CASE WHEN {empty} THEN S.{quoted} ELSE {target} END"
+
+                    update_set = ", ".join(update_assignment(column) for column in update_cols)
                     insert_cols = ", ".join(self._quote_column(c) for c in merge_columns)
                     insert_vals = ", ".join([f"S.{self._quote_column(c)}" for c in merge_columns])
                     matched = f"WHEN MATCHED THEN UPDATE SET {update_set} " if update_cols else ""
@@ -675,6 +721,16 @@ class BigQueryDestination:
                 "replace_strategy: truncate to replace that partition."
             )
 
+        if (
+            sync_options.mode != "mirror"
+            and config.mode == "insert"
+            and sync_options.uses_fill_empty
+        ):
+            raise ValueError(
+                "sync.write_policy: fill_empty needs destination.mode: merge (or sync.mode: "
+                "mirror); mode: insert appends rows and would ignore the policy."
+            )
+
     def _validate_mirror(
         self,
         records: list[dict[str, Any]],
@@ -747,6 +803,10 @@ class BigQueryDestination:
         """Declare the advanced sync modes implemented by BigQuery (#1055)."""
         return frozenset({"replace", "mirror"})
 
+    def supported_write_policies(self) -> frozenset[str]:
+        """BigQuery honours ``fill_empty`` in the MERGE update clause (#1238)."""
+        return frozenset({"overwrite", "fill_empty"})
+
     def _labels(self, query_tags: dict[str, str] | None) -> dict[str, str] | None:
         """BigQuery-safe label dict from the raw tag payload (#768), or
         ``None`` when tagging is off — see :func:`normalize_bigquery_label`
@@ -793,6 +853,35 @@ class BigQueryDestination:
             # Preserve load_table_from_json's existing autodetect behavior for
             # a target that does not exist yet.
             return None
+
+    @staticmethod
+    def _validate_write_policy_overrides(
+        sync_options: SyncOptions,
+        target_schema: list[Any] | None,
+    ) -> None:
+        """Require override names to exist in the target schema (#1238)."""
+        if target_schema is None or not sync_options.write_policy_overrides:
+            return
+        known = {str(field.name).lower() for field in target_schema}
+        unknown = sorted(
+            column for column in sync_options.write_policy_overrides if column.lower() not in known
+        )
+        if unknown:
+            raise ValueError(
+                f"sync.write_policy_overrides names column(s) {unknown} that are not columns "
+                "of the destination table; check the spelling."
+            )
+
+    @staticmethod
+    def _target_string_columns(target_schema: list[Any] | None) -> set[str]:
+        """Case-folded scalar STRING columns; unavailable schemas are conservative."""
+        if target_schema is None:
+            return set()
+        return {
+            str(field.name).lower()
+            for field in target_schema
+            if str(field.field_type).upper() == "STRING" and str(field.mode).upper() != "REPEATED"
+        }
 
     @staticmethod
     def _schema_for_columns(
