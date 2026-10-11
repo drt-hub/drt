@@ -29,16 +29,18 @@ that must always track the warehouse, or `overwrite` by default with a
 | text (`TEXT`, `VARCHAR`, `CHAR(n)`, ...) | `NULL`, `''`, or **only spaces** |
 | any other type (integer, boolean, date, ...) | `NULL` only |
 
-A stored `0` or `false` is a **value**, not empty, so it is kept. Spaces-only
-counts as empty because a `CHAR(n)` column pads with spaces and the database cannot
-tell padding from content; a tab or a newline is a value. (The comparison casts the
-column to text and trims spaces for the check only; the column's own type is never
-changed. The diff reads the destination value and applies the same rule, so
-`--dry-run --diff` and `drt plan` agree with the write.) Binary columns (`bytea`,
-`BLOB`, Snowflake or Databricks `BINARY`) are not meaningful here: leave them on
-`overwrite`.
-On Snowflake, `VARIANT` / `OBJECT` / `ARRAY` columns count as empty only when SQL
-`NULL` (a stored JSON `""` is a value), and the destination must use
+A stored `0`, `false`, empty binary value, or non-NULL semi-structured value is a
+**value**, not empty, so it is kept. Spaces-only counts as empty for text because a
+`CHAR(n)` column pads with spaces and the database cannot tell padding from content;
+a tab or a newline is a value. The write tests the column's own database type before
+trimming, and the diff reads the destination value and applies the same rule, so
+`--dry-run --diff` and `drt plan` agree with the write. Every non-text column —
+binary, numeric, boolean, date/time, array, map, struct, object, or variant — is
+empty only when SQL `NULL`.
+
+On Snowflake, `VARIANT` / `OBJECT` / `ARRAY` columns therefore count as empty only
+when SQL `NULL` (a stored JSON `""` is a value; this relies on schema introspection,
+which is on by default), and the destination must use
 `mode: merge` (or `sync.mode: mirror`): `mode: insert` only appends, so
 `fill_empty` is refused there rather than ignored. Repeated source keys in one
 Snowflake batch are not collapsed (as with `overwrite`): keep the model output
@@ -95,7 +97,7 @@ and for MySQL
 equivalent is
 `col = CASE WHEN target.col IS NULL OR TRIM(target.col::STRING) = '' THEN source.col ELSE target.col END`.
 Databricks uses
-`col = CASE WHEN target.col IS NULL OR TRIM(CAST(target.col AS STRING)) = '' THEN <presence-aware source expression> ELSE target.col END`,
+`col = CASE WHEN target.col IS NULL OR ((typeof(target.col) LIKE 'string%' OR typeof(target.col) LIKE 'varchar%' OR typeof(target.col) LIKE 'char%') AND TRIM(CAST(target.col AS STRING)) = '') THEN <presence-aware source expression> ELSE target.col END`,
 so a sparse row that omitted the column still preserves the target value.
 
 ## Seeing what is kept

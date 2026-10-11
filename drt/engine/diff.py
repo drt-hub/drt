@@ -493,7 +493,17 @@ def compute_diff(
             ),
         )
 
-    unseen = sync_options.unseen_write_policy_overrides({c for r in records for c in r})
+    # Identifier folding is a destination behavior, not a config-model
+    # behavior. Resolve the same registered implementation the engine writes
+    # through so override validation and application cannot diverge from the
+    # live path (Snowflake / Databricks fold unquoted identifiers; PostgreSQL
+    # quoted identifiers remain case-sensitive).
+    from drt.connectors import get_destination
+
+    case_insensitive = bool(getattr(get_destination(config), "identifiers_case_insensitive", False))
+    unseen = sync_options.unseen_write_policy_overrides(
+        {c for r in records for c in r}, case_insensitive=case_insensitive
+    )
     if unseen:
         # Judged on every record, so unlike a per-batch write it cannot misfire on a column
         # that is merely absent from one batch; a typo here would apply the default policy.
@@ -605,7 +615,9 @@ def compute_diff(
         # written, so it is kept (and counted) instead of being reported as an update.
         kept = {
             column
-            for column in sync_options.fill_empty_columns(changed)
+            for column in sync_options.fill_empty_columns(
+                changed, case_insensitive=case_insensitive
+            )
             if not _is_empty(existing.get(column))
         }
         if kept:

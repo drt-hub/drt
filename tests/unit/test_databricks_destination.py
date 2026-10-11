@@ -387,7 +387,10 @@ class TestDatabricksDestinationLoad:
         merge_sql = next(sql for sql in sqls if sql.startswith("MERGE INTO"))
         assert (
             "industry = CASE WHEN target.industry IS NULL OR "
-            "TRIM(CAST(target.industry AS STRING)) = '' THEN "
+            "((typeof(target.industry) LIKE 'string%' OR "
+            "typeof(target.industry) LIKE 'varchar%' OR "
+            "typeof(target.industry) LIKE 'char%') AND "
+            "TRIM(CAST(target.industry AS STRING)) = '') THEN "
             "CASE WHEN source.__drt_has_industry THEN source.industry "
             "ELSE target.industry END ELSE target.industry END"
         ) in merge_sql
@@ -492,13 +495,13 @@ class TestDatabricksDestinationLoad:
             )
 
         merge_sql = next(sql for sql in _sqls(conn._cur) if sql.startswith("MERGE INTO"))
-        assert "industry = CASE WHEN target.industry IS NULL OR TRIM(CAST(" in merge_sql
+        assert "industry = CASE WHEN target.industry IS NULL OR ((typeof(" in merge_sql
         assert (
             "score = CASE WHEN source.__drt_has_score THEN source.score ELSE target.score END"
             in merge_sql
         )
 
-    def test_semi_structured_fill_column_is_null_only(
+    def test_fill_empty_uses_the_target_sql_type_even_with_schema_introspection(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _set_creds(monkeypatch)
@@ -519,9 +522,30 @@ class TestDatabricksDestinationLoad:
             )
 
         merge_sql = next(sql for sql in _sqls(conn._cur) if sql.startswith("MERGE INTO"))
-        assert "tags = CASE WHEN target.tags IS NULL THEN" in merge_sql
-        assert "CAST(target.tags AS STRING)" not in merge_sql
-        assert "TRIM(CAST(target.name AS STRING)) = ''" in merge_sql
+        assert "tags = CASE WHEN target.tags IS NULL OR ((typeof(target.tags)" in merge_sql
+        assert "TRIM(CAST(target.tags AS STRING)) = '')" in merge_sql
+        assert "name = CASE WHEN target.name IS NULL OR ((typeof(target.name)" in merge_sql
+
+    def test_fill_empty_uses_the_target_sql_type_without_schema_introspection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []
+        destination = DatabricksDestination()
+        monkeypatch.setattr(destination, "_resolve_schema", lambda _config: None)
+
+        with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+            destination.load(
+                [{"id": 1, "binary_value": b"", "variant_value": "new"}],
+                _config(mode="merge", upsert_key=["id"], introspect_schema=False),
+                _options(write_policy="fill_empty"),
+            )
+
+        merge_sql = next(sql for sql in _sqls(conn._cur) if sql.startswith("MERGE INTO"))
+        for column in ("binary_value", "variant_value"):
+            assert f"typeof(target.{column}) LIKE 'string%'" in merge_sql
+            assert f"TRIM(CAST(target.{column} AS STRING)) = ''" in merge_sql
 
     def test_mirror_fill_empty_merges_before_unchanged_delete_pass(
         self, monkeypatch: pytest.MonkeyPatch
@@ -543,7 +567,7 @@ class TestDatabricksDestinationLoad:
             sql for sql in sqls if sql.startswith("MERGE INTO") and "THEN DELETE" not in sql
         )
         delete_sql = next(sql for sql in sqls if sql.startswith("DELETE FROM"))
-        assert "TRIM(CAST(target.industry AS STRING)) = ''" in merge_sql
+        assert "typeof(target.industry) LIKE 'string%'" in merge_sql
         assert "CASE WHEN" not in delete_sql
 
     def test_heterogeneous_merge_uses_literal_flags_and_target_defaults(

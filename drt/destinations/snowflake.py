@@ -175,6 +175,8 @@ def _build_merge_sql(
 class SnowflakeDestination(BaseSqlDestination):
     """Write records into Snowflake tables."""
 
+    identifiers_case_insensitive = True
+
     def __init__(self) -> None:
         super().__init__()
         # Snowflake-only first-run fall-through: target table doesn't exist
@@ -405,14 +407,11 @@ class SnowflakeDestination(BaseSqlDestination):
                 update_cols = [c for c in run_columns if c not in upsert_key]
                 # write_policy: fill_empty (#1238): these columns keep a
                 # non-empty destination value in both bulk and fallback MERGEs.
-                # Snowflake folds unquoted names, so an override spelled in another
-                # case still names the column (validation above is case-insensitive).
-                overrides = {k.lower(): v for k, v in sync_options.write_policy_overrides.items()}
-                fill_cols = {
-                    c
-                    for c in update_cols
-                    if overrides.get(c.lower(), sync_options.write_policy) == "fill_empty"
-                }
+                # Snowflake folds unquoted names, so use the shared policy
+                # resolver that diff/plan also calls.
+                fill_cols = sync_options.fill_empty_columns(
+                    update_cols, case_insensitive=self.identifiers_case_insensitive
+                )
                 folded = {str(k).lower(): v for k, v in (schema_map or {}).items()}
                 null_only_cols = {
                     c for c in fill_cols if folded.get(c.lower(), "scalar") != "scalar"

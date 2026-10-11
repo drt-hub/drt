@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from drt.config.models import SyncOptions
+from drt.config.models import (
+    DatabricksDestinationConfig,
+    SnowflakeDestinationConfig,
+    SyncOptions,
+)
 from drt.destinations.base import WritePolicyCapable
 from drt.destinations.databricks import DatabricksDestination
 from drt.destinations.mysql import MySQLDestination
@@ -68,6 +72,15 @@ def test_unseen_overrides_are_reported() -> None:
 
     assert options.unseen_write_policy_overrides(["id", "industry"]) == ["tpyo"]
     assert options.unseen_write_policy_overrides(["industry", "tpyo"]) == []
+
+
+def test_policy_helpers_can_fold_destination_identifiers() -> None:
+    options = SyncOptions(write_policy_overrides={"INDUSTRY": "fill_empty"})
+
+    assert options.fill_empty_columns(["industry"], case_insensitive=True) == {"industry"}
+    assert options.unseen_write_policy_overrides(["industry"], case_insensitive=True) == []
+    assert options.fill_empty_columns(["industry"]) == set()
+    assert options.unseen_write_policy_overrides(["industry"]) == ["INDUSTRY"]
 
 
 # --- SQL ------------------------------------------------------------------
@@ -206,6 +219,35 @@ def _pg_config() -> Any:
         user="u",
         password="p",
         table="contacts",
+        upsert_key=["id"],
+    )
+
+
+def _snowflake_config() -> SnowflakeDestinationConfig:
+    return SnowflakeDestinationConfig(
+        type="snowflake",
+        account_env="SF_ACCOUNT",
+        user_env="SF_USER",
+        password_env="SF_PASSWORD",
+        database="ANALYTICS",
+        schema="PUBLIC",
+        table="CONTACTS",
+        warehouse="COMPUTE_WH",
+        mode="merge",
+        upsert_key=["id"],
+    )
+
+
+def _databricks_config() -> DatabricksDestinationConfig:
+    return DatabricksDestinationConfig(
+        type="databricks",
+        host_env="DATABRICKS_HOST",
+        http_path_env="DATABRICKS_HTTP_PATH",
+        token_env="DATABRICKS_TOKEN",
+        catalog="main",
+        schema="default",
+        table="contacts",
+        mode="merge",
         upsert_key=["id"],
     )
 
@@ -485,6 +527,35 @@ def test_an_override_naming_a_column_the_source_does_not_produce_makes_the_plan_
     assert "industy" in (result.fallback_reason or "")
     plan = build_plan(result, **_BASE)
     assert plan.available is False and "industy" in (plan.unavailable_reason or "")
+    assert not fetch.called
+
+
+@pytest.mark.parametrize("config", [_snowflake_config(), _databricks_config()])
+def test_diff_and_plan_fold_overrides_for_case_insensitive_destinations(config: Any) -> None:
+    options = SyncOptions(write_policy_overrides={"INDUSTRY": "fill_empty"})
+
+    with patch("drt.engine.diff.fetch_rows_by_keys") as fetch:
+        fetch.return_value = [{"id": 1, "industry": "Retail"}]
+        result = compute_diff([{"id": 1, "industry": "Software"}], config, options, limit=20)
+
+    assert result.supported is True
+    assert result.kept_values == 1
+    assert result.updated == []
+    plan = build_plan(result, **_BASE)
+    assert plan.available is True
+    assert plan.to_dict()["summary"]["kept_values"] == 1
+
+
+def test_diff_and_plan_keep_postgres_override_names_case_sensitive() -> None:
+    options = SyncOptions(write_policy_overrides={"INDUSTRY": "fill_empty"})
+
+    with patch("drt.engine.diff.fetch_rows_by_keys") as fetch:
+        result = compute_diff([{"id": 1, "industry": "Software"}], _pg_config(), options, limit=20)
+
+    assert result.supported is False
+    assert "INDUSTRY" in (result.fallback_reason or "")
+    plan = build_plan(result, **_BASE)
+    assert plan.available is False
     assert not fetch.called
 
 

@@ -554,19 +554,37 @@ class SyncOptions(BaseModel):
             or "fill_empty" in self.write_policy_overrides.values()
         )
 
-    def fill_empty_columns(self, columns: Iterable[str]) -> set[str]:
-        """The subset of ``columns`` written only when the destination value is empty."""
+    def fill_empty_columns(
+        self, columns: Iterable[str], *, case_insensitive: bool = False
+    ) -> set[str]:
+        """The subset of ``columns`` written only when the destination value is empty.
+
+        ``case_insensitive`` follows the destination's identifier semantics so
+        live writes and diff/plan resolve override names the same way.
+        """
+        overrides = (
+            {name.lower(): policy for name, policy in self.write_policy_overrides.items()}
+            if case_insensitive
+            else self.write_policy_overrides
+        )
         return {
             column
             for column in columns
-            if self.write_policy_overrides.get(column, self.write_policy) == "fill_empty"
+            if overrides.get(column.lower() if case_insensitive else column, self.write_policy)
+            == "fill_empty"
         }
 
-    def unseen_write_policy_overrides(self, seen_columns: Iterable[str]) -> list[str]:
+    def unseen_write_policy_overrides(
+        self, seen_columns: Iterable[str], *, case_insensitive: bool = False
+    ) -> list[str]:
         """Override columns that no written record carried: almost certainly a typo, and
         a typo on a ``fill_empty`` override would silently overwrite."""
-        seen = set(seen_columns)
-        return sorted(c for c in self.write_policy_overrides if c not in seen)
+        seen = {column.lower() if case_insensitive else column for column in seen_columns}
+        return sorted(
+            column
+            for column in self.write_policy_overrides
+            if (column.lower() if case_insensitive else column) not in seen
+        )
 
     @model_validator(mode="after")
     def _check_match_policy_mode(self) -> SyncOptions:

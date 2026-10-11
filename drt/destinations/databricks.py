@@ -195,6 +195,8 @@ def _rows_per_chunk(n_cols: int) -> int:
 class DatabricksDestination(BaseSqlDestination):
     """Write records into Databricks Delta Lake tables."""
 
+    identifiers_case_insensitive = True
+
     def __init__(self) -> None:
         super().__init__()
         # Databricks-only first-run fall-through: target table doesn't exist
@@ -533,24 +535,11 @@ class DatabricksDestination(BaseSqlDestination):
 
             key_clause = " AND ".join([f"target.{k} = source.{k}" for k in config.upsert_key])
             update_cols = [c for c in columns if c not in config.upsert_key]
-            # write_policy: fill_empty (#1238): fold override names exactly as
-            # destination-column validation does. Delta identifiers are
-            # case-insensitive, so an override in another case still names the
-            # payload column. Semi-structured columns are empty only when SQL
-            # NULL; casting their JSON form to STRING would make a stored JSON
-            # empty string look like an empty destination value.
-            overrides = {k.lower(): v for k, v in sync_options.write_policy_overrides.items()}
-            fill_cols = {
-                column
-                for column in update_cols
-                if overrides.get(column.lower(), sync_options.write_policy) == "fill_empty"
-            }
-            folded_categories = {str(k).lower(): v for k, v in (category_map or {}).items()}
-            null_only_cols = {
-                column
-                for column in fill_cols
-                if folded_categories.get(column.lower(), "scalar") != "scalar"
-            }
+            # Delta identifiers are case-insensitive, so use the shared policy
+            # resolver that diff/plan also calls.
+            fill_cols = sync_options.fill_empty_columns(
+                update_cols, case_insensitive=self.identifiers_case_insensitive
+            )
             target_defaults = self._target_column_defaults(cur, config)
             # Reserve all payload names as well as every target name. A target
             # may already have a legitimate user column called
@@ -594,12 +583,16 @@ class DatabricksDestination(BaseSqlDestination):
                 if column not in fill_cols:
                     # Keep the default-policy SQL byte-identical to #1137.
                     return f"{column} = {sparse_source}"
-                if column in null_only_cols:
-                    empty_condition = f"target.{column} IS NULL"
-                else:
-                    empty_condition = (
-                        f"target.{column} IS NULL OR TRIM(CAST(target.{column} AS STRING)) = ''"
-                    )
+                # Decide text-emptiness from the target expression's own SQL
+                # type, independent of optional schema introspection. Every
+                # non-text value (including BINARY and semi-structured values)
+                # is empty only when SQL NULL.
+                target = f"target.{column}"
+                empty_condition = (
+                    f"{target} IS NULL OR ((typeof({target}) LIKE 'string%' OR "
+                    f"typeof({target}) LIKE 'varchar%' OR typeof({target}) LIKE 'char%') "
+                    f"AND TRIM(CAST({target} AS STRING)) = '')"
+                )
                 return (
                     f"{column} = CASE WHEN {empty_condition} "
                     f"THEN {sparse_source} ELSE target.{column} END"

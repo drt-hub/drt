@@ -68,7 +68,11 @@ def test_databricks_write_policy_fill_empty_merge_semantics() -> None:
     records = [
         {
             "id": i,
-            "fill_value": f"source-{i}",
+            "string_value": f"source-{i}",
+            "varchar_value": f"source-{i}",
+            "char_value": f"source-{i}",
+            "binary_value": f"source-{i}".encode(),
+            "struct_value": {"value": f"source-{i}"},
             "overwrite_value": f"new-{i}",
             "numeric_value": 99,
         }
@@ -79,32 +83,55 @@ def test_databricks_write_policy_fill_empty_merge_semantics() -> None:
     records.append(
         {
             "id": 6,
+            "varchar_value": "source-6",
+            "char_value": "source-6",
+            "binary_value": b"source-6",
+            "struct_value": {"value": "source-6"},
             "overwrite_value": "new-6",
             "numeric_value": 99,
         }
     )
 
-    conn = _connect(creds)
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"CREATE TABLE {fqn} ("
-                "id INT, fill_value STRING, overwrite_value STRING, numeric_value INT) "
-                "USING DELTA"
-            )
-            cur.execute(
-                f"INSERT INTO {fqn} VALUES "
-                "(1, NULL, 'old-1', NULL), "
-                "(2, '', 'old-2', 2), "
-                "(3, '   ', 'old-3', 3), "
-                "(4, 'existing', 'old-4', 4), "
-                "(5, 'zero-row', 'old-5', 0), "
-                "(6, 'sparse-existing', 'old-6', 6)"
-            )
-    finally:
-        conn.close()
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE TABLE {fqn} ("
+                    "id INT, string_value STRING, varchar_value VARCHAR(20), "
+                    "char_value CHAR(20), binary_value BINARY, "
+                    "struct_value STRUCT<value: STRING>, overwrite_value STRING, "
+                    "numeric_value INT) USING DELTA"
+                )
+                cur.execute(
+                    f"INSERT INTO {fqn} VALUES "
+                    "(1, NULL, NULL, NULL, CAST('' AS BINARY), NULL, 'old-1', NULL), "
+                    "(2, '', '', '', CAST(' ' AS BINARY), named_struct('value', ''), "
+                    "'old-2', 2), "
+                    "(3, '   ', '   ', '   ', NULL, named_struct('value', '   '), "
+                    "'old-3', 3), "
+                    "(4, 'existing', 'existing', 'existing', CAST('old-4' AS BINARY), "
+                    "named_struct('value', 'existing'), 'old-4', 4), "
+                    "(5, 'zero-row', 'existing-5', 'existing-5', "
+                    "CAST('old-5' AS BINARY), named_struct('value', 'existing-5'), "
+                    "'old-5', 0), "
+                    "(6, 'sparse-existing', 'existing-6', 'existing-6', "
+                    "CAST('old-6' AS BINARY), named_struct('value', 'existing-6'), "
+                    "'old-6', 6)"
+                )
+                cur.execute(
+                    f"SELECT typeof(string_value), typeof(varchar_value), "
+                    f"typeof(char_value) FROM {fqn} LIMIT 1"
+                )
+                type_names = tuple(str(value).lower() for value in cur.fetchone())
+        finally:
+            conn.close()
 
-    try:
+        # Pin the typeof() spellings that the MERGE predicate recognizes.
+        assert type_names[0].startswith("string")
+        assert type_names[1].startswith(("string", "varchar"))
+        assert type_names[2].startswith(("string", "char"))
+
         result = DatabricksDestination().load(records, config, options)
         assert result.success == 6 and result.failed == 0
 
@@ -112,19 +139,60 @@ def test_databricks_write_policy_fill_empty_merge_semantics() -> None:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT id, fill_value, overwrite_value, numeric_value FROM {fqn} ORDER BY id"
+                    f"SELECT id, string_value, varchar_value, rtrim(char_value), "
+                    f"hex(binary_value), struct_value.value, overwrite_value, "
+                    f"numeric_value FROM {fqn} ORDER BY id"
                 )
                 rows = cur.fetchall()
         finally:
             conn.close()
 
         assert rows == [
-            (1, "source-1", "new-1", 99),  # NULL text and number are filled
-            (2, "source-2", "new-2", 2),  # empty string is filled
-            (3, "source-3", "new-3", 3),  # spaces-only text is filled
-            (4, "existing", "new-4", 4),  # existing values are kept
-            (5, "zero-row", "new-5", 0),  # numeric zero is a value, not empty
-            (6, "sparse-existing", "new-6", 6),  # omitted fill column stays untouched
+            # NULL text, struct, and number fill; empty binary remains a value.
+            (1, "source-1", "source-1", "source-1", "", "source-1", "new-1", 99),
+            # Empty/space-only text fills; space byte and STRUCT empty string stay.
+            (2, "source-2", "source-2", "source-2", "20", "", "new-2", 2),
+            # NULL binary fills, while the STRUCT spaces remain a value.
+            (
+                3,
+                "source-3",
+                "source-3",
+                "source-3",
+                b"source-3".hex().upper(),
+                "   ",
+                "new-3",
+                3,
+            ),
+            (
+                4,
+                "existing",
+                "existing",
+                "existing",
+                b"old-4".hex().upper(),
+                "existing",
+                "new-4",
+                4,
+            ),
+            (
+                5,
+                "zero-row",
+                "existing-5",
+                "existing-5",
+                b"old-5".hex().upper(),
+                "existing-5",
+                "new-5",
+                0,
+            ),
+            (
+                6,
+                "sparse-existing",
+                "existing-6",
+                "existing-6",
+                b"old-6".hex().upper(),
+                "existing-6",
+                "new-6",
+                6,
+            ),
         ]
     finally:
         conn = _connect(creds)
