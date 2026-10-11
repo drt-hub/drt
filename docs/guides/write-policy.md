@@ -33,10 +33,11 @@ A stored `0`, `false`, empty binary value, or non-NULL semi-structured value is 
 **value**, not empty, so it is kept. Spaces-only counts as empty for text because a
 `CHAR(n)` column pads with spaces and the database cannot tell padding from content;
 a tab or a newline is a value. The write tests the column's own database type before
-trimming, and the diff reads the destination value and applies the same rule, so
-`--dry-run --diff` and `drt plan` agree with the write. Every non-text column —
-binary, numeric, boolean, date/time, array, map, struct, object, or variant — is
-empty only when SQL `NULL`.
+trimming. On PostgreSQL, MySQL, Snowflake, and Databricks, the diff reads the
+destination value and applies the same rule, so `--dry-run --diff` and `drt plan`
+agree with the write. BigQuery does not support destination diff/plan, as described
+below. Every non-text column — binary, numeric, boolean, date/time, array, map,
+struct, object, or variant — is empty only when SQL `NULL`.
 
 On Snowflake, `VARIANT` / `OBJECT` / `ARRAY` columns therefore count as empty only
 when SQL `NULL` (a stored JSON `""` is a value; this relies on schema introspection,
@@ -59,17 +60,20 @@ BigQuery also requires destination `mode: merge` for an ordinary upsert;
 so drt reads the target table schema once and trims only scalar `STRING` columns.
 `BYTES`, `JSON`, `STRUCT` / `RECORD`, repeated fields, numeric, boolean,
 date/time, and `GEOGRAPHY` columns are empty only when SQL `NULL`. If the target
-schema is unavailable, every fill column is treated as NULL-only rather than
-risking an invalid `TRIM` on a non-STRING type. BigQuery's no-argument `TRIM`
-uses BigQuery's native whitespace definition, so a STRING containing only other
+table does not exist (`NotFound`), there is no schema yet, so every fill column is
+treated as NULL-only rather than risking an invalid `TRIM` on a non-STRING type.
+Any other schema lookup failure fails the batch. BigQuery's no-argument `TRIM` uses
+BigQuery's native whitespace definition, so a STRING containing only other
 whitespace can also count as empty there.
 
 BigQuery does not collapse repeated source keys. Rows with the same signature
 are loaded into one temp table and one `MERGE`; if multiple source rows match an
 existing target row, BigQuery rejects the ambiguous update. Rows separated into
 different sparse-signature runs execute as separate MERGEs, but model output
-should still be unique per `upsert_key`. This differs from diff/plan's generic
-first-writer-wins model for repeated keys.
+should still be unique per `upsert_key`. BigQuery is not a queryable destination,
+so `drt plan` and `drt run --dry-run --diff` report destination diff/plan as
+unsupported; they do not model its repeated keys, apply `fill_empty`, validate
+override names, or count kept values.
 
 ## Behaviour
 
@@ -88,13 +92,14 @@ first-writer-wins model for repeated keys.
   default policy to the column you meant (overwriting, when the default is
   `overwrite`). This is checked against the destination's own columns, so it is
   exact however the source batches its rows; it needs schema introspection
-  (`introspect_schema`, the default, and no `json_columns`). `drt plan` and
-  `drt run --dry-run --diff` also check the names against the columns the source
-  produces and report the sync as unavailable, with the reason, when one is
-  missing.
-- The diff and plan model repeated source keys in first-writer-wins order. Live
-  PostgreSQL/MySQL writes match that model; MERGE destinations can reject an
-  ambiguous same-batch match, as noted above for Databricks and BigQuery.
+  (`introspect_schema`, the default, and no `json_columns`). On PostgreSQL,
+  MySQL, Snowflake, and Databricks, `drt plan` and `drt run --dry-run --diff`
+  also check the names against the columns the source produces and report the
+  sync as unavailable, with the reason, when one is missing. BigQuery diff/plan
+  is unsupported and therefore performs none of these preview checks.
+- On PostgreSQL, MySQL, Snowflake, and Databricks, the diff and plan model
+  repeated source keys in first-writer-wins order. Live PostgreSQL/MySQL writes
+  match that model; Databricks can instead reject an ambiguous same-batch MERGE.
 
 ## Where it works
 
@@ -123,11 +128,13 @@ for scalar `STRING` columns and omits the `TRIM` branch for every other type.
 
 ## Seeing what is kept
 
-`drt run --dry-run --diff` and `drt plan` apply the policy when they compare:
-a column the destination already holds is not reported as an update, and the
-number of kept values is shown (`N existing value(s) kept`, and `kept_values` in
-`plan.json`'s `summary`). A row whose only differences are kept values is not
-listed at all, because nothing would be written.
+For PostgreSQL, MySQL, Snowflake, and Databricks, `drt run --dry-run --diff` and
+`drt plan` apply the policy when they compare: a column the destination already
+holds is not reported as an update, and the number of kept values is shown
+(`N existing value(s) kept`, and `kept_values` in `plan.json`'s `summary`). A row
+whose only differences are kept values is not listed at all, because nothing
+would be written. BigQuery destination diff/plan is unsupported, so these preview
+semantics and counts are not available for it.
 
 A normal `drt run` does not count kept values: the write is a single upsert
 statement, which does not report per column what it left alone. Use the diff or

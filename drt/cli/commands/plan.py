@@ -200,7 +200,7 @@ def _plan_all(
         cli_vars = parse_vars_option(vars_raw)
         project = load_project(Path("."))
         names = [s.name for s in load_syncs(Path("."), vars=resolve_vars(project.vars, cli_vars))]
-    except (PlanCliError, FileNotFoundError, VarError) as e:
+    except (PlanCliError, FileNotFoundError, ValueError, VarError) as e:
         print_error(str(e))
         raise typer.Exit(1)
     if not names:

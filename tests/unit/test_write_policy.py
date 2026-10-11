@@ -9,7 +9,10 @@ import pytest
 
 from drt.config.models import (
     DatabricksDestinationConfig,
+    MySQLDestinationConfig,
+    PostgresDestinationConfig,
     SnowflakeDestinationConfig,
+    SyncConfig,
     SyncOptions,
 )
 from drt.destinations.base import WritePolicyCapable
@@ -82,6 +85,120 @@ def test_policy_helpers_can_fold_destination_identifiers() -> None:
     assert options.unseen_write_policy_overrides(["industry"], case_insensitive=True) == []
     assert options.fill_empty_columns(["industry"]) == set()
     assert options.unseen_write_policy_overrides(["industry"]) == ["INDUSTRY"]
+
+
+def _sql_destination_config(destination_type: str, mode: str = "insert") -> dict[str, Any]:
+    configs: dict[str, dict[str, Any]] = {
+        "postgres": {
+            "type": "postgres",
+            "host": "localhost",
+            "dbname": "analytics",
+            "table": "contacts",
+            "upsert_key": ["id"],
+        },
+        "mysql": {
+            "type": "mysql",
+            "host": "localhost",
+            "dbname": "analytics",
+            "table": "contacts",
+            "upsert_key": ["id"],
+        },
+        "snowflake": {
+            "type": "snowflake",
+            "account_env": "SNOWFLAKE_ACCOUNT",
+            "user_env": "SNOWFLAKE_USER",
+            "password_env": "SNOWFLAKE_PASSWORD",
+            "database": "ANALYTICS",
+            "schema": "PUBLIC",
+            "table": "CONTACTS",
+            "warehouse": "COMPUTE_WH",
+            "mode": mode,
+            "upsert_key": ["id"],
+        },
+        "databricks": {
+            "type": "databricks",
+            "host_env": "DATABRICKS_HOST",
+            "http_path_env": "DATABRICKS_HTTP_PATH",
+            "token_env": "DATABRICKS_TOKEN",
+            "catalog": "main",
+            "schema": "default",
+            "table": "contacts",
+            "mode": mode,
+            "upsert_key": ["id"],
+        },
+        "bigquery": {
+            "type": "bigquery",
+            "project": "analytics",
+            "dataset": "warehouse",
+            "table": "contacts",
+            "mode": mode,
+            "upsert_key": ["id"],
+        },
+    }
+    return configs[destination_type]
+
+
+def _sync_config(
+    destination_type: str, *, destination_mode: str, sync_mode: str, **policy: Any
+) -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "contacts",
+            "model": "SELECT * FROM contacts",
+            "destination": _sql_destination_config(destination_type, destination_mode),
+            "sync": {"mode": sync_mode, **policy},
+        }
+    )
+
+
+@pytest.mark.parametrize("destination_type", ["snowflake", "databricks", "bigquery"])
+def test_config_rejects_insert_destination_with_fill_empty(destination_type: str) -> None:
+    with pytest.raises(ValueError, match=r"fill_empty needs destination\.mode: merge"):
+        _sync_config(
+            destination_type,
+            destination_mode="insert",
+            sync_mode="upsert",
+            write_policy="fill_empty",
+        )
+
+
+@pytest.mark.parametrize(
+    "destination_type", ["postgres", "mysql", "snowflake", "databricks", "bigquery"]
+)
+def test_config_accepts_fill_empty_on_every_sql_merge_path(destination_type: str) -> None:
+    config = _sync_config(
+        destination_type,
+        destination_mode="merge",
+        sync_mode="upsert",
+        write_policy="fill_empty",
+    )
+
+    assert config.sync.uses_fill_empty is True
+
+
+@pytest.mark.parametrize(
+    "destination_type", ["postgres", "mysql", "snowflake", "databricks", "bigquery"]
+)
+def test_config_accepts_fill_empty_for_mirror(destination_type: str) -> None:
+    config = _sync_config(
+        destination_type,
+        destination_mode="insert",
+        sync_mode="mirror",
+        write_policy="fill_empty",
+    )
+
+    assert config.sync.mode == "mirror"
+
+
+@pytest.mark.parametrize("destination_type", ["snowflake", "databricks", "bigquery"])
+def test_config_accepts_default_write_policy_with_insert(destination_type: str) -> None:
+    config = _sync_config(
+        destination_type,
+        destination_mode="insert",
+        sync_mode="upsert",
+    )
+
+    assert config.sync.write_policy == "overwrite"
 
 
 # --- SQL ------------------------------------------------------------------
@@ -216,7 +333,6 @@ def test_a_destination_that_cannot_honour_fill_empty_fails_fast(options: SyncOpt
 
 
 def _pg_config() -> Any:
-    from drt.config.models import PostgresDestinationConfig
 
     return PostgresDestinationConfig(
         type="postgres",
@@ -342,7 +458,6 @@ def test_the_plan_carries_and_renders_the_kept_count() -> None:
 
 
 def _pg_dest_config() -> Any:
-    from drt.config.models import PostgresDestinationConfig
 
     return PostgresDestinationConfig(
         type="postgres",
@@ -357,7 +472,6 @@ def _pg_dest_config() -> Any:
 
 
 def _mysql_dest_config() -> Any:
-    from drt.config.models import MySQLDestinationConfig
 
     return MySQLDestinationConfig(
         type="mysql",

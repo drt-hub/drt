@@ -160,7 +160,7 @@ def compute_plan(
     try:
         project_vars = resolve_vars(project.vars, cli_vars)
         syncs = load_syncs(project_dir, vars=project_vars)
-    except VarError as e:
+    except (VarError, ValueError) as e:
         raise PlanCliError(str(e)) from e
 
     matches = [s for s in syncs if s.name == sync_name]

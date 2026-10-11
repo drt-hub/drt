@@ -175,6 +175,33 @@ def test_unsupported_sync_is_refused_before_the_engine_runs(
     assert calls == []  # nothing was extracted, nothing could have been written
 
 
+def test_insert_fill_empty_is_invalid_before_plan_can_become_available(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+    _patch_engine(monkeypatch, _changes(), calls)
+    cfg = {
+        "name": "orders_to_bigquery",
+        "model": "SELECT 1",
+        "destination": {
+            "type": "bigquery",
+            "project": "analytics",
+            "dataset": "warehouse",
+            "table": "orders",
+            "mode": "insert",
+            "upsert_key": ["id"],
+        },
+        "sync": {"mode": "upsert", "write_policy": "fill_empty"},
+    }
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+
+    result = runner.invoke(app, ["plan", "orders_to_bigquery"])
+
+    assert result.exit_code == 1
+    assert "fill_empty needs destination.mode: merge" in result.output
+    assert calls == []
+
+
 def test_unknown_sync_is_an_error(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_engine(monkeypatch, _changes(), [])
 

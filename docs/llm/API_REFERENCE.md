@@ -411,15 +411,19 @@ Databricks, and BigQuery do not support `update_only`; other destinations fail
 fast. All three require destination `mode: merge` for an ordinary upsert
 (`sync.mode: mirror` forces it); `mode: insert` is refused rather than silently
 ignoring the policy. Databricks and BigQuery semi-structured columns are empty
-only when SQL NULL. BigQuery determines text columns from the target schema and
-uses NULL-only semantics for every column when that schema is unavailable.
+only when SQL NULL. BigQuery determines text columns from the target schema. If
+the target table does not exist (`NotFound`), it uses NULL-only semantics because
+there is no schema yet; any other schema lookup failure fails the batch.
 Duplicate source keys that match one target row can make Databricks or BigQuery
-reject the ambiguous `MERGE`; diff/plan still model repeated keys as
-first-writer-wins.
+reject the ambiguous `MERGE`. Destination diff/plan applies `fill_empty`, validates
+source override names, counts `kept_values`, and models repeated keys as
+first-writer-wins only for PostgreSQL, MySQL, Snowflake, and Databricks. BigQuery
+is not a queryable destination, so `drt plan` and `--dry-run --diff` report it as
+unsupported and do none of those preview operations.
 Rejected for `mode: replace`. A name in `write_policy_overrides` that is not a
 column of the destination table is an error (nothing written; needs introspection),
-and plan/diff report it as unavailable when the source does not produce it. `--dry-run --diff` and `drt plan` count
-the kept values (`kept_values`).
+and supported plan/diff destinations report it as unavailable when the source does
+not produce it.
 
 ```yaml
 sync:

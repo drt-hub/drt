@@ -922,6 +922,13 @@ _BUILTIN_DESTINATION_TAGS: frozenset[str] = frozenset(
     if isinstance(meta, Tag) and (tag := meta.tag) != GENERIC_DESTINATION_TAG
 )
 
+# Built-in SQL destinations that implement ``sync.write_policy: fill_empty``.
+# Keep the destination-mode compatibility rule here, where both halves of the
+# config are visible, so validation, plan, dry-run, and a real run all agree.
+_WRITE_POLICY_SQL_DESTINATION_TYPES = frozenset(
+    {"postgres", "mysql", "snowflake", "databricks", "bigquery"}
+)
+
 
 class SyncConfig(BaseModel):
     name: str
@@ -935,6 +942,27 @@ class SyncConfig(BaseModel):
     # queries the real destination after a sync has run.
     unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_write_policy_destination_mode(self) -> SyncConfig:
+        if not self.sync.uses_fill_empty:
+            return self
+
+        destination_type = destination_type_of(self.destination)
+        if destination_type not in _WRITE_POLICY_SQL_DESTINATION_TYPES:
+            return self
+
+        # PostgreSQL and MySQL always use their upsert statements. The three
+        # warehouse destinations expose an append-only insert mode, except
+        # that sync.mode: mirror deliberately forces their merge path.
+        destination_mode = getattr(self.destination, "mode", "merge")
+        if self.sync.mode != "mirror" and destination_mode == "insert":
+            raise ValueError(
+                "sync.write_policy: fill_empty needs destination.mode: merge "
+                "(or sync.mode: mirror); destination.mode: insert appends rows "
+                "and would ignore the policy."
+            )
+        return self
 
     @model_validator(mode="after")
     def _inject_sync_name(self) -> SyncConfig:
