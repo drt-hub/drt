@@ -562,6 +562,10 @@ Every contribution — code, docs, bug reports, ideas — makes drt better. Than
 
 </details>
 
+## Sponsors
+
+drt is free and open source. If it saves your team time, [sponsoring drt-hub](https://github.com/sponsors/drt-hub) keeps it maintained: it pays for the live warehouse accounts every release is tested against. See [SPONSORS.md](SPONSORS.md) for how it works and who is backing it.
+
 ## Disclaimer
 
 drt is an independent open-source project and is **not affiliated with,
