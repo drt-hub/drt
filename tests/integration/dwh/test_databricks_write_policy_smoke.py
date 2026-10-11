@@ -65,13 +65,17 @@ def test_databricks_write_policy_fill_empty_merge_semantics() -> None:
         write_policy="fill_empty",
         write_policy_overrides={"overwrite_value": "overwrite"},
     )
+    # drt cannot write Python bytes into a Databricks BINARY column (the driver
+    # binds them as an array), so the payload carries NULL for binary_value. That
+    # still pins the rule: an empty or space-only BINARY target must be KEPT (a
+    # wrongly text-trimmed binary would be overwritten with this NULL).
     records = [
         {
             "id": i,
             "string_value": f"source-{i}",
             "varchar_value": f"source-{i}",
             "char_value": f"source-{i}",
-            "binary_value": f"source-{i}".encode(),
+            "binary_value": None,
             "struct_value": {"value": f"source-{i}"},
             "overwrite_value": f"new-{i}",
             "numeric_value": 99,
@@ -85,7 +89,7 @@ def test_databricks_write_policy_fill_empty_merge_semantics() -> None:
             "id": 6,
             "varchar_value": "source-6",
             "char_value": "source-6",
-            "binary_value": b"source-6",
+            "binary_value": None,
             "struct_value": {"value": "source-6"},
             "overwrite_value": "new-6",
             "numeric_value": 99,
@@ -152,13 +156,13 @@ def test_databricks_write_policy_fill_empty_merge_semantics() -> None:
             (1, "source-1", "source-1", "source-1", "", "source-1", "new-1", 99),
             # Empty/space-only text fills; space byte and STRUCT empty string stay.
             (2, "source-2", "source-2", "source-2", "20", "", "new-2", 2),
-            # NULL binary fills, while the STRUCT spaces remain a value.
+            # NULL binary fills (with the NULL payload), STRUCT spaces remain a value.
             (
                 3,
                 "source-3",
                 "source-3",
                 "source-3",
-                b"source-3".hex().upper(),
+                None,
                 "   ",
                 "new-3",
                 3,
