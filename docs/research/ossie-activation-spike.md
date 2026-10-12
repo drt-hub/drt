@@ -1,0 +1,101 @@
+# Apache Ossie activation spike (#1254)
+
+## Question
+
+Can drt turn an Apache Ossie (formerly Open Semantic Interchange, OSI)
+semantic-model document into a useful, reviewable activation scaffold without
+making an unstable specification or an unavailable Python package part of the
+runtime?
+
+This spike implements the narrowest reversible answer: `drt init
+--from-ossie`. It reads YAML/JSON once, writes ordinary drt YAML, and leaves no
+Ossie dependency on the run path. The reader is isolated in
+`drt/integrations/ossie.py` so the official package can replace it later.
+
+## Findings
+
+### What mapped cleanly
+
+- A dataset maps naturally to one drt sync and its `source` maps to the SQL
+  `FROM` relation (or a wrapped subquery).
+- Dataset fields map to a deterministic `SELECT <expression> AS <field>` list.
+  Per-field dialect selection works cleanly, including a documented
+  `ANSI_SQL` fallback.
+- A dataset `primary_key` maps directly to SQL destination `upsert_key`.
+  Composite keys survive for PostgreSQL; a single key maps to HubSpot's
+  `id_property`.
+- Dataset description plus model name/version gives useful sync provenance.
+- Unknown extension keys can be ignored safely by a consumer that reads only
+  this subset. `relationships`, `unique_keys`, AI context, and custom
+  extensions remain available to the reader even though this scaffold does
+  not yet turn them into writes.
+
+### Gaps and unsafe inferences
+
+- **No entity/grain concept for activation.** A dataset key identifies rows,
+  but the model does not say which business entity or destination object those
+  rows should update. Destination table, HubSpot object type, and property
+  names therefore remain TODOs.
+- **Primary-key columns are not guaranteed to appear in `fields`.** The
+  canonical TPC-DS example keys `store_sales` by `ss_item_sk` and
+  `ss_ticket_number` but declares an expression only for the former. The
+  scaffold adds a missing key as a direct source-column selection and reports
+  it; a future adapter should ask Ossie whether this omission is intentionally
+  valid or an example/schema integrity gap.
+- **No stable sensitivity/PII flag yet.** drt cannot infer `sync.mask` safely.
+  Some proposals have discussed personal/confidential flags, but the core
+  input shape used by this spike cannot be treated as a stable governance
+  contract.
+- **Datatype names do not map to destination types.** Ossie's logical
+  `String`, `Integer`, `Decimal`, and temporal types are not enough to choose
+  PostgreSQL DDL, HubSpot property definitions, API serialization, precision,
+  or nullability. The spike creates no destination schema.
+- **Field expressions are dialect-specific.** A field can have several opaque
+  dialect expressions. drt can select the requested one or fall back to
+  `ANSI_SQL`, but it cannot prove that an ANSI expression runs unchanged on
+  every configured warehouse.
+- **Metrics need a group-by grain.** Model-level metrics may span datasets and
+  contain aggregation/window logic, but Ossie does not provide the activation
+  entity grain needed to build one row per destination object. Metrics are
+  listed as “available but not generated (entity grain unclear).”
+- **A source can be a query.** The spec's `source` is one string for either a
+  table/view or query and does not declare a query dialect. The spike accepts a
+  single `SELECT`/`WITH` query and wraps it; table-like values must pass drt's
+  conservative unquoted identifier validation.
+- **The specification is unstable.** `0.2.0.dev0` is explicitly unreleased and
+  has already changed the document root from a `semantic_model` array to one
+  flat model. Unknown versions warn instead of failing; structurally unusable
+  documents still fail clearly.
+- **There is no write/activation concept.** Ossie describes analytical
+  semantics, not destination credentials, endpoints, object/table names,
+  create-vs-update policy, field mappings, rate limits, error policy, or data
+  movement. Those choices cannot be inferred from semantic metadata alone.
+- **The official package is not currently a viable drt dependency.** It is not
+  on PyPI and requires Python 3.11+, while drt supports Python 3.10+. Vendoring
+  its full schema/runtime would enlarge core for a one-time scaffold operation.
+
+## Recommendation: B now, preserve C, defer D
+
+Using issue #1254's B/C/D decision frame:
+
+- **B — bounded CLI scaffolding: recommend.** Keep the delivered import as a
+  spike/preview on `drt init`. It provides immediate value, produces normal
+  reviewable drt YAML, and makes every uncertain activation decision an
+  explicit TODO. Gather real models and destination edits before expanding the
+  contract.
+- **C — official-package adapter: preserve as the next implementation step,
+  not a current dependency.** When Apache Ossie publishes a compatible package
+  and stabilizes a release, replace the isolated reader behind the same data
+  boundary. Before doing so, add versioned compatibility fixtures and decide
+  whether drt keeps Python 3.10 support.
+- **D — runtime-native semantic activation: defer.** Do not add `model:
+  ossie(...)`, automatic joins/metrics, destination schema creation, or an
+  always-live Ossie dependency until the spec defines (or drt explicitly asks
+  users for) entity grain, sensitivity, query dialect, and activation mapping.
+  Any of those can be designed later without invalidating generated YAML.
+
+The next useful evidence is not more parser breadth. It is a small field trial:
+run option B against several production-shaped models, record which TODO edits
+operators make, and use those edits to decide whether C is merely a parser swap
+or whether a separate, explicit activation-mapping extension should be
+proposed before any part of D.

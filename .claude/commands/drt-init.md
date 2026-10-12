@@ -18,7 +18,7 @@ Guide the user through initializing a new drt project.
    ```
    (Or `uv add drt-core[...]` if the user prefers uv.)
 
-2. Pick the right starter shape. Two flows produce the same project skeleton:
+2. Pick the right starter shape. Four flows produce the same sync YAML shape:
 
    **A) Template scaffolds (fastest, ~3 commands)** — best when the user just wants something running:
    ```bash
@@ -40,7 +40,28 @@ Guide the user through initializing a new drt project.
    ```
    Prompts for project name and one of the interactive wizard's source types (**bigquery / duckdb / sqlite / postgres / redshift / clickhouse**), then asks for source-specific connection fields and auth method. The other built-in source types (**snowflake / mysql / databricks / sqlserver / deltalake / iceberg / rest_api**) remain available through templates or a hand-authored `profiles.yml` entry; `drt profile add` also covers MySQL and Snowflake.
 
-   Either flow writes:
+   **C) dbt manifest scaffold** — best when a dbt project already has built models:
+   ```bash
+   drt init --from-dbt target/manifest.json
+   ```
+   This interactively lists dbt models and writes selected
+   `syncs/sync_<model>.yml` files without overwriting existing files.
+
+   **D) Apache Ossie semantic-model scaffold** — best when the source metadata
+   is already portable Ossie YAML/JSON:
+   ```bash
+   drt init --from-ossie semantic_model.yaml --destination postgres
+   drt init --from-ossie semantic_model.yaml --dataset customer --dataset account --dialect SNOWFLAKE
+   ```
+   By default this writes one upsert sync per dataset with a `primary_key` and
+   prints why unkeyed datasets are skipped. Supported destination stubs are
+   `postgres`, `hubspot`, and `rest_api`; generated TODOs still need credentials,
+   target table/object, and property mappings. A requested field dialect falls
+   back to `ANSI_SQL`; metrics are listed but not generated because entity grain
+   is unclear.
+
+   The template and wizard flows write a full project shell; metadata scaffolds
+   write sync YAML into `syncs/` (or Ossie's `--output-dir`):
    ```
    my-drt-project/
    ├── drt_project.yml

@@ -128,6 +128,8 @@ default:
 
 ```bash
 drt init                          # interactive project wizard
+drt init --from-dbt target/manifest.json  # scaffold selected dbt models
+drt init --from-ossie model.yaml          # scaffold keyed Apache Ossie datasets (#1254)
 drt list                          # list sync definitions
 drt validate                      # validate all sync YAMLs
 drt run                           # run all syncs

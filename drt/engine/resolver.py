@@ -204,14 +204,26 @@ def _expand_env_vars(sql: str) -> str:
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")
 
 
+def validate_sql_identifier(identifier: str, *, label: str = "identifier") -> str:
+    """Return an unquoted SQL identifier after validating its safe shape.
+
+    This intentionally accepts the same conservative subset used for
+    incremental cursor fields: letters, digits, underscores, and dots, with a
+    letter or underscore first.  Callers that interpolate metadata-provided
+    table or column names can share one rule instead of growing another
+    almost-identical regular expression.
+    """
+    if not _SAFE_IDENTIFIER.fullmatch(identifier):
+        raise ValueError(
+            f"{label} {identifier!r} contains invalid characters. "
+            "Only letters, digits, underscores, and dots are allowed."
+        )
+    return identifier
+
+
 def _validate_cursor_field(field: str) -> str:
     """Ensure cursor_field is a safe SQL identifier (letters/digits/underscore/dot).
 
     Raises ValueError for anything that could enable SQL injection.
     """
-    if not _SAFE_IDENTIFIER.match(field):
-        raise ValueError(
-            f"cursor_field {field!r} contains invalid characters. "
-            "Only letters, digits, underscores, and dots are allowed."
-        )
-    return field
+    return validate_sql_identifier(field, label="cursor_field")

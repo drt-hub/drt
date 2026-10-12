@@ -136,12 +136,20 @@ Both flows produce the same project shape (`drt_project.yml`, `syncs/`,
 print every connector's required env vars and a sample YAML stanza —
 useful when hand-authoring beyond the templates.
 
+Existing metadata can seed the same sync files: `drt init --from-dbt
+target/manifest.json` interactively scaffolds dbt models, while `drt init
+--from-ossie semantic_model.yaml [--dataset NAME ...] [--destination
+postgres|hubspot|rest_api]` scaffolds keyed Apache Ossie datasets. Review the
+generated TODOs, then run `drt validate`.
+
 ---
 
 ## CLI Reference
 
 ```bash
 drt init                    # initialize project
+drt init --from-dbt target/manifest.json  # scaffold selected dbt models
+drt init --from-ossie model.yaml          # scaffold keyed Apache Ossie datasets
 drt list                    # list sync definitions
 drt sources                 # list available source connectors
 drt destinations            # list available destination connectors

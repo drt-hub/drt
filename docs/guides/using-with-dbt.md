@@ -1,6 +1,63 @@
-# Using drt with dbt
+# Using drt with dbt and Apache Ossie
 
 drt can read your dbt project's `target/manifest.json` to resolve `ref()` model references to fully-qualified table names.
+
+It can also scaffold sync files from a dbt manifest or an [Apache
+Ossie](https://ossie.apache.org/) semantic model. Scaffolding writes reviewable
+YAML; it does not add a runtime dependency on either tool.
+
+## Scaffold from a dbt manifest
+
+Use the existing interactive manifest flow to list dbt models and select the
+ones to activate:
+
+```bash
+drt init --from-dbt target/manifest.json
+```
+
+drt writes `syncs/sync_<model>.yml` files with REST API destination
+placeholders. Existing files are skipped rather than overwritten.
+
+## Scaffold from an Apache Ossie model
+
+The Ossie spike reads the small activation-relevant subset of a YAML or JSON
+model directly; `apache-ossie` is not required. By default it generates every
+dataset with a `primary_key` and prints why it skips a dataset without one:
+
+```bash
+drt init --from-ossie semantic_model.yaml
+```
+
+Select datasets by repeating `--dataset`, and choose the initial destination,
+field-expression dialect, and output directory explicitly:
+
+```bash
+drt init --from-ossie semantic_model.yaml \
+  --dataset customer \
+  --dataset account \
+  --destination postgres \
+  --dialect SNOWFLAKE \
+  --output-dir syncs/
+```
+
+Supported scaffold destinations are `postgres`, `hubspot`, and `rest_api`.
+PostgreSQL keeps composite primary keys as `upsert_key`; HubSpot requires one
+primary-key column for `id_property`. Each sync selects the dataset fields in
+the requested dialect, falling back field-by-field to `ANSI_SQL`. If neither
+expression exists, generation stops before writing any files and names the
+dataset, field, and missing dialect.
+
+Generated files contain `sync.mode: upsert`, provenance, and TODOs for source
+credentials, destination table/endpoint, and destination property mappings.
+Ossie metrics are listed but deliberately not selected: the model has no
+activation entity grain from which drt could safely infer a `GROUP BY`.
+
+The reader tolerates unknown keys and warns on missing or unrecognised
+versions, because `0.2.0.dev0` is explicitly unstable. It still rejects a
+document without a usable model/dataset/field shape. Table sources must be
+safe unquoted qualified identifiers; a `SELECT`/`WITH` source is wrapped as a
+subquery. See the [spike findings](../research/ossie-activation-spike.md) for
+the mapping gaps and recommendation.
 
 ## Setup
 

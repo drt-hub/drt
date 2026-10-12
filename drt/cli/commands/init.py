@@ -1,11 +1,13 @@
 """`drt init` — initialize a new drt project.
 
-Three entry modes:
+Four entry modes:
 
 - ``drt init`` — interactive wizard (asks for source type, profile, etc.)
 - ``drt init --template <name>`` — scaffold from a curated static template
 - ``drt init --from-dbt <manifest.json>`` — generate sync YAMLs from
   a dbt project's manifest
+- ``drt init --from-ossie <model.yaml>`` — generate sync YAMLs from
+  an Apache Ossie semantic model
 
 Each mode is implemented as a private helper called from the single
 ``init`` Typer command.
@@ -28,6 +30,31 @@ def init(
         "--from-dbt",
         help="Path to dbt manifest.json — generate sync YAMLs from dbt models.",
     ),
+    from_ossie: str = typer.Option(
+        None,
+        "--from-ossie",
+        help="Path to an Apache Ossie YAML/JSON model — generate sync YAMLs from datasets.",
+    ),
+    dataset: list[str] = typer.Option(
+        None,
+        "--dataset",
+        help="Ossie dataset name to scaffold. Repeat to select multiple; default: all with keys.",
+    ),
+    destination: str = typer.Option(
+        "rest_api",
+        "--destination",
+        help="Destination scaffold for --from-ossie: postgres | hubspot | rest_api.",
+    ),
+    dialect: str = typer.Option(
+        "ANSI_SQL",
+        "--dialect",
+        help="Preferred Ossie field-expression dialect; falls back to ANSI_SQL.",
+    ),
+    output_dir: Path = typer.Option(
+        Path("syncs"),
+        "--output-dir",
+        help="Directory for --from-ossie generated sync YAMLs.",
+    ),
     template: str = typer.Option(
         None,
         "--template",
@@ -35,6 +62,20 @@ def init(
     ),
 ) -> None:
     """Initialize a new drt project in the current directory."""
+    if from_dbt and from_ossie:
+        print_error("Choose only one of --from-dbt or --from-ossie.")
+        raise typer.Exit(1)
+
+    if from_ossie:
+        _init_from_ossie(
+            Path(from_ossie),
+            dataset_names=dataset,
+            destination=destination,
+            dialect=dialect,
+            output_dir=output_dir,
+        )
+        return
+
     if from_dbt:
         _init_from_dbt(Path(from_dbt))
         return
@@ -172,6 +213,100 @@ def _init_from_dbt(manifest_path: Path) -> None:
         console.print(
             "\n[dim]Edit the destination config in each file,"
             " then run: drt validate && drt run --dry-run[/dim]"
+        )
+    else:
+        console.print("[dim]No new sync files created.[/dim]")
+
+
+def _init_from_ossie(
+    model_path: Path,
+    *,
+    dataset_names: list[str],
+    destination: str,
+    dialect: str,
+    output_dir: Path,
+) -> None:
+    """Generate sync YAML scaffolds from an Apache Ossie model document."""
+    from drt.integrations.ossie import OssieModelError, build_ossie_scaffold, load_ossie_model
+
+    try:
+        model = load_ossie_model(model_path)
+        by_name = {item.name: item for item in model.datasets}
+        if dataset_names:
+            unknown = sorted(set(dataset_names) - by_name.keys())
+            if unknown:
+                available = ", ".join(by_name)
+                raise OssieModelError(
+                    f"Unknown Ossie dataset(s): {', '.join(unknown)}. Available: {available}."
+                )
+            selected = [by_name[name] for name in dict.fromkeys(dataset_names)]
+        else:
+            selected = list(model.datasets)
+
+        scaffolds = []
+        for item in selected:
+            if not item.primary_key:
+                continue
+            scaffolds.append(
+                build_ossie_scaffold(
+                    model,
+                    item,
+                    destination=destination,
+                    dialect=dialect,
+                )
+            )
+    except (FileNotFoundError, OssieModelError) as exc:
+        print_error(str(exc))
+        raise typer.Exit(1)
+
+    version = model.version or "unspecified"
+    console.print(
+        f"\n[bold]Found {len(model.datasets)} datasets in Apache Ossie model "
+        f"{model.name!r} (version {version}):[/bold]\n"
+    )
+    for warning in model.warnings:
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
+    for item in selected:
+        if item.primary_key:
+            console.print(f"  [cyan]select[/cyan] {item.name}")
+        else:
+            console.print(f"  [dim]skip[/dim] {item.name} (no primary_key)")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    created: list[str] = []
+    for scaffold in scaffolds:
+        path = output_dir / scaffold.filename
+        if path.exists():
+            console.print(f"  [dim]skip[/dim] {path} (already exists)")
+            continue
+        path.write_text(scaffold.yaml_text)
+        created.append(str(path))
+        if scaffold.ansi_fallback_fields:
+            fields = ", ".join(scaffold.ansi_fallback_fields)
+            console.print(
+                f"  [dim]{scaffold.dataset_name}: used ANSI_SQL fallback for {fields}[/dim]"
+            )
+        if scaffold.implicit_primary_key_fields:
+            fields = ", ".join(scaffold.implicit_primary_key_fields)
+            console.print(
+                f"  [dim]{scaffold.dataset_name}: added undeclared primary-key "
+                f"column(s) directly: {fields}[/dim]"
+            )
+
+    if model.metrics:
+        metrics = ", ".join(metric.name for metric in model.metrics)
+        console.print(
+            "\n[yellow]Ossie metrics available but not generated "
+            f"(entity grain unclear):[/yellow] {metrics}"
+        )
+
+    if created:
+        console.print(f"\n[green]Created {len(created)} sync file(s):[/green]")
+        for created_path in created:
+            console.print(f"  {created_path}")
+        console.print(
+            "\n[dim]Resolve the TODOs in each file, then run: "
+            "drt validate && drt run --dry-run[/dim]"
         )
     else:
         console.print("[dim]No new sync files created.[/dim]")
