@@ -83,6 +83,12 @@ class SyncResult:
     # any Destination implementation — unlike skipped_no_match, this
     # decision never reaches the destination.
     skipped_duplicate: int = 0
+    # Properties/columns a ``write_policy: fill_empty`` destination deliberately
+    # left unchanged because the destination already held a non-empty value.
+    # Appended for positional-constructor compatibility. SQL destinations cannot
+    # observe this from their single MERGE/upsert statement; read-before-write
+    # destinations such as HubSpot can report the exact count.
+    kept_values: int = 0
 
     @property
     def total(self) -> int:

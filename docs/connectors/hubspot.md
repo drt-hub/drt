@@ -87,6 +87,45 @@ destination:
 
 The classic reverse-ETL activation case: push warehouse-computed scores/traits into contacts your reps already created in HubSpot, **without spraying a new contact for every warehouse row**. `update_only` PATCHes by `id_property` directly — a record with no HubSpot match (404) is **skipped**, never created. `create_only` is the inverse: POST only, and a record that already exists (409) is **skipped**, so a seed audience is never overwritten. Skipped rows are counted in the run's `skipped` total (`drt run` prints `… N skipped`), not as errors. The default `upsert` is unchanged (POST, then PATCH on 409).
 
+**Fill only empty HubSpot properties (`write_policy: fill_empty`, [#1238](https://github.com/drt-hub/drt/issues/1238)):**
+
+```yaml
+sync:
+  mode: upsert
+  write_policy: fill_empty
+  write_policy_overrides:
+    lifecycle_stage: overwrite
+destination:
+  type: hubspot
+  object_type: contacts
+  id_property: email
+```
+
+drt renders the complete destination batch first, then reads current HubSpot
+values in groups of at most 100 through `crm/v3/objects/{object_type}/batch/read`.
+An existing property's `null`, empty string, or spaces-only string is filled;
+`"0"`, numeric `0`, and `false` are values and are kept. Non-empty fill-only
+properties are removed from the PATCH, while overwrite properties and
+`id_property` remain. New objects are POSTed with every rendered property. The
+same behavior works with `mode: full`, `upsert`, or `incremental`, and composes
+with `match_policy: update_only` / `create_only`.
+
+The read is fail-closed: after retries, any non-200/207 response or exception
+records row errors and no affected record is written. A 207 partial response is
+accepted; IDs absent from its `results` are treated as new. Repeated IDs are
+first-writer-wins during one load. Override names are lowercase and
+case-sensitive and must appear in at least one rendered record across the whole
+load call; a typo raises before any HTTP request. If every non-ID property is
+kept, the write is skipped without a no-match error. `SyncResult.kept_values`
+counts kept properties for direct destination callers. A result that cannot be
+correlated back to its requested `id_property` also fails closed; it is never
+treated as a missing object.
+
+HubSpot is not a `QueryableDestination`, so `drt plan` and
+`drt run --dry-run --diff` remain unsupported for it; [#472](https://github.com/drt-hub/drt/issues/472)
+tracks API-backed diff support. This behavior is verified against HTTP mocks
+only, not a live HubSpot account.
+
 ## Rate limiting
 
 **Vendor limit:** ~100 requests / 10s for private apps. **drt caps this destination at 9 req/s** and will not exceed it even if you configure a higher number.

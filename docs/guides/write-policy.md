@@ -75,20 +75,33 @@ so `drt plan` and `drt run --dry-run --diff` report destination diff/plan as
 unsupported; they do not model its repeated keys, apply `fill_empty`, validate
 override names, or count kept values.
 
+HubSpot uses a read-then-filter path because its Objects API has no conditional
+MERGE expression. Before each group of at most 100 rendered records, drt sends
+one `batch/read` request for only the fill-only properties present in that group.
+For an existing object, non-empty fill-only properties are removed from the
+PATCH while overwrite properties and `id_property` remain. A new object is
+POSTed in full. A 207 partial read is valid: IDs absent from `results` are new.
+If the read fails after retries, drt fails those records closed and writes none
+of them—it never falls back to an overwrite. Property names are lowercase and
+case-sensitive. Repeated IDs are first-writer-wins within the load, including
+across its 100-record read chunks.
+
 ## Behaviour
 
 - **New rows are inserted in full.** The policy only applies when the row
   already exists.
-- **Key columns** are never updated, so the policy never applies to them.
+- **Key columns / HubSpot's `id_property`** are never filtered out, so the
+  policy never applies to them.
 - Works with `match_policy: upsert` on every destination listed below, and with
-  `update_only` on PostgreSQL and MySQL (a missing row is still skipped, never
-  created). Snowflake, Databricks, and BigQuery do not implement `update_only`;
-  their existing engine guard refuses that policy before any I/O. `create_only`
-  never updates, so there is nothing to fill.
+  `update_only` on PostgreSQL, MySQL, and HubSpot (a missing row is still skipped,
+  never created). Snowflake, Databricks, and BigQuery do not implement
+  `update_only`; their existing engine guard refuses that policy before any I/O.
+  `create_only` never updates, so there is nothing to fill.
 - `mode: replace` is rejected: it rebuilds the table, so there is no existing
   value to keep.
 - A name in `write_policy_overrides` that is not a column of the destination
-  table is an error and nothing is written: a typo would otherwise apply the
+  table—or, for HubSpot, not a property rendered by any record in the complete
+  `load()` call—is an error and nothing is written: a typo would otherwise apply the
   default policy to the column you meant (overwriting, when the default is
   `overwrite`). This is checked against the destination's own columns, so it is
   exact however the source batches its rows; it needs schema introspection
@@ -110,7 +123,8 @@ override names, or count kept values.
 | Snowflake | yes: in the VALUES-sourced `MERGE` update expression (including `mode: mirror` before its unchanged delete pass); requires the destination's `mode: merge` for ordinary upserts |
 | Databricks | yes: in the staging-sourced Delta `MERGE`, composed with sparse-row presence flags (including `mode: mirror` before its unchanged delete pass); requires the destination's `mode: merge` for ordinary upserts |
 | BigQuery | yes: in each typed-temp-table `MERGE`, with sparse runs preserved (including `mode: mirror` before its unchanged delete pass); requires the destination's `mode: merge` for ordinary upserts |
-| Others | refused up front with a clear message, never silently overwritten. HubSpot follows ([#1238](https://github.com/drt-hub/drt/issues/1238)). |
+| HubSpot | yes: one fail-closed `batch/read` per ≤100 rendered records, then filtered PATCHes; new objects are POSTed in full |
+| Others | refused up front with a clear message, never silently overwritten. |
 
 The generated SQL for a fill column is, for Postgres (the target is aliased,
 because an unqualified column is ambiguous with `EXCLUDED`),
@@ -134,15 +148,25 @@ holds is not reported as an update, and the number of kept values is shown
 (`N existing value(s) kept`, and `kept_values` in `plan.json`'s `summary`). A row
 whose only differences are kept values is not listed at all, because nothing
 would be written. BigQuery destination diff/plan is unsupported, so these preview
-semantics and counts are not available for it.
+semantics and counts are not available for it. HubSpot also has no destination
+diff/plan support ([#472](https://github.com/drt-hub/drt/issues/472)), so `drt plan`
+and `drt run --dry-run --diff` remain unsupported for it. Its direct destination
+`SyncResult.kept_values` counts kept **properties** exactly; a row for which every
+non-ID property is kept is an ordinary skip, not an error or a no-match skip.
 
-A normal `drt run` does not count kept values: the write is a single upsert
+A normal SQL `drt run` does not count kept values: the write is a single upsert
 statement, which does not report per column what it left alone. Use the diff or
-the plan to see them before writing.
+the plan to see them before writing. HubSpot can count them because it reads the
+current properties before writing; this additive destination result field is not
+yet included in the aggregate CLI summary.
 
 ## Not the same as
 
 - **`match_policy: create_only`**: never updates *any* column of an existing row.
 - **Filtering in the model SQL**: the warehouse does not know the destination's
-  current value, and a read-then-write would be racy; `fill_empty` decides inside
-  the write itself.
+  current value. SQL destinations decide inside the write itself; HubSpot uses
+  the API's batch read followed by a filtered PATCH and keeps the POST-409 fallback
+  for a create race.
+
+The HubSpot leg is verified against HTTP mocks only; no live HubSpot account was
+available for this implementation.
