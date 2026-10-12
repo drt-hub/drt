@@ -43,19 +43,23 @@ Example sync YAML — deals:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
 
 from drt.config.credentials import resolve_env
-from drt.config.models import DestinationConfig, HubSpotDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, HubSpotDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import resolve_rate_limiter
+from drt.destinations.rate_limiter import RateLimiterBackend, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
 _HUBSPOT_API = "https://api.hubapi.com/crm/v3/objects"
+_HUBSPOT_PROPERTIES_API = "https://api.hubapi.com/crm/v3/properties"
+
+logger = logging.getLogger(__name__)
 
 
 def _is_empty(value: Any) -> bool:
@@ -67,6 +71,12 @@ class HubSpotDestination:
     """Upsert records into HubSpot CRM via the v3 Objects API."""
 
     identifiers_case_insensitive = False
+
+    def __init__(self) -> None:
+        # One destination instance is created per sync run. ``None`` means the
+        # best-effort lookup was unavailable or unusable, so later engine
+        # batches do not repeatedly call or warn about the same endpoint.
+        self._property_names: dict[str, frozenset[str] | None] = {}
 
     def load(
         self,
@@ -88,73 +98,139 @@ class HubSpotDestination:
         }
         upsert_url = f"{_HUBSPOT_API}/{config.object_type}"
         batch_read_url = f"{upsert_url}/batch/read"
-        policy = sync_options.match_policy  # #757 — upsert | update_only | create_only
+        policy = sync_options.match_policy
         result = SyncResult()
-        # HubSpot rate limit: 100 req/10s for private apps. Passed as a cap so
-        # it clamps the resolved rate before the shared bucket is created — a
-        # destination-level override cannot exceed what HubSpot publishes.
         rate_limiter = resolve_rate_limiter(config, sync_options, max_requests_per_second=9)
         retry_config = resolve_retry(config.retry, sync_options)
 
-        # Render the complete load call before any HTTP request. Override names
-        # are validated against this union, rather than one 100-record read
-        # chunk, so a sparse property is not mistaken for a typo after an
-        # earlier chunk has already been written.
-        prepared: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
-        rendered_property_names: set[str] = set()
-        for i, record in enumerate(records):
-            if config.properties_template:
-                try:
-                    rendered = render_template(config.properties_template, record)
-                    properties = json.loads(rendered)
-                    if not isinstance(properties, dict):
-                        raise ValueError("properties_template must render a JSON object")
-                except (ValueError, json.JSONDecodeError) as e:
-                    record_row_error(
-                        result,
-                        i,
-                        json.dumps(record, default=str)[:200],
-                        e,
-                        error_message=f"properties_template error: {e}",
-                    )
-                    continue
-            else:
-                properties = record
+        with httpx.Client(timeout=30.0) as client:
+            if not sync_options.uses_fill_empty:
+                # Preserve the original path exactly: acquire and render each
+                # record in sequence, so an earlier fatal HTTP error prevents a
+                # later record's template from being evaluated.
+                for i, record in enumerate(records):
+                    rate_limiter.acquire()
+                    if config.properties_template:
+                        try:
+                            rendered = render_template(config.properties_template, record)
+                            properties = json.loads(rendered)
+                        except (ValueError, json.JSONDecodeError) as e:
+                            record_row_error(
+                                result,
+                                i,
+                                json.dumps(record, default=str)[:200],
+                                e,
+                                error_message=f"properties_template error: {e}",
+                            )
+                            continue
+                    else:
+                        properties = record
 
-            prepared.append((i, record, properties))
-            rendered_property_names.update(properties)
+                    payload = {"properties": properties, "idProperty": config.id_property}
 
-        unseen = sync_options.unseen_write_policy_overrides(
-            rendered_property_names,
-            case_insensitive=self.identifiers_case_insensitive,
-        )
-        if unseen:
-            raise ValueError(
-                f"sync.write_policy_overrides names property/properties {unseen} that are not "
-                "properties rendered by any record; check the spelling."
+                    def do_write(
+                        _url: str = upsert_url,
+                        _headers: dict[str, str] = headers,
+                        _payload: dict[str, Any] = payload,
+                    ) -> httpx.Response | None:
+                        id_value = _payload["properties"].get(config.id_property)
+                        patch_url = f"{_url}/{id_value}?idProperty={config.id_property}"
+                        if policy == "update_only":
+                            response = client.patch(
+                                patch_url,
+                                json={"properties": _payload["properties"]},
+                                headers=_headers,
+                            )
+                            if response.status_code == 404:
+                                return None
+                            response.raise_for_status()
+                            return response
+
+                        response = client.post(_url, json=_payload, headers=_headers)
+                        if response.status_code == 409:
+                            if policy == "create_only":
+                                return None
+                            response = client.patch(
+                                patch_url,
+                                json={"properties": _payload["properties"]},
+                                headers=_headers,
+                            )
+                        response.raise_for_status()
+                        return response
+
+                    try:
+                        written = with_retry(do_write, retry_config)
+                        if written is None:
+                            result.skipped += 1
+                            result.skipped_no_match += 1
+                        else:
+                            result.success += 1
+                    except httpx.HTTPStatusError as e:
+                        record_row_error(
+                            result,
+                            i,
+                            json.dumps(record, default=str)[:200],
+                            e,
+                            http_status=e.response.status_code,
+                            error_message=e.response.text[:500],
+                        )
+                        if sync_options.on_error == "fail":
+                            break
+                    except Exception as e:
+                        record_row_error(result, i, json.dumps(record, default=str)[:200], e)
+                        if sync_options.on_error == "fail":
+                            break
+                return result
+
+            self._validate_write_policy_overrides(
+                client, headers, config, sync_options, rate_limiter, retry_config
             )
 
-        with httpx.Client(timeout=30.0) as client:
             stop = False
-            # Carries successful writes across 100-record read chunks. Even if
-            # HubSpot's next read is briefly stale, a repeated ID in this same
-            # load still sees what the first writer just filled.
+            # Preserve successful writes across this load's 100-record read
+            # chunks. Separate engine batches necessarily rely on HubSpot's next
+            # read observing the preceding write.
             written_current_by_id: dict[str, dict[str, Any]] = {}
-            for chunk_start in range(0, len(prepared), 100):
-                chunk = prepared[chunk_start : chunk_start + 100]
+            for chunk_start in range(0, len(records), 100):
+                chunk: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+                for offset, record in enumerate(records[chunk_start : chunk_start + 100]):
+                    i = chunk_start + offset
+                    if config.properties_template:
+                        try:
+                            rendered = render_template(config.properties_template, record)
+                            properties = json.loads(rendered)
+                            if not isinstance(properties, dict):
+                                raise ValueError("properties_template must render a JSON object")
+                        except (ValueError, json.JSONDecodeError) as e:
+                            record_row_error(
+                                result,
+                                i,
+                                json.dumps(record, default=str)[:200],
+                                e,
+                                error_message=f"properties_template error: {e}",
+                            )
+                            if sync_options.on_error == "fail":
+                                stop = True
+                                break
+                            continue
+                    else:
+                        properties = record
+                    chunk.append((i, record, properties))
+
+                if stop:
+                    break
+                if not chunk:
+                    continue
+
                 fill_properties = sorted(
                     {
                         property_name
                         for _, _, properties in chunk
-                        for property_name in sync_options.fill_empty_columns(
-                            properties,
-                            case_insensitive=self.identifiers_case_insensitive,
-                        )
+                        for property_name in sync_options.fill_empty_columns(properties)
                         if property_name != config.id_property
                     }
                 )
                 current_by_id: dict[str, dict[str, Any]] = {}
-
                 if fill_properties:
                     rate_limiter.acquire()
                     try:
@@ -198,21 +274,18 @@ class HubSpotDestination:
                             current_by_id.setdefault(id_key, {}).update(written_properties)
 
                 for i, record, properties in chunk:
-                    id_value = properties.get(config.id_property)
-                    id_key = str(id_value)
+                    id_key = str(properties.get(config.id_property))
                     exists = id_key in current_by_id if fill_properties else False
                     write_properties = properties
-
                     if fill_properties and exists:
                         if policy == "create_only":
                             result.skipped += 1
                             result.skipped_no_match += 1
                             continue
 
-                        fill_for_record = sync_options.fill_empty_columns(
-                            properties,
-                            case_insensitive=self.identifiers_case_insensitive,
-                        ) - {config.id_property}
+                        fill_for_record = sync_options.fill_empty_columns(properties) - {
+                            config.id_property
+                        }
                         kept = {
                             property_name
                             for property_name in fill_for_record
@@ -221,15 +294,13 @@ class HubSpotDestination:
                         result.kept_values += len(kept)
                         if kept:
                             write_properties = {
-                                property_name: value
-                                for property_name, value in properties.items()
-                                if property_name not in kept
+                                name: value
+                                for name, value in properties.items()
+                                if name not in kept
                             }
-
                         if set(write_properties) <= {config.id_property}:
                             result.skipped += 1
                             continue
-
                     elif fill_properties and not exists and policy == "update_only":
                         result.skipped += 1
                         result.skipped_no_match += 1
@@ -241,24 +312,16 @@ class HubSpotDestination:
                     }
                     rate_limiter.acquire()
 
-                    def do_write(
+                    def do_fill_write(
                         _url: str = upsert_url,
-                        _headers: dict[str, Any] = headers,
+                        _headers: dict[str, str] = headers,
                         _payload: dict[str, Any] = payload,
                         _exists: bool = exists,
                     ) -> httpx.Response | None:
-                        """Write one record, honouring match and write policies.
-
-                        A fill-policy batch read makes existing rows safe to PATCH
-                        directly. Missing rows still follow the original POST-first
-                        path, including its 409 race fallback; that POST always gets
-                        the full, unfiltered properties.
-                        """
                         patch_url = (
                             f"{_url}/{_payload['properties'].get(config.id_property)}"
                             f"?idProperty={config.id_property}"
                         )
-
                         if _exists:
                             response = client.patch(
                                 patch_url,
@@ -267,7 +330,6 @@ class HubSpotDestination:
                             )
                             response.raise_for_status()
                             return response
-
                         if policy == "update_only":
                             response = client.patch(
                                 patch_url,
@@ -279,11 +341,15 @@ class HubSpotDestination:
                             response.raise_for_status()
                             return response
 
-                        # create_only + upsert both POST first (idProperty dedupes).
                         response = client.post(_url, json=_payload, headers=_headers)
-                        if response.status_code == 409:  # already exists
+                        if response.status_code == 409:
                             if policy == "create_only":
-                                return None  # exists — skip, don't overwrite
+                                return None
+                            if fill_properties:
+                                raise ValueError(
+                                    "HubSpot fill_empty: record appeared between read and write; "
+                                    "re-run"
+                                )
                             response = client.patch(
                                 patch_url,
                                 json={"properties": _payload["properties"]},
@@ -293,15 +359,14 @@ class HubSpotDestination:
                         return response
 
                     try:
-                        written = with_retry(do_write, retry_config)
+                        written = with_retry(do_fill_write, retry_config)
                         if written is None:
                             result.skipped += 1
-                            result.skipped_no_match += 1  # #757 — policy declined
+                            result.skipped_no_match += 1
                         else:
                             result.success += 1
                             if fill_properties:
-                                current = current_by_id.setdefault(id_key, {})
-                                current.update(write_properties)
+                                current_by_id.setdefault(id_key, {}).update(write_properties)
                                 written_current_by_id.setdefault(id_key, {}).update(
                                     write_properties
                                 )
@@ -318,12 +383,7 @@ class HubSpotDestination:
                             stop = True
                             break
                     except Exception as e:
-                        record_row_error(
-                            result,
-                            i,
-                            json.dumps(record, default=str)[:200],
-                            e,
-                        )
+                        record_row_error(result, i, json.dumps(record, default=str)[:200], e)
                         if sync_options.on_error == "fail":
                             stop = True
                             break
@@ -331,6 +391,60 @@ class HubSpotDestination:
                     break
 
         return result
+
+    def _validate_write_policy_overrides(
+        self,
+        client: httpx.Client,
+        headers: dict[str, str],
+        config: HubSpotDestinationConfig,
+        sync_options: SyncOptions,
+        rate_limiter: RateLimiterBackend,
+        retry_config: RetryConfig,
+    ) -> None:
+        """Validate override names once when HubSpot exposes its property schema."""
+        if not sync_options.write_policy_overrides:
+            return
+
+        object_type = config.object_type
+        if object_type not in self._property_names:
+            rate_limiter.acquire()
+
+            def fetch_properties() -> frozenset[str]:
+                response = client.get(f"{_HUBSPOT_PROPERTIES_API}/{object_type}", headers=headers)
+                response.raise_for_status()
+                body = response.json()
+                if not isinstance(body, dict) or not isinstance(body.get("results"), list):
+                    raise ValueError("HubSpot properties response has no usable results list")
+                names: list[str] = []
+                for item in body["results"]:
+                    if (
+                        not isinstance(item, dict)
+                        or not isinstance(item.get("name"), str)
+                        or not item["name"]
+                    ):
+                        raise ValueError("HubSpot properties response contains an invalid property")
+                    names.append(item["name"])
+                if not names:
+                    raise ValueError("HubSpot properties response contains no properties")
+                return frozenset(names)
+
+            try:
+                self._property_names[object_type] = with_retry(fetch_properties, retry_config)
+            except Exception as exc:
+                self._property_names[object_type] = None
+                logger.warning(
+                    "HubSpot property-name validation skipped for %s: %s", object_type, exc
+                )
+
+        property_names = self._property_names[object_type]
+        if property_names is None:
+            return
+        unseen = sync_options.unseen_write_policy_overrides(property_names)
+        if unseen:
+            raise ValueError(
+                f"sync.write_policy_overrides names property/properties {unseen} that are not "
+                f"properties of the HubSpot {object_type} object; check the spelling."
+            )
 
     @staticmethod
     def _read_current_properties(
@@ -345,8 +459,8 @@ class HubSpotDestination:
 
         The request/response boundary is kept in one helper so a future
         propertiesWithHistory preservation policy (#1237) can extend the same
-        batch read. HTTP 207 is a successful partial result: IDs absent from
-        ``results`` are treated as objects that do not exist yet.
+        batch read. HTTP 207 is a successful partial result only when every
+        missing input has a correlated ``OBJECT_NOT_FOUND`` error.
         """
         if len(id_values) > 100:
             raise ValueError("HubSpot batch read accepts at most 100 inputs")
@@ -358,6 +472,7 @@ class HubSpotDestination:
                 # ``idProperty`` lookup with the internal object ID in ``id``, so
                 # the returned property value is what ties a result to its input.
                 "properties": sorted({*property_names, id_property}),
+                "propertiesWithHistory": [],
                 "inputs": [{"id": value} for value in id_values],
             },
             headers=headers,
@@ -370,9 +485,13 @@ class HubSpotDestination:
                 response=response,
             )
         body = response.json()
-        results = body.get("results", [])
+        if not isinstance(body, dict):
+            raise ValueError("HubSpot batch read response must be an object")
+        if "status" in body and body["status"] != "COMPLETE":
+            raise ValueError("HubSpot batch read response status must be COMPLETE")
+        results = body.get("results")
         if not isinstance(results, list):
-            raise ValueError("HubSpot batch read response 'results' must be a list")
+            raise ValueError("HubSpot batch read response must contain a 'results' list")
         requested_ids = {str(value) for value in id_values}
         # HubSpot normalises some identifiers (emails come back lower-cased), so
         # fall back to a case-insensitive match, but only where it is unambiguous.
@@ -414,7 +533,46 @@ class HubSpotDestination:
                     "HubSpot batch read result could not be correlated to its requested "
                     f"{id_property!r} value"
                 )
+            if matched_id in current:
+                raise ValueError("HubSpot batch read returned duplicate results for one input")
             current[matched_id] = properties
+
+        errors = body.get("errors", [])
+        if not isinstance(errors, list):
+            raise ValueError("HubSpot batch read response 'errors' must be a list")
+        num_errors = body.get("numErrors", len(errors))
+        if not isinstance(num_errors, int) or isinstance(num_errors, bool):
+            raise ValueError("HubSpot batch read response 'numErrors' must be an integer")
+        if num_errors != len(errors):
+            raise ValueError("HubSpot batch read response error count is inconsistent")
+
+        missing_ids: set[str] = set()
+        for error in errors:
+            if not isinstance(error, dict) or error.get("category") != "OBJECT_NOT_FOUND":
+                raise ValueError("HubSpot batch read reported an error other than OBJECT_NOT_FOUND")
+            context = error.get("context")
+            context_ids = context.get("ids") if isinstance(context, dict) else None
+            if not isinstance(context_ids, list) or len(context_ids) != 1:
+                raise ValueError(
+                    "HubSpot OBJECT_NOT_FOUND error must identify exactly one requested input"
+                )
+            for context_id in context_ids:
+                requested = str(context_id)
+                if requested not in requested_ids:
+                    requested = folded.get(requested.casefold()) or ""
+                if requested not in requested_ids:
+                    raise ValueError(
+                        "HubSpot OBJECT_NOT_FOUND error references an unrequested input"
+                    )
+                if requested in current or requested in missing_ids:
+                    raise ValueError("HubSpot batch read response has conflicting input outcomes")
+                missing_ids.add(requested)
+
+        unresolved = requested_ids - set(current) - missing_ids
+        if unresolved:
+            raise ValueError(
+                "HubSpot batch read omitted requested inputs without OBJECT_NOT_FOUND errors"
+            )
         return current
 
     def supported_match_policies(self) -> frozenset[str]:

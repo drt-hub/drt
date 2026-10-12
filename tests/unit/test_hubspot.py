@@ -27,7 +27,7 @@ from drt.config.models import (
     RetryConfig,
     SyncOptions,
 )
-from drt.destinations.base import MatchPolicyCapable, WritePolicyCapable
+from drt.destinations.base import MatchPolicyCapable, SyncResult, WritePolicyCapable
 from drt.destinations.hubspot import HubSpotDestination
 
 
@@ -57,7 +57,12 @@ def _response(status_code: int = 200) -> MagicMock:
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = status_code
     resp.text = "{}"
-    resp.raise_for_status.return_value = None
+    if status_code >= 400:
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            f"HTTP {status_code}", request=MagicMock(), response=resp
+        )
+    else:
+        resp.raise_for_status.return_value = None
     return resp
 
 
@@ -91,6 +96,20 @@ def test_hubspot_fill_empty_accepts_upsert_family_modes(mode: str) -> None:
     )
 
     assert options.uses_fill_empty is True
+
+
+def test_cli_summary_reports_kept_hubspot_properties() -> None:
+    from drt.cli.output import print_sync_result
+
+    with patch("drt.cli.output.console") as console:
+        print_sync_result(
+            "enrich_contacts",
+            SyncResult(rows_extracted=1, success=1, kept_values=2),
+            elapsed=1.0,
+        )
+
+    printed = " ".join(str(call.args[0]) for call in console.print.call_args_list)
+    assert "2 properties kept (non-empty)" in printed
 
 
 # ---------------------------------------------------------------------------
@@ -219,13 +238,60 @@ def _use_server(httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None
         "_HUBSPOT_API",
         httpserver.url_for("/crm/v3/objects"),
     )
+    monkeypatch.setattr(
+        hubspot_module,
+        "_HUBSPOT_PROPERTIES_API",
+        httpserver.url_for("/crm/v3/properties"),
+    )
 
 
 def _json_requests(httpserver: HTTPServer) -> list[tuple[str, dict[str, Any]]]:
     return [
-        (request.path, json.loads(request.get_data(as_text=True)))
+        (
+            request.path,
+            json.loads(request.get_data(as_text=True)) if request.get_data() else {},
+        )
         for request, _response in httpserver.log
     ]
+
+
+def _not_found(*ids: str) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "category": "OBJECT_NOT_FOUND",
+        "context": {"ids": list(ids)},
+    }
+
+
+def test_batch_read_includes_history_and_accepts_correlated_not_found() -> None:
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = httpx.Response(
+        207,
+        json={
+            "status": "COMPLETE",
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("a@b.com")],
+        },
+        request=httpx.Request("POST", "https://example.test/batch/read"),
+    )
+
+    current = HubSpotDestination._read_current_properties(
+        client,
+        "https://example.test/batch/read",
+        {"Authorization": "Bearer token"},
+        "email",
+        ["firstname"],
+        ["a@b.com"],
+    )
+
+    assert current == {}
+    assert client.post.call_args.kwargs["json"] == {
+        "idProperty": "email",
+        "properties": ["email", "firstname"],
+        "propertiesWithHistory": [],
+        "inputs": [{"id": "a@b.com"}],
+    }
 
 
 def test_fill_empty_batch_read_shape_and_100_input_limit(
@@ -266,6 +332,7 @@ def test_fill_empty_batch_read_shape_and_100_input_limit(
     assert requests[0][1]["idProperty"] == "email"
     # The id property is requested too, so results can be tied to their inputs.
     assert requests[0][1]["properties"] == ["email", "firstname"]
+    assert requests[0][1]["propertiesWithHistory"] == []
     assert requests[0][1]["inputs"][0] == {"id": "person-0@example.com"}
     assert (result.success, result.skipped, result.failed, result.kept_values) == (0, 101, 0, 101)
 
@@ -312,6 +379,15 @@ def test_fill_empty_correlates_internal_ids_and_lowercased_emails(
 def test_fill_empty_207_filters_patch_and_posts_missing_record_in_full(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    httpserver.expect_request("/crm/v3/properties/contacts", method="GET").respond_with_json(
+        {
+            "results": [
+                {"name": "email"},
+                {"name": "firstname"},
+                {"name": "lifecycle_stage"},
+            ]
+        }
+    )
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
     ).respond_with_json(
@@ -325,7 +401,9 @@ def test_fill_empty_207_filters_patch_and_posts_missing_record_in_full(
                     },
                 }
             ],
-            "errors": [{"id": "new@example.com", "status": "error"}],
+            "status": "COMPLETE",
+            "numErrors": 1,
+            "errors": [_not_found("new@example.com")],
         },
         status=207,
     )
@@ -361,18 +439,20 @@ def test_fill_empty_207_filters_patch_and_posts_missing_record_in_full(
     )
 
     requests = _json_requests(httpserver)
-    assert requests[0][1] == {
+    assert requests[0] == ("/crm/v3/properties/contacts", {})
+    assert requests[1][1] == {
         "idProperty": "email",
         "properties": ["email", "firstname"],
+        "propertiesWithHistory": [],
         "inputs": [{"id": "existing@example.com"}, {"id": "new@example.com"}],
     }
-    assert requests[1][1] == {
+    assert requests[2][1] == {
         "properties": {
             "email": "existing@example.com",
             "lifecycle_stage": "customer",
         }
     }
-    assert requests[2][1] == {
+    assert requests[3][1] == {
         "properties": records[1],
         "idProperty": "email",
     }
@@ -462,6 +542,115 @@ def test_fill_empty_read_failure_is_fail_closed(
     assert all(error.http_status == 503 for error in result.row_errors)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"results": {}},
+        {
+            "status": "PENDING",
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("a@b.com")],
+        },
+        {
+            "status": "COMPLETE",
+            "results": [],
+            "numErrors": 1,
+            "errors": [
+                {
+                    "category": "VALIDATION_ERROR",
+                    "context": {"ids": ["a@b.com"]},
+                }
+            ],
+        },
+        {
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("somebody-else@example.com")],
+        },
+        {"results": [], "numErrors": 1, "errors": []},
+    ],
+)
+def test_fill_empty_invalid_batch_read_body_fails_closed(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, Any],
+) -> None:
+    httpserver.expect_request(
+        "/crm/v3/objects/contacts/batch/read", method="POST"
+    ).respond_with_json(body, status=207)
+    _use_server(httpserver, monkeypatch)
+
+    result = HubSpotDestination().load(
+        [_RECORD],
+        _config(),
+        _options(write_policy="fill_empty"),
+    )
+
+    assert [request.path for request, _ in httpserver.log] == [
+        "/crm/v3/objects/contacts/batch/read"
+    ]
+    assert (result.success, result.failed) == (0, 1)
+
+
+def test_fill_empty_omitted_input_without_not_found_error_fails_closed(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request(
+        "/crm/v3/objects/contacts/batch/read", method="POST"
+    ).respond_with_json({"results": []}, status=207)
+    _use_server(httpserver, monkeypatch)
+
+    result = HubSpotDestination().load([_RECORD], _config(), _options(write_policy="fill_empty"))
+
+    assert len(httpserver.log) == 1
+    assert (result.success, result.failed) == (0, 1)
+
+
+def test_fill_empty_create_race_is_a_row_error_and_never_patches(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request(
+        "/crm/v3/objects/contacts/batch/read", method="POST"
+    ).respond_with_json(
+        {"results": [], "numErrors": 1, "errors": [_not_found("a@b.com")]},
+        status=207,
+    )
+    httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
+        {"message": "already exists"}, status=409
+    )
+    _use_server(httpserver, monkeypatch)
+
+    result = HubSpotDestination().load([_RECORD], _config(), _options(write_policy="fill_empty"))
+
+    assert [request.method for request, _ in httpserver.log] == ["POST", "POST"]
+    assert (result.success, result.failed) == (0, 1)
+    assert "record appeared between read and write; re-run" in result.row_errors[0].error_message
+
+
+def test_fill_empty_create_only_still_treats_post_409_as_no_match_skip(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request(
+        "/crm/v3/objects/contacts/batch/read", method="POST"
+    ).respond_with_json(
+        {"results": [], "numErrors": 1, "errors": [_not_found("a@b.com")]},
+        status=207,
+    )
+    httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
+        {"message": "already exists"}, status=409
+    )
+    _use_server(httpserver, monkeypatch)
+
+    result = HubSpotDestination().load(
+        [_RECORD], _config(), _options("create_only", write_policy="fill_empty")
+    )
+
+    assert [request.method for request, _ in httpserver.log] == ["POST", "POST"]
+    assert (result.success, result.skipped, result.skipped_no_match, result.failed) == (0, 1, 1, 0)
+
+
 def test_fill_empty_duplicate_ids_are_first_writer_wins(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -494,7 +683,10 @@ def test_fill_empty_template_error_remains_a_row_error(
 ) -> None:
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
-    ).respond_with_json({"results": []})
+    ).respond_with_json(
+        {"results": [], "numErrors": 1, "errors": [_not_found("good@example.com")]},
+        status=207,
+    )
     httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
         {"id": "1"}, status=201
     )
@@ -518,9 +710,12 @@ def test_fill_empty_template_error_remains_a_row_error(
     assert _json_requests(httpserver)[0][1]["inputs"] == [{"id": "good@example.com"}]
 
 
-def test_write_policy_override_typo_is_rejected_before_http(
+def test_write_policy_override_typo_is_rejected_before_write(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    httpserver.expect_request("/crm/v3/properties/contacts", method="GET").respond_with_json(
+        {"results": [{"name": "email"}, {"name": "firstname"}]}
+    )
     _use_server(httpserver, monkeypatch)
 
     with pytest.raises(
@@ -533,7 +728,73 @@ def test_write_policy_override_typo_is_rejected_before_http(
             _options(write_policy_overrides={"fristname": "fill_empty"}),
         )
 
-    assert httpserver.log == []
+    assert [request.path for request, _ in httpserver.log] == ["/crm/v3/properties/contacts"]
+
+
+def test_write_policy_override_validation_403_is_skipped_once(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    httpserver.expect_request("/crm/v3/properties/contacts", method="GET").respond_with_json(
+        {"message": "missing schemas scope"}, status=403
+    )
+    httpserver.expect_request(
+        "/crm/v3/objects/contacts/batch/read", method="POST"
+    ).respond_with_json({"results": [{"id": "a@b.com", "properties": {"firstname": "set"}}]})
+    _use_server(httpserver, monkeypatch)
+    destination = HubSpotDestination()
+    options = _options(write_policy_overrides={"firstname": "fill_empty"})
+
+    first = destination.load([_RECORD], _config(), options)
+    second = destination.load([_RECORD], _config(), options)
+
+    assert (first.skipped, second.skipped) == (1, 1)
+    paths = [request.path for request, _ in httpserver.log]
+    assert paths.count("/crm/v3/properties/contacts") == 1
+    assert paths.count("/crm/v3/objects/contacts/batch/read") == 2
+    assert caplog.text.count("property-name validation skipped") == 1
+
+
+def _json_requests_with_method(httpserver: HTTPServer, method: str) -> list[tuple[str, Any]]:
+    return [
+        (request.path, json.loads(request.get_data(as_text=True)))
+        for request, _response in httpserver.log
+        if request.method == method
+    ]
+
+
+def test_valid_override_absent_from_one_engine_batch_passes_schema_validation(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request("/crm/v3/properties/contacts", method="GET").respond_with_json(
+        {"results": [{"name": "email"}, {"name": "firstname"}, {"name": "lastname"}]}
+    )
+    httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
+        {"id": "1"}, status=201
+    )
+    httpserver.expect_request(
+        "/crm/v3/objects/contacts/batch/read", method="POST"
+    ).respond_with_json({"results": [{"id": "b@b.com", "properties": {"lastname": "set"}}]})
+    httpserver.expect_request("/crm/v3/objects/contacts/b@b.com", method="PATCH").respond_with_json(
+        {"id": "2"}
+    )
+    _use_server(httpserver, monkeypatch)
+    destination = HubSpotDestination()
+    options = _options(write_policy_overrides={"lastname": "fill_empty"})
+
+    first = destination.load([_RECORD], _config(), options)
+    second = destination.load(
+        [{"email": "b@b.com", "firstname": "B", "lastname": "Source"}],
+        _config(),
+        options,
+    )
+
+    assert (first.success, first.failed) == (1, 0)
+    # lastname is kept (non-empty), but firstname keeps the overwrite policy and is PATCHed.
+    assert (second.success, second.failed, second.kept_values) == (1, 0, 1)
+    patch = [body for request, body in _json_requests_with_method(httpserver, "PATCH")]
+    assert patch == [{"properties": {"email": "b@b.com", "firstname": "B"}}]
 
 
 def test_default_write_policy_makes_no_batch_read_call(
@@ -559,7 +820,7 @@ def test_default_write_policy_makes_no_batch_read_call(
     result = HubSpotDestination().load(
         [_RECORD, {"email": "existing@example.com", "firstname": "Grace"}],
         _config(),
-        _options(),
+        _options(write_policy_overrides={"not_a_real_property": "overwrite"}),
     )
 
     assert [request.path for request, _ in httpserver.log] == [
@@ -568,6 +829,27 @@ def test_default_write_policy_makes_no_batch_read_call(
         "/crm/v3/objects/contacts/existing@example.com",
     ]
     assert result.success == 2
+
+
+def test_default_policy_fail_stops_before_later_template_error() -> None:
+    config = _config(
+        properties_template='{"email": "{{ row.email }}", "firstname": {{ row.value }}}'
+    )
+
+    with patch("httpx.Client.post", return_value=_response(400)) as post:
+        result = HubSpotDestination().load(
+            [
+                {"email": "first@example.com", "value": '"Ada"'},
+                {"email": "later@example.com", "value": "not-json"},
+            ],
+            config,
+            _options(on_error="fail"),
+        )
+
+    post.assert_called_once()
+    assert (result.success, result.failed) == (0, 1)
+    assert result.row_errors[0].batch_index == 0
+    assert "properties_template error" not in result.row_errors[0].error_message
 
 
 @pytest.mark.parametrize(
@@ -598,7 +880,13 @@ def test_fill_empty_match_policy_interplay(
 ) -> None:
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
-    ).respond_with_json({"results": read_results}, status=207 if not read_results else 200)
+    ).respond_with_json(
+        {
+            "results": read_results,
+            **({"numErrors": 1, "errors": [_not_found("a@b.com")]} if not read_results else {}),
+        },
+        status=207 if not read_results else 200,
+    )
     if match_policy == "create_only" and not read_results:
         httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
             {"id": "1"}, status=201

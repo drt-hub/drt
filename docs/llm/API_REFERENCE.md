@@ -432,8 +432,9 @@ Rejected for `mode: replace`. A name in `write_policy_overrides` that is not a
 column of the destination table is an error (nothing written; needs introspection),
 and supported plan/diff destinations report it as unavailable when the source does
 not produce it. HubSpot instead validates exact, case-sensitive override names
-against the union of properties rendered by the complete `load()` call before any
-request.
+once against its properties API when the token has schema access; 401/403/404,
+unusable responses, transport failures, and exhausted 5xx retries skip this
+best-effort validation with a warning.
 
 ```yaml
 sync:
@@ -936,16 +937,26 @@ destination:
 ```
 
 HubSpot supports `sync.write_policy: fill_empty` for `mode: full`, `upsert`, and
-`incremental`, including `write_policy_overrides` and every `match_policy`.
-It renders the whole load call before I/O (override typos therefore fail before
-any request), then performs one rate-limited, retried batch read per ≤100 records.
-HTTP 200/207 are accepted; a failed read writes none of the affected records.
-Property names are lowercase and case-sensitive. Existing non-empty fill-only
-properties are omitted from PATCH, while new records are POSTed in full. A row
-with nothing to write beyond `id_property` is skipped without incrementing
-`skipped_no_match`; `SyncResult.kept_values` counts the kept properties. This leg
-is mock-verified only, not verified against a live HubSpot account. HubSpot has no
-`drt plan` / `--dry-run --diff` support today (#472).
+`incremental`, including `write_policy_overrides` and every `match_policy`. It
+performs one rate-limited, retried batch read per ≤100 rendered records. A 207 is
+accepted only when absent results have per-input `OBJECT_NOT_FOUND` errors; any
+other error, incomplete status, or missing/malformed `results` fails the group
+closed. Batch read and PATCH-by-`idProperty` require a unique-valued property or
+`hs_object_id`; a non-unique property such as `dealname` produces row errors and
+no writes. Existing non-empty fill-only properties are omitted from PATCH, while
+new records are POSTed in full; a POST-409 create race is a row error that asks
+the operator to re-run, never an unfiltered PATCH.
+
+Property names are lowercase and case-sensitive. Override names are checked once
+through the properties API when accessible and validation is skipped with a
+warning otherwise. Duplicate IDs within one load are first-writer-wins; across
+engine batches they rely on the next read seeing the previous write, so a small
+stale window is possible. Rate limiting counts logical operations, not internal
+retries or the default-policy POST-409-to-PATCH fallback. A row with nothing to
+write beyond `id_property` is skipped without incrementing `skipped_no_match`;
+the aggregated `SyncResult.kept_values` counts kept properties and `drt run`
+prints them. This leg is mock-verified only, not verified against a live HubSpot
+account. HubSpot has no `drt plan` / `--dry-run --diff` support today (#472).
 
 ### `type: zendesk`
 

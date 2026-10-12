@@ -326,6 +326,8 @@ def _run_one(
         # emitted when present so healthy runs keep a lean entry.
         if result.skipped_no_match:
             entry["rows_skipped_no_match"] = result.skipped_no_match
+        if getattr(result, "kept_values", 0):
+            entry["kept_values"] = result.kept_values
         if result.watermark_source:
             entry["watermark_source"] = result.watermark_source
         if result.cursor_value_used is not None:

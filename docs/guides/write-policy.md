@@ -80,11 +80,24 @@ MERGE expression. Before each group of at most 100 rendered records, drt sends
 one `batch/read` request for only the fill-only properties present in that group.
 For an existing object, non-empty fill-only properties are removed from the
 PATCH while overwrite properties and `id_property` remain. A new object is
-POSTed in full. A 207 partial read is valid: IDs absent from `results` are new.
-If the read fails after retries, drt fails those records closed and writes none
-of them—it never falls back to an overwrite. Property names are lowercase and
-case-sensitive. Repeated IDs are first-writer-wins within the load, including
-across its 100-record read chunks.
+POSTed in full. A 207 partial read is valid only when every absent result is
+reported by a per-input `OBJECT_NOT_FOUND`; any other batch error, incomplete
+status, or missing/malformed `results` fails the group closed and writes none of
+it. The batch read and PATCH-by-`idProperty` require a unique-valued HubSpot
+property or `hs_object_id`. A non-unique key such as `dealname` therefore fails
+the read with row errors and no writes. If a supposedly missing object appears
+before its POST and HubSpot returns 409, drt also fails that row closed and asks
+you to re-run—it does not send an unfiltered PATCH.
+
+Override names are lowercase and case-sensitive. drt validates them once
+against HubSpot's properties API when the token permits it; a 401/403/404,
+unusable response, transport failure, or exhausted 5xx retries skips validation
+with one warning because private apps may lack schema access. Repeated IDs are
+first-writer-wins within one destination load. Duplicates split across engine
+batches rely on HubSpot returning the first write on the next batch's read, so a
+small stale-read window remains possible. HubSpot rate limiting counts each
+logical lookup/read/write, not its internal retries or the default-policy
+POST-409-to-PATCH fallback.
 
 ## Behaviour
 
@@ -100,8 +113,8 @@ across its 100-record read chunks.
 - `mode: replace` is rejected: it rebuilds the table, so there is no existing
   value to keep.
 - A name in `write_policy_overrides` that is not a column of the destination
-  table—or, for HubSpot, not a property rendered by any record in the complete
-  `load()` call—is an error and nothing is written: a typo would otherwise apply the
+  table—or, for HubSpot, not a property returned by the properties API when that
+  best-effort lookup is available—is an error and nothing is written: a typo would otherwise apply the
   default policy to the column you meant (overwriting, when the default is
   `overwrite`). This is checked against the destination's own columns, so it is
   exact however the source batches its rows; it needs schema introspection
@@ -150,23 +163,23 @@ whose only differences are kept values is not listed at all, because nothing
 would be written. BigQuery destination diff/plan is unsupported, so these preview
 semantics and counts are not available for it. HubSpot also has no destination
 diff/plan support ([#472](https://github.com/drt-hub/drt/issues/472)), so `drt plan`
-and `drt run --dry-run --diff` remain unsupported for it. Its direct destination
+and `drt run --dry-run --diff` remain unsupported for it. Its aggregated run
 `SyncResult.kept_values` counts kept **properties** exactly; a row for which every
 non-ID property is kept is an ordinary skip, not an error or a no-match skip.
 
 A normal SQL `drt run` does not count kept values: the write is a single upsert
 statement, which does not report per column what it left alone. Use the diff or
 the plan to see them before writing. HubSpot can count them because it reads the
-current properties before writing; this additive destination result field is not
-yet included in the aggregate CLI summary.
+current properties before writing; `drt run` reports the aggregate as
+`N properties kept (non-empty)`.
 
 ## Not the same as
 
 - **`match_policy: create_only`**: never updates *any* column of an existing row.
 - **Filtering in the model SQL**: the warehouse does not know the destination's
   current value. SQL destinations decide inside the write itself; HubSpot uses
-  the API's batch read followed by a filtered PATCH and keeps the POST-409 fallback
-  for a create race.
+  the API's batch read followed by a filtered PATCH and fails a POST-409 create
+  race closed so it cannot overwrite a newly appeared record.
 
 The HubSpot leg is verified against HTTP mocks only; no live HubSpot account was
 available for this implementation.

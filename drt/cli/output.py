@@ -144,6 +144,11 @@ def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> Non
             if result.skipped
             else ""
         )
+        + (
+            f", {result.kept_values} properties kept (non-empty)"
+            if getattr(result, "kept_values", 0)
+            else ""
+        )
         + f"  [dim]({elapsed:.1f}s)[/dim]"
     )
     for err in result.errors[:5]:

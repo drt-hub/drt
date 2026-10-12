@@ -101,8 +101,9 @@ destination:
   id_property: email
 ```
 
-drt renders the complete destination batch first, then reads current HubSpot
-values in groups of at most 100 through `crm/v3/objects/{object_type}/batch/read`.
+For batches that contain fill-only properties, drt renders groups of at most
+100 records, then reads their current HubSpot values through
+`crm/v3/objects/{object_type}/batch/read`.
 An existing property's `null`, empty string, or spaces-only string is filled;
 `"0"`, numeric `0`, and `false` are values and are kept. Non-empty fill-only
 properties are removed from the PATCH, while overwrite properties and
@@ -110,16 +111,26 @@ properties are removed from the PATCH, while overwrite properties and
 same behavior works with `mode: full`, `upsert`, or `incremental`, and composes
 with `match_policy: update_only` / `create_only`.
 
-The read is fail-closed: after retries, any non-200/207 response or exception
-records row errors and no affected record is written. A 207 partial response is
-accepted; IDs absent from its `results` are treated as new. Repeated IDs are
-first-writer-wins during one load. Override names are lowercase and
-case-sensitive and must appear in at least one rendered record across the whole
-load call; a typo raises before any HTTP request. If every non-ID property is
-kept, the write is skipped without a no-match error. `SyncResult.kept_values`
-counts kept properties for direct destination callers. A result that cannot be
-correlated back to its requested `id_property` also fails closed; it is never
-treated as a missing object.
+The read is fail-closed: after retries, any non-200/207 response, incomplete
+body status, missing or malformed `results`, or batch error other than a
+per-input `OBJECT_NOT_FOUND` records row errors and writes none of that read's
+records. A 207 partial response is accepted only when every absent result has a
+correlated `OBJECT_NOT_FOUND`; those IDs are treated as new. The batch-read and
+PATCH-by-`idProperty` APIs require `id_property` to be `hs_object_id` or a
+HubSpot property whose values are unique. A non-unique choice such as
+`dealname` makes the fill-empty read fail, producing row errors and no writes.
+
+Override names are lowercase and case-sensitive. When the private-app token can
+read schemas, drt checks them once against
+`crm/v3/properties/{object_type}` before writing. If that endpoint is unavailable,
+unusable, or returns 401/403/404 (a token may lack the schemas scope), validation
+is skipped with one warning and the sync continues. Repeated IDs are
+first-writer-wins within one destination `load()` call. Duplicates split across
+separate engine batches rely on HubSpot returning the first write on the next
+read, so a small stale-read window is possible. If every non-ID property is kept,
+the write is skipped without a no-match error. `SyncResult.kept_values` counts
+kept properties and is summed into the run result. A result that cannot be
+correlated back to its requested `id_property` also fails closed.
 
 HubSpot is not a `QueryableDestination`, so `drt plan` and
 `drt run --dry-run --diff` remain unsupported for it; [#472](https://github.com/drt-hub/drt/issues/472)
@@ -144,6 +155,11 @@ destination:
 ```
 
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a portal but request different rates, the lowest wins for both.
+
+Rate limiting counts logical operations: one properties lookup, batch read, or
+row write consumes one limiter slot. Retries within that operation do not consume
+another slot, and the default-policy POST-409-to-PATCH fallback remains one
+logical write.
 
 > **Syncing to more than one portal? Use `auth.token_env`, not an inline `auth.token`.**
 > Pacing is per portal, and drt identifies the portal by the *name* of the env var holding the token — it deliberately never derives the key from the token value itself. Two destinations that inline a literal token are therefore indistinguishable to the limiter and share one bucket, so they pace against each other even when they point at different portals. The failure mode is a slower sync, never a 429; giving each portal its own env var gives each its own bucket.

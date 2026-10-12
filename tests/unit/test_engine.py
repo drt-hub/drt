@@ -120,6 +120,31 @@ def test_run_sync_all_success(tmp_path: Path) -> None:
     assert result.duration_seconds >= 0
 
 
+def test_run_sync_sums_kept_values_across_batches(tmp_path: Path) -> None:
+    class KeptValueDestination(FakeDestination):
+        def load(
+            self,
+            records: list[dict],
+            config: DestinationConfig,
+            sync_options: SyncOptions,
+        ) -> SyncResult:
+            self.calls.append(records)
+            return SyncResult(success=len(records), kept_values=len(self.calls))
+
+    destination = KeptValueDestination()
+
+    result = run_sync(
+        _make_sync(batch_size=2),
+        FakeSource([{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]),
+        destination,
+        _make_profile(),
+        tmp_path,
+    )
+
+    assert len(destination.calls) == 2
+    assert result.kept_values == 3
+
+
 def test_run_sync_dry_run(tmp_path: Path) -> None:
     rows = [{"id": i} for i in range(5)]
     source = FakeSource(rows)
