@@ -41,9 +41,9 @@ def init(
         help="Ossie dataset name to scaffold. Repeat to select multiple; default: all with keys.",
     ),
     destination: str = typer.Option(
-        "rest_api",
+        "postgres",
         "--destination",
-        help="Destination scaffold for --from-ossie: postgres | hubspot | rest_api.",
+        help="Destination scaffold for --from-ossie: postgres | hubspot.",
     ),
     dialect: str = typer.Option(
         "ANSI_SQL",
@@ -255,6 +255,18 @@ def _init_from_ossie(
                     dialect=dialect,
                 )
             )
+
+        filenames: dict[str, str] = {}
+        for scaffold in scaffolds:
+            folded = scaffold.filename.casefold()
+            previous = filenames.get(folded)
+            if previous is not None:
+                raise OssieModelError(
+                    "Selected Ossie datasets produce case-insensitively colliding output "
+                    f"paths: {previous!r} and {scaffold.filename!r}. Rename one dataset "
+                    "before generating files."
+                )
+            filenames[folded] = scaffold.filename
     except (FileNotFoundError, OssieModelError) as exc:
         print_error(str(exc))
         raise typer.Exit(1)

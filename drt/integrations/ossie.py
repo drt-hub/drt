@@ -10,17 +10,45 @@ package straightforward once its distribution and Python floor fit drt.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from drt.engine.resolver import validate_sql_identifier
-
 SUPPORTED_OSSIE_VERSION = "0.2.0.dev0"
-SUPPORTED_DESTINATIONS = frozenset({"postgres", "hubspot", "rest_api"})
+SUPPORTED_DESTINATIONS = frozenset({"postgres", "hubspot"})
+MAX_OSSIE_MODEL_BYTES = 5 * 1024 * 1024
 _QUERY_START = re.compile(r"^\s*(?:SELECT|WITH)\b", re.IGNORECASE)
+_IDENTIFIER_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RESERVED_WORDS = frozenset(
+    {
+        "alter",
+        "and",
+        "as",
+        "by",
+        "create",
+        "delete",
+        "drop",
+        "from",
+        "group",
+        "having",
+        "insert",
+        "join",
+        "limit",
+        "on",
+        "or",
+        "order",
+        "select",
+        "table",
+        "union",
+        "update",
+        "user",
+        "where",
+        "with",
+    }
+)
 
 
 class OssieModelError(ValueError):
@@ -101,6 +129,94 @@ def _represent_literal(dumper: yaml.SafeDumper, data: _LiteralString) -> yaml.no
 _ScaffoldDumper.add_representer(_LiteralString, _represent_literal)
 
 
+def _unsafe_sql_tokens(sql: str) -> Iterator[tuple[int, str]]:
+    """Find separators, comments, and NULs outside simple SQL quoted spans."""
+    quote: str | None = None
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if quote is not None:
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        if char == "\x00":
+            yield index, "NUL"
+        elif char == ";":
+            yield index, ";"
+        elif sql.startswith("--", index):
+            yield index, "--"
+            index += 1
+        elif sql.startswith("/*", index):
+            yield index, "/*"
+            index += 1
+        elif sql.startswith("*/", index):
+            yield index, "*/"
+            index += 1
+        index += 1
+
+
+def _validate_sql_expression(sql: str, *, label: str) -> None:
+    unsafe = next(_unsafe_sql_tokens(sql), None)
+    if unsafe is not None:
+        token = unsafe[1]
+        raise OssieModelError(
+            f"{label} contains forbidden SQL token {token!r} outside a quoted string literal."
+        )
+
+
+def _validate_alias(identifier: str, *, label: str) -> str:
+    if not _IDENTIFIER_SEGMENT.fullmatch(identifier) or identifier != identifier.lower():
+        raise OssieModelError(
+            f"{label} {identifier!r} must be a safe lowercase SQL identifier; "
+            "rename the field in the Ossie model."
+        )
+    if identifier in _RESERVED_WORDS:
+        raise OssieModelError(
+            f"{label} {identifier!r} is a reserved SQL word; rename the field in the Ossie model."
+        )
+    return identifier
+
+
+def _validate_dataset_name(identifier: str) -> str:
+    if not _IDENTIFIER_SEGMENT.fullmatch(identifier):
+        raise OssieModelError(
+            f"Dataset name {identifier!r} must contain only letters, digits, and underscores "
+            "and must not start with a digit."
+        )
+    return identifier
+
+
+def _validate_source_identifier(identifier: str, *, dataset_name: str) -> str:
+    segments = identifier.split(".")
+    if len(segments) > 3:
+        raise OssieModelError(
+            f"Dataset {dataset_name!r} source identifier {identifier!r} has more than "
+            "three segments."
+        )
+    for segment in segments:
+        if not _IDENTIFIER_SEGMENT.fullmatch(segment):
+            raise OssieModelError(
+                f"Dataset {dataset_name!r} source identifier {identifier!r} has invalid "
+                f"segment {segment!r}; each dot-separated segment must start with a letter "
+                "or underscore and contain only letters, digits, and underscores."
+            )
+        if segment.lower() in _RESERVED_WORDS:
+            raise OssieModelError(
+                f"Dataset {dataset_name!r} source identifier {identifier!r} uses reserved "
+                f"SQL word {segment!r} as a segment."
+            )
+    return identifier
+
+
 def _mapping(value: Any, path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise OssieModelError(f"{path} must be an object.")
@@ -148,7 +264,9 @@ def _string_list(value: Any, path: str) -> tuple[str, ...]:
     return tuple(parsed)
 
 
-def _expressions(value: Any, path: str) -> tuple[OssieDialectExpression, ...]:
+def _expressions(
+    value: Any, path: str, *, expression_label: str
+) -> tuple[OssieDialectExpression, ...]:
     expression = _mapping(value, path)
     dialects = _sequence(expression.get("dialects"), f"{path}.dialects")
     if not dialects:
@@ -161,6 +279,7 @@ def _expressions(value: Any, path: str) -> tuple[OssieDialectExpression, ...]:
         item = _mapping(raw, dialect_path)
         dialect = _required_string(item, "dialect", dialect_path).upper()
         sql = _required_string(item, "expression", dialect_path)
+        _validate_sql_expression(sql, label=expression_label)
         if dialect in seen:
             raise OssieModelError(f"{path} declares dialect {dialect!r} more than once.")
         seen.add(dialect)
@@ -168,7 +287,7 @@ def _expressions(value: Any, path: str) -> tuple[OssieDialectExpression, ...]:
     return tuple(parsed)
 
 
-def _fields(value: Any, dataset_path: str) -> tuple[OssieField, ...]:
+def _fields(value: Any, dataset_path: str, dataset_name: str) -> tuple[OssieField, ...]:
     if value is None:
         return ()
     fields = _sequence(value, f"{dataset_path}.fields")
@@ -179,7 +298,7 @@ def _fields(value: Any, dataset_path: str) -> tuple[OssieField, ...]:
         item = _mapping(raw, path)
         name = _required_string(item, "name", path)
         if name in seen:
-            raise OssieModelError(f"{dataset_path} declares field {name!r} more than once.")
+            raise OssieModelError(f"Dataset {dataset_name!r} has duplicate output alias {name!r}.")
         seen.add(name)
         datatype = item.get("datatype")
         if datatype is not None and not isinstance(datatype, str):
@@ -195,7 +314,11 @@ def _fields(value: Any, dataset_path: str) -> tuple[OssieField, ...]:
         parsed.append(
             OssieField(
                 name=name,
-                expressions=_expressions(item.get("expression"), f"{path}.expression"),
+                expressions=_expressions(
+                    item.get("expression"),
+                    f"{path}.expression",
+                    expression_label=f"Dataset {dataset_name!r} field {name!r} expression",
+                ),
                 description=_optional_string(item, "description", path),
                 datatype=datatype,
                 is_time=is_time,
@@ -221,6 +344,17 @@ def _datasets(value: Any) -> tuple[OssieDataset, ...]:
         seen.add(name)
 
         primary_key = _string_list(item.get("primary_key", []), f"{path}.primary_key")
+        seen_keys: set[str] = set()
+        duplicate_keys: set[str] = set()
+        for key in primary_key:
+            if key in seen_keys:
+                duplicate_keys.add(key)
+            seen_keys.add(key)
+        if duplicate_keys:
+            raise OssieModelError(
+                f"Dataset {name!r} primary_key contains duplicate column(s): "
+                f"{', '.join(sorted(duplicate_keys))}."
+            )
         raw_unique_keys = _sequence(item.get("unique_keys", []), f"{path}.unique_keys")
         unique_keys = tuple(
             _string_list(key, f"{path}.unique_keys[{key_index}]")
@@ -232,7 +366,7 @@ def _datasets(value: Any) -> tuple[OssieDataset, ...]:
                 source=_required_string(item, "source", path),
                 primary_key=primary_key,
                 unique_keys=unique_keys,
-                fields=_fields(item.get("fields"), path),
+                fields=_fields(item.get("fields"), path, name),
                 description=_optional_string(item, "description", path),
                 ai_context=_ai_context(item, path),
             )
@@ -255,10 +389,15 @@ def _metrics(value: Any) -> tuple[OssieMetric, ...]:
     for index, raw in enumerate(_sequence(value, "metrics")):
         path = f"metrics[{index}]"
         item = _mapping(raw, path)
+        name = _required_string(item, "name", path)
         parsed.append(
             OssieMetric(
-                name=_required_string(item, "name", path),
-                expressions=_expressions(item.get("expression"), f"{path}.expression"),
+                name=name,
+                expressions=_expressions(
+                    item.get("expression"),
+                    f"{path}.expression",
+                    expression_label=f"Metric {name!r} expression",
+                ),
                 description=_optional_string(item, "description", path),
             )
         )
@@ -271,8 +410,17 @@ def load_ossie_model(path: Path) -> OssieModel:
         raise FileNotFoundError(f"Ossie model not found: {path}")
 
     try:
-        loaded = yaml.safe_load(path.read_text())
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        with path.open("rb") as model_file:
+            payload = model_file.read(MAX_OSSIE_MODEL_BYTES + 1)
+        if len(payload) > MAX_OSSIE_MODEL_BYTES:
+            raise OssieModelError(
+                f"Ossie model {path} exceeds the {MAX_OSSIE_MODEL_BYTES // (1024 * 1024)} MB "
+                "input limit."
+            )
+        loaded = yaml.safe_load(payload.decode("utf-8"))
+    except OssieModelError:
+        raise
+    except (OSError, UnicodeError, yaml.YAMLError, RecursionError, MemoryError) as exc:
         raise OssieModelError(f"Could not read Ossie model {path}: {exc}") from exc
 
     root = _mapping(loaded, "Ossie document")
@@ -328,21 +476,21 @@ def _select_expression(dataset: OssieDataset, field: OssieField, dialect: str) -
 def _render_source(dataset: OssieDataset) -> str:
     source = dataset.source.strip()
     if _QUERY_START.match(source):
-        query = source[:-1].rstrip() if source.endswith(";") else source
-        if ";" in query or "\x00" in query:
+        trailing_separator = False
+        for position, token in _unsafe_sql_tokens(source):
+            if token == ";" and position == len(source) - 1:
+                trailing_separator = True
+                continue
             raise OssieModelError(
-                f"Dataset {dataset.name!r} source query contains multiple statements or "
-                "a NUL byte; only one SELECT/WITH query can be scaffolded."
+                f"Dataset {dataset.name!r} source query contains forbidden SQL token "
+                f"{token!r} outside a quoted string literal; only one uncommented "
+                "SELECT/WITH query can be scaffolded."
             )
-        return f"(\n{query}\n) AS _ossie_source"
+        if trailing_separator:
+            source = source[:-1].rstrip()
+        return f"(\n{source}\n) AS _ossie_source"
 
-    try:
-        return validate_sql_identifier(source, label=f"dataset {dataset.name!r} source")
-    except ValueError as exc:
-        raise OssieModelError(
-            f"Dataset {dataset.name!r} source must be a SELECT/WITH query or a safe "
-            f"unquoted table identifier: {exc}"
-        ) from exc
+    return _validate_source_identifier(source, dataset_name=dataset.name)
 
 
 def _destination_config(destination: str, dataset: OssieDataset) -> dict[str, Any]:
@@ -358,19 +506,13 @@ def _destination_config(destination: str, dataset: OssieDataset) -> dict[str, An
             raise OssieModelError(
                 f"Dataset {dataset.name!r} has composite primary_key "
                 f"{list(dataset.primary_key)!r}; HubSpot requires exactly one id_property. "
-                "Choose a single stable key or scaffold a SQL/REST destination instead."
+                "Choose a single stable key or scaffold a PostgreSQL destination instead."
             )
         return {
             "type": "hubspot",
             "object_type": "contacts",
             "id_property": dataset.primary_key[0],
             "auth": {"type": "bearer", "token_env": "HUBSPOT_TOKEN"},
-        }
-    if destination == "rest_api":
-        return {
-            "type": "rest_api",
-            "url": "https://example.com/api",
-            "method": "POST",
         }
     supported = ", ".join(sorted(SUPPORTED_DESTINATIONS))
     raise OssieModelError(
@@ -388,15 +530,13 @@ def _todo_comments(
         f"# Generated from Apache Ossie model {model.name!r}.",
         "# TODO before running:",
         "#   - Configure drt_project.yml and the source profile/credentials.",
-        "#   - Replace destination credential and endpoint placeholders.",
+        "#   - Replace destination credential and target placeholders.",
         "#   - Review column/property names; add sync.field_mappings where they differ.",
     ]
     if destination == "postgres":
         comments.append("#   - Replace destination.table with the real target table name.")
     elif destination == "hubspot":
         comments.append("#   - Review object_type for the real HubSpot object.")
-    else:
-        comments.append("#   - Map fields to the destination API's real property names/body shape.")
     if implicit_primary_key_fields:
         names = ", ".join(implicit_primary_key_fields)
         comments.append(
@@ -416,7 +556,7 @@ def build_ossie_scaffold(
     model: OssieModel,
     dataset: OssieDataset,
     *,
-    destination: str = "rest_api",
+    destination: str = "postgres",
     dialect: str = "ANSI_SQL",
 ) -> OssieScaffold:
     """Render one selected Ossie dataset as a validating drt sync YAML."""
@@ -427,36 +567,33 @@ def build_ossie_scaffold(
     if not dataset.fields:
         raise OssieModelError(f"Dataset {dataset.name!r} has no fields to generate.")
 
-    try:
-        validate_sql_identifier(dataset.name, label="dataset name")
-        if "." in dataset.name:
-            raise ValueError(f"dataset name {dataset.name!r} must not be qualified.")
-        for field in dataset.fields:
-            validate_sql_identifier(field.name, label=f"dataset {dataset.name!r} field name")
-            if "." in field.name:
-                raise ValueError(
-                    f"dataset {dataset.name!r} field name {field.name!r} must not be qualified."
-                )
-        for key in dataset.primary_key:
-            validate_sql_identifier(key, label=f"dataset {dataset.name!r} primary key")
-            if "." in key:
-                raise ValueError(
-                    f"dataset {dataset.name!r} primary key {key!r} must not be qualified."
-                )
-    except ValueError as exc:
-        raise OssieModelError(str(exc)) from exc
+    _validate_dataset_name(dataset.name)
+    for field in dataset.fields:
+        _validate_alias(field.name, label=f"Dataset {dataset.name!r} field name")
+    for key in dataset.primary_key:
+        _validate_alias(key, label=f"Dataset {dataset.name!r} primary-key column")
 
     field_names = {field.name for field in dataset.fields}
     implicit_primary_key_fields = [key for key in dataset.primary_key if key not in field_names]
 
     select_items: list[str] = []
+    output_aliases: set[str] = set()
     fallback_fields: list[str] = []
     for field in dataset.fields:
+        if field.name in output_aliases:
+            raise OssieModelError(
+                f"Dataset {dataset.name!r} has duplicate output alias {field.name!r}."
+            )
+        output_aliases.add(field.name)
         expression, used_fallback = _select_expression(dataset, field, dialect)
         select_items.append(f"  {expression} AS {field.name}")
         if used_fallback:
             fallback_fields.append(field.name)
-    select_items.extend(f"  {key} AS {key}" for key in implicit_primary_key_fields)
+    for key in implicit_primary_key_fields:
+        if key in output_aliases:
+            raise OssieModelError(f"Dataset {dataset.name!r} has duplicate output alias {key!r}.")
+        output_aliases.add(key)
+        select_items.append(f"  {key} AS {key}")
     sql = "SELECT\n" + ",\n".join(select_items) + f"\nFROM {_render_source(dataset)}"
 
     version = model.version or "unspecified"

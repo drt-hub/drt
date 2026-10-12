@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from drt.config.credentials import BigQueryProfile
-from drt.engine.resolver import parse_ref, resolve_model_ref
+from drt.engine.resolver import _validate_cursor_field, parse_ref, resolve_model_ref
 
 
 def _profile(dataset: str = "my_dataset") -> BigQueryProfile:
@@ -71,6 +71,10 @@ def test_resolve_non_ref_string_passthrough(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # incremental cursor injection
 # ---------------------------------------------------------------------------
+
+
+def test_cursor_field_keeps_historical_trailing_newline_acceptance() -> None:
+    assert _validate_cursor_field("updated_at\n") == "updated_at\n"
 
 
 def test_resolve_incremental_injects_where(tmp_path: Path) -> None:

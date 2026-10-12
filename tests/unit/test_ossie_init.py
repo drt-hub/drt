@@ -14,6 +14,7 @@ import drt.cli.main  # noqa: F401 — importing registers commands on the shared
 from drt.cli._app import app
 from drt.config.parser import load_syncs_safe
 from drt.integrations.ossie import (
+    MAX_OSSIE_MODEL_BYTES,
     OssieModelError,
     build_ossie_scaffold,
     load_ossie_model,
@@ -171,6 +172,61 @@ def test_reader_rejects_structurally_unusable_input(
         load_ossie_model(path)
 
 
+def test_reader_rejects_input_above_five_megabytes(tmp_path: Path) -> None:
+    path = tmp_path / "too-large.yaml"
+    path.write_bytes(b" " * (MAX_OSSIE_MODEL_BYTES + 1))
+
+    with pytest.raises(OssieModelError, match="exceeds the 5 MB input limit"):
+        load_ossie_model(path)
+
+
+def test_reader_wraps_deep_yaml_recursion_as_model_error(tmp_path: Path) -> None:
+    path = tmp_path / "deep.yaml"
+    path.write_text("nested: " + "[" * 2_000 + "0" + "]" * 2_000)
+
+    with pytest.raises(OssieModelError, match="Could not read Ossie model"):
+        load_ossie_model(path)
+
+
+@pytest.mark.parametrize("token", [";", "--", "/*", "*/", "\x00"])
+def test_reader_rejects_unsafe_field_expression_tokens(tmp_path: Path, token: str) -> None:
+    data = _model_data()
+    data["datasets"][0]["fields"][1]["expression"]["dialects"][0]["expression"] = (
+        f"email {token} injected"
+    )
+
+    with pytest.raises(
+        OssieModelError,
+        match=r"Dataset 'customers' field 'email' expression contains forbidden SQL token",
+    ):
+        load_ossie_model(_write_model(tmp_path, data))
+
+
+def test_reader_rejects_unsafe_metric_expression(tmp_path: Path) -> None:
+    data = _model_data()
+    data["metrics"][0]["expression"]["dialects"][0]["expression"] = "COUNT(*) -- injected"
+
+    with pytest.raises(
+        OssieModelError,
+        match=r"Metric 'customer_count' expression contains forbidden SQL token '--'",
+    ):
+        load_ossie_model(_write_model(tmp_path, data))
+
+
+def test_expression_scanner_allows_tokens_inside_all_supported_quote_styles(
+    tmp_path: Path,
+) -> None:
+    data = _model_data()
+    data["datasets"][0]["fields"][1]["expression"]["dialects"][0]["expression"] = (
+        "COALESCE('it''s; --', \"double; /*\", `backtick; */`)"
+    )
+
+    model = load_ossie_model(_write_model(tmp_path, data))
+    scaffold = build_ossie_scaffold(model, model.datasets[0])
+
+    assert "COALESCE('it''s; --'" in yaml.safe_load(scaffold.yaml_text)["model"]
+
+
 def test_dialect_selection_prefers_requested_then_falls_back_to_ansi(tmp_path: Path) -> None:
     model = load_ossie_model(_write_model(tmp_path))
     scaffold = build_ossie_scaffold(
@@ -233,7 +289,14 @@ def test_hubspot_requires_a_single_primary_key(tmp_path: Path) -> None:
         build_ossie_scaffold(model, model.datasets[1], destination="hubspot")
 
 
-def test_query_source_is_wrapped_and_unsafe_table_source_is_rejected(tmp_path: Path) -> None:
+def test_rest_api_scaffold_is_rejected_instead_of_claiming_upsert(tmp_path: Path) -> None:
+    model = load_ossie_model(_write_model(tmp_path))
+
+    with pytest.raises(OssieModelError, match="Unsupported Ossie scaffold destination 'rest_api'"):
+        build_ossie_scaffold(model, model.datasets[0], destination="rest_api")
+
+
+def test_query_source_is_wrapped_and_trailing_separator_is_stripped(tmp_path: Path) -> None:
     data = _model_data()
     data["datasets"][0]["source"] = "SELECT customer_id, email FROM raw.customers;"
     model = load_ossie_model(_write_model(tmp_path, data))
@@ -242,13 +305,71 @@ def test_query_source_is_wrapped_and_unsafe_table_source_is_rejected(tmp_path: P
     sql = yaml.safe_load(scaffold.yaml_text)["model"]
     assert "FROM (\nSELECT customer_id, email FROM raw.customers\n) AS _ossie_source" in sql
 
-    data["datasets"][0]["source"] = "raw.customers; DROP TABLE customers"
+
+def test_source_query_allows_separator_and_comments_inside_quoted_literals(
+    tmp_path: Path,
+) -> None:
+    data = _model_data()
+    data["datasets"][0]["source"] = "SELECT customer_id, '; -- /* */' AS note FROM raw.customers;"
     model = load_ossie_model(_write_model(tmp_path, data))
-    with pytest.raises(OssieModelError, match="safe unquoted table identifier"):
+
+    scaffold = build_ossie_scaffold(model, model.datasets[0])
+
+    assert "'; -- /* */' AS note" in yaml.safe_load(scaffold.yaml_text)["model"]
+
+
+def test_source_query_rejects_more_than_one_statement(tmp_path: Path) -> None:
+    data = _model_data()
+    data["datasets"][0]["source"] = "SELECT * FROM raw.customers; SELECT 1;"
+    model = load_ossie_model(_write_model(tmp_path, data))
+
+    with pytest.raises(OssieModelError, match="forbidden SQL token ';'"):
         build_ossie_scaffold(model, model.datasets[0])
 
 
-@pytest.mark.parametrize("destination", ["postgres", "hubspot", "rest_api"])
+@pytest.mark.parametrize(
+    "source",
+    ["db..table", "db.", "db.123table", "one.two.three.four", "analytics.select"],
+)
+def test_source_identifier_segments_are_strict(tmp_path: Path, source: str) -> None:
+    data = _model_data()
+    data["datasets"][0]["source"] = source
+    model = load_ossie_model(_write_model(tmp_path, data))
+
+    with pytest.raises(OssieModelError, match="source identifier"):
+        build_ossie_scaffold(model, model.datasets[0])
+
+
+@pytest.mark.parametrize("field_name", ["CustomerID", "select", "bad-name", "123id"])
+def test_output_alias_must_be_safe_lowercase_and_not_reserved(
+    tmp_path: Path, field_name: str
+) -> None:
+    data = _model_data()
+    data["datasets"][0]["fields"][0]["name"] = field_name
+    data["datasets"][0]["primary_key"] = [field_name]
+    model = load_ossie_model(_write_model(tmp_path, data))
+
+    with pytest.raises(OssieModelError, match="rename the field in the Ossie model"):
+        build_ossie_scaffold(model, model.datasets[0])
+
+
+def test_duplicate_primary_key_columns_are_rejected(tmp_path: Path) -> None:
+    data = _model_data()
+    data["datasets"][0]["primary_key"] = ["external_id", "external_id"]
+
+    with pytest.raises(OssieModelError, match="primary_key contains duplicate column"):
+        load_ossie_model(_write_model(tmp_path, data))
+
+
+def test_duplicate_field_output_aliases_are_rejected(tmp_path: Path) -> None:
+    data = _model_data()
+    data["datasets"][0]["fields"].append(data["datasets"][0]["fields"][1])
+
+    with pytest.raises(OssieModelError, match="duplicate output alias 'email'"):
+        load_ossie_model(_write_model(tmp_path, data))
+
+
+@pytest.mark.parametrize("destination", ["postgres", "hubspot"])
 def test_generated_yaml_round_trips_through_real_sync_parser(
     tmp_path: Path, destination: str
 ) -> None:
@@ -343,3 +464,23 @@ def test_cli_unknown_dataset_is_a_clear_error(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Unknown Ossie dataset(s): does_not_exist" in result.output
+
+
+def test_cli_rejects_case_insensitive_output_path_collision_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _model_data()
+    second = json.loads(json.dumps(data["datasets"][0]))
+    data["datasets"] = [data["datasets"][0], second]
+    data["datasets"][0]["name"] = "Customer"
+    data["datasets"][1]["name"] = "customer"
+    model_path = _write_model(tmp_path, data)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--from-ossie", str(model_path)])
+
+    assert result.exit_code == 1
+    assert "case-insensitively colliding output" in result.output
+    assert "sync_Customer.yml" in result.output
+    assert "sync_customer.yml" in result.output
+    assert not (tmp_path / "syncs").exists()

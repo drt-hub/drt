@@ -40,12 +40,14 @@ drt init --from-ossie semantic_model.yaml \
   --output-dir syncs/
 ```
 
-Supported scaffold destinations are `postgres`, `hubspot`, and `rest_api`.
-PostgreSQL keeps composite primary keys as `upsert_key`; HubSpot requires one
-primary-key column for `id_property`. Each sync selects the dataset fields in
-the requested dialect, falling back field-by-field to `ANSI_SQL`. If neither
-expression exists, generation stops before writing any files and names the
-dataset, field, and missing dialect.
+Supported scaffold destinations are `postgres` (the default) and `hubspot`.
+The generic `rest_api` destination is deliberately unavailable because a
+plain per-record POST cannot promise keyed upsert or replay safety. PostgreSQL
+keeps composite primary keys as `upsert_key`; HubSpot requires one primary-key
+column for `id_property`. Each sync selects the dataset fields in the requested
+dialect, falling back field-by-field to `ANSI_SQL`. If neither expression
+exists, generation stops before writing any files and names the dataset,
+field, and missing dialect.
 
 Generated files contain `sync.mode: upsert`, provenance, and TODOs for source
 credentials, destination table/endpoint, and destination property mappings.
@@ -54,10 +56,14 @@ activation entity grain from which drt could safely infer a `GROUP BY`.
 
 The reader tolerates unknown keys and warns on missing or unrecognised
 versions, because `0.2.0.dev0` is explicitly unstable. It still rejects a
-document without a usable model/dataset/field shape. Table sources must be
-safe unquoted qualified identifiers; a `SELECT`/`WITH` source is wrapped as a
-subquery. See the [spike findings](../research/ossie-activation-spike.md) for
-the mapping gaps and recommendation.
+document without a usable model/dataset/field shape and refuses input larger
+than 5 MB. Field aliases must be safe lowercase, non-reserved SQL identifiers.
+Table sources may have at most three safe, non-reserved identifier segments; a
+single `SELECT`/`WITH` source is wrapped as a subquery. SQL separators, comments,
+and NUL bytes are rejected outside single-, double-, or backtick-quoted spans;
+one trailing query semicolon is allowed. See the [spike
+findings](../research/ossie-activation-spike.md) for the mapping gaps and
+recommendation.
 
 ## Setup
 

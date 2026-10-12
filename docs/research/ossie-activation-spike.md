@@ -20,7 +20,8 @@ Ossie dependency on the run path. The reader is isolated in
   `FROM` relation (or a wrapped subquery).
 - Dataset fields map to a deterministic `SELECT <expression> AS <field>` list.
   Per-field dialect selection works cleanly, including a documented
-  `ANSI_SQL` fallback.
+  `ANSI_SQL` fallback. The spike requires lowercase, non-reserved aliases so
+  emitted aliases and destination keys remain identical across SQL dialects.
 - A dataset `primary_key` maps directly to SQL destination `upsert_key`.
   Composite keys survive for PostgreSQL; a single key maps to HubSpot's
   `id_property`.
@@ -53,15 +54,19 @@ Ossie dependency on the run path. The reader is isolated in
 - **Field expressions are dialect-specific.** A field can have several opaque
   dialect expressions. drt can select the requested one or fall back to
   `ANSI_SQL`, but it cannot prove that an ANSI expression runs unchanged on
-  every configured warehouse.
+  every configured warehouse. The scaffold rejects statement separators, SQL
+  comment markers, and NUL bytes outside quoted spans before interpolation; it
+  does not attempt to parse or validate the remaining dialect-specific SQL.
 - **Metrics need a group-by grain.** Model-level metrics may span datasets and
   contain aggregation/window logic, but Ossie does not provide the activation
   entity grain needed to build one row per destination object. Metrics are
   listed as “available but not generated (entity grain unclear).”
 - **A source can be a query.** The spec's `source` is one string for either a
   table/view or query and does not declare a query dialect. The spike accepts a
-  single `SELECT`/`WITH` query and wraps it; table-like values must pass drt's
-  conservative unquoted identifier validation.
+  single uncommented `SELECT`/`WITH` query and wraps it; one trailing semicolon
+  is stripped, while separators inside quoted literals are preserved.
+  Table-like values may have at most three strictly validated unquoted
+  identifier segments.
 - **The specification is unstable.** `0.2.0.dev0` is explicitly unreleased and
   has already changed the document root from a `semantic_model` array to one
   flat model. Unknown versions warn instead of failing; structurally unusable
@@ -70,6 +75,13 @@ Ossie dependency on the run path. The reader is isolated in
   semantics, not destination credentials, endpoints, object/table names,
   create-vs-update policy, field mappings, rate limits, error policy, or data
   movement. Those choices cannot be inferred from semantic metadata alone.
+  Accordingly, the spike offers only PostgreSQL and HubSpot scaffolds with
+  real keyed-upsert configuration. It does not offer a generic REST scaffold:
+  a plain POST per record would duplicate on replay, and designing a keyed URL
+  plus API-specific idempotency contract is outside this metadata format.
+- **Import is intentionally bounded.** A model file larger than 5 MB is
+  refused, and parser recursion or memory failures are reported as model
+  errors. This is a one-time metadata scaffold, not a bulk-data ingestion path.
 - **The official package is not currently a viable drt dependency.** It is not
   on PyPI and requires Python 3.11+, while drt supports Python 3.10+. Vendoring
   its full schema/runtime would enlarge core for a one-time scaffold operation.
