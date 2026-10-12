@@ -142,6 +142,23 @@ class OssieScaffold:
     implicit_primary_key_fields: tuple[str, ...]
 
 
+# GoogleSQL (BigQuery) reserved keywords, merged in because BigQuery is the strictest
+# supported dialect. The check is deliberately best-effort: a reserved word missed here
+# produces SQL the warehouse rejects when the sync is validated or run (a loud failure,
+# not an unsafe one), and the user renames the field in the semantic model.
+_RESERVED_WORDS = _RESERVED_WORDS | frozenset(
+    """
+    all and any array as asc assert_rows_modified at between by case cast collate contains
+    create cross cube current default define desc distinct else end enum escape except
+    exclude exists extract false fetch following for from full graph_table group grouping
+    groups hash having if ignore in inner intersect interval into is join lateral left like
+    limit lookup merge natural new no not null nulls of on or order outer over partition
+    preceding proto qualify range recursive respect right rollup rows select set some struct
+    tablesample then to treat true unbounded union unnest using when where window with within
+    """.split()
+)
+
+
 def _sql_error(label: str, problem: str, change: str) -> OssieModelError:
     return OssieModelError(f"{label} {problem}; {change}.")
 
@@ -155,6 +172,16 @@ def _validate_sql_expression(
     differs among supported warehouses is refused before it can be placed in a
     generated query.
     """
+    # drt renders a sync's `model` through Jinja, so a template marker anywhere
+    # (even inside a quoted literal) would execute at render time.
+    for marker in ("{{", "{%", "{#"):
+        if marker in sql:
+            raise _sql_error(
+                label,
+                f"contains the Jinja template marker {marker!r}, which drt would render",
+                "remove template syntax from the semantic model before scaffolding",
+            )
+
     quote: str | None = None
     index = 0
     while index < len(sql):
@@ -260,7 +287,16 @@ def _validate_alias(identifier: str, *, label: str) -> str:
     return identifier
 
 
+MAX_DATASET_NAME_LENGTH = 64
+
+
 def _validate_dataset_name(identifier: str) -> str:
+    if len(identifier) > MAX_DATASET_NAME_LENGTH:
+        raise OssieModelError(
+            f"Dataset name {identifier[:20]!r}... is {len(identifier)} characters; the limit is "
+            f"{MAX_DATASET_NAME_LENGTH} because it becomes a file name. Shorten it in the "
+            "Ossie model."
+        )
     if not _IDENTIFIER_SEGMENT.fullmatch(identifier):
         raise OssieModelError(
             f"Dataset name {identifier!r} must contain only letters, digits, and underscores "

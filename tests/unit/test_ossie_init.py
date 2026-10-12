@@ -216,6 +216,10 @@ def test_reader_rejects_unsafe_field_expression_tokens(tmp_path: Path, token: st
         "R'raw'",
         "value # comment",
         "value\rDROP TABLE victims",
+        "0 + {{ var('unused', '; DROP TABLE victims; --') }}",
+        "{% set x = 1 %}value",
+        "value {# hidden #}",
+        "'{{ env_var(\"SECRET\") }}'",
     ],
 )
 def test_reader_refuses_ambiguous_or_dialect_specific_field_expressions(
@@ -226,7 +230,7 @@ def test_reader_refuses_ambiguous_or_dialect_specific_field_expressions(
 
     with pytest.raises(
         OssieModelError,
-        match="before scaffolding|quoted span|remove it|ordinary quoted literal",
+        match="before scaffolding|quoted span|remove it|ordinary quoted literal|template",
     ):
         load_ossie_model(_write_model(tmp_path, data))
 
@@ -613,3 +617,34 @@ def test_cli_rejects_case_insensitive_output_path_collision_before_writing(
     assert "sync_Customer.yml" in result.output
     assert "sync_customer.yml" in result.output
     assert not (tmp_path / "syncs").exists()
+
+
+def test_reader_refuses_jinja_in_a_source_query(tmp_path: Path) -> None:
+    data = _model_data()
+    data["datasets"][0]["source"] = "SELECT {{ var('x', '; DROP TABLE victims') }} AS id"
+
+    with pytest.raises(OssieModelError, match="Jinja template marker"):
+        model = load_ossie_model(_write_model(tmp_path, data))
+        build_ossie_scaffold(model, model.datasets[0])
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["asc", "desc", "if", "nulls", "preceding", "enum", "assert_rows_modified", "graph_table"],
+)
+def test_reader_rejects_bigquery_reserved_aliases(tmp_path: Path, alias: str) -> None:
+    data = _model_data()
+    data["datasets"][0]["fields"][1]["name"] = alias
+    model = load_ossie_model(_write_model(tmp_path, data))
+
+    with pytest.raises(OssieModelError, match="reserved SQL word"):
+        build_ossie_scaffold(model, model.datasets[0])
+
+
+def test_reader_rejects_overlong_dataset_names(tmp_path: Path) -> None:
+    data = _model_data()
+    data["datasets"][0]["name"] = "a" * 300
+
+    with pytest.raises(OssieModelError, match="limit is 64"):
+        model = load_ossie_model(_write_model(tmp_path, data))
+        build_ossie_scaffold(model, model.datasets[0])

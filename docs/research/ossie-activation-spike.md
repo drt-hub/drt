@@ -115,3 +115,19 @@ run option B against several production-shaped models, record which TODO edits
 operators make, and use those edits to decide whether C is merely a parser swap
 or whether a separate, explicit activation-mapping extension should be
 proposed before any part of D.
+
+## Input-safety posture of the scaffold (added after review)
+
+The reader treats the Ossie file as semi-trusted input and refuses rather than guesses:
+
+- Expressions and source queries are checked by a deliberately small scanner. Anything whose
+  tokenization differs between warehouses is refused (backslashes, `$`, prefixed string
+  literals, unterminated quotes, `;` / comment markers outside quoted spans), as are Jinja
+  markers (`{{`, `{%`, `{#`), because drt renders a sync's `model` through Jinja.
+- Generated YAML is emitted through the YAML serializer; text that lands in comments is
+  split on every newline kind and prefixed per line.
+- Reserved-word checking is best-effort (SQL:2016 plus the common warehouse extras and the
+  GoogleSQL list). A missed word produces SQL the warehouse rejects when the sync is
+  validated or run, which is a loud failure rather than an unsafe one; the user renames the
+  field in the semantic model.
+- Dataset names are limited to 64 characters because they become file names.
