@@ -10,7 +10,7 @@ package straightforward once its distribution and Python floor fit drt.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,32 +22,60 @@ SUPPORTED_DESTINATIONS = frozenset({"postgres", "hubspot"})
 MAX_OSSIE_MODEL_BYTES = 5 * 1024 * 1024
 _QUERY_START = re.compile(r"^\s*(?:SELECT|WITH)\b", re.IGNORECASE)
 _IDENTIFIER_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PREFIXED_STRING = re.compile(r"(?:u&|[ebr])(?=['\"])", re.IGNORECASE)
+_COMMENT_TEXT_LIMIT = 500
+
+# Deliberately conservative: SQL:2016 reserved words plus common reserved
+# extensions from PostgreSQL, MySQL, BigQuery, Snowflake, and Databricks. A
+# false positive asks the user to choose a portable alias; a false negative can
+# generate SQL whose meaning changes by destination dialect.
 _RESERVED_WORDS = frozenset(
-    {
-        "alter",
-        "and",
-        "as",
-        "by",
-        "create",
-        "delete",
-        "drop",
-        "from",
-        "group",
-        "having",
-        "insert",
-        "join",
-        "limit",
-        "on",
-        "or",
-        "order",
-        "select",
-        "table",
-        "union",
-        "update",
-        "user",
-        "where",
-        "with",
-    }
+    """
+    abs accessible acos add all allocate alter analyse analyze and anti any are array
+    array_agg array_max_cardinality as asensitive asin asymmetric at atan atomic
+    authorization avg begin begin_frame begin_partition between bigint binary blob
+    boolean both by cache call called cardinality cascaded case cast ceil ceiling change
+    char character character_length char_length check classifier clear clone close cluster
+    coalesce collate collect column commit condition connect constraint contains convert corr
+    corresponding cos cosh count covar_pop covar_samp create cross cube cume_dist current
+    current_catalog current_date current_default_transform_group current_path current_role
+    current_row current_schema current_time current_timestamp current_transform_group_for_type
+    current_user cursor cycle database databases date day deallocate dec decimal declare default
+    define delayed delete dense_rank deref describe deterministic disconnect distinct distribute
+    div do double drop dynamic each element else empty enclosed end end_frame end_partition equals
+    escape escaped every except exclude exec execute exists exit exp explain external extract false
+    fetch fill filter first_value float floor following for force foreign format frame_row free
+    freeze from full fulltext function fusion get global grant group grouping groups gscluster hash
+    having high_priority hold hour identity ignore ilike in increment index indicator infile initial
+    inner inout insensitive insert int integer intersect intersection interval into io_after_gtids
+    io_before_gtids is isnull issue join json_array json_arrayagg json_exists json_object
+    json_objectagg json_query json_table json_table_primitive json_value key keys kill lag language
+    large last_value lateral lead leading left like like_regex limit linear lines listagg ln load
+    local localtime localtimestamp lock long longblob longtext lookup lower low_priority master_bind
+    master_ssl_verify_server_cert match matches match_number match_recognize max mediumblob
+    mediumint mediumtext member merge method min minus minute mod modifies module month msck
+    multiset national
+    natural nchar nclob new no none normalize not notnull nth_value ntile null nullif numeric
+    octet_length occurrences_regex of offset old omit on one only open optimize option optionally
+    or order organization out outer outfile over overlaps overlay overwrite parameter partition
+    pattern per percent percentile_cont percentile_disc percent_rank period pivot placing portion
+    position position_regex power precedes precision prepare primary procedure proto purge qualify
+    range rank read reads real recursive reduce ref references referencing refresh regexp regr_avgx
+    regr_avgy regr_count regr_intercept regr_r2 regr_slope regr_sxx regr_sxy regr_syy release
+    rename repair repeat replace require respect result return returning returns revoke right rlike
+    rollback rollup row rows row_number running sample savepoint schema schemas scope scroll search
+    second seek select semi sensitive session_user set show similar sin sinh skip smallint some sort
+    spatial specific specifictype sql sqlexception sqlstate sqlwarning sqrt ssl start starting
+    static stddev_pop stddev_samp straight_join struct submultiset subset substring substring_regex
+    succeeds sum suspend symmetric system system_time system_user table tablesample tan tanh
+    terminated then time timestamp timezone_hour timezone_minute tinyblob tinyint tinytext to
+    trailing translate translate_regex translation treat trigger trim trim_array true truncate
+    uescape
+    unbounded uncache union unique unknown unlock unnest unpivot unsigned update upper use
+    user using utc_date utc_time utc_timestamp value values varbinary varchar variadic varying
+    var_pop var_samp verbose versioning when whenever where width_bucket window with within without
+    write xor year zerofill
+    """.split()
 )
 
 
@@ -114,27 +142,44 @@ class OssieScaffold:
     implicit_primary_key_fields: tuple[str, ...]
 
 
-class _LiteralString(str):
-    """Marker used by the YAML dumper for readable SQL and provenance blocks."""
+def _sql_error(label: str, problem: str, change: str) -> OssieModelError:
+    return OssieModelError(f"{label} {problem}; {change}.")
 
 
-class _ScaffoldDumper(yaml.SafeDumper):
-    pass
+def _validate_sql_expression(
+    sql: str, *, label: str, allow_trailing_separator: bool = False
+) -> None:
+    """Accept only a small, unambiguous SQL quoting subset.
 
-
-def _represent_literal(dumper: yaml.SafeDumper, data: _LiteralString) -> yaml.nodes.ScalarNode:
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-
-
-_ScaffoldDumper.add_representer(_LiteralString, _represent_literal)
-
-
-def _unsafe_sql_tokens(sql: str) -> Iterator[tuple[int, str]]:
-    """Find separators, comments, and NULs outside simple SQL quoted spans."""
+    This is intentionally not a dialect parser. Anything whose tokenization
+    differs among supported warehouses is refused before it can be placed in a
+    generated query.
+    """
     quote: str | None = None
     index = 0
     while index < len(sql):
         char = sql[index]
+
+        if char == "\\":
+            raise _sql_error(
+                label,
+                "contains a backslash, whose escaping rules vary by SQL dialect",
+                "rewrite it without backslash escapes before scaffolding",
+            )
+        if char == "$":
+            raise _sql_error(
+                label,
+                "contains a dollar sign, which may start dialect-specific quoting or substitution",
+                "replace dollar quoting/placeholders with portable SQL before scaffolding",
+            )
+        if unicodedata.category(char) == "Cc" and char not in {"\t", "\n"}:
+            display = "NUL" if char == "\x00" else f"control character U+{ord(char):04X}"
+            raise _sql_error(
+                label,
+                f"contains forbidden {display}",
+                "remove control characters before scaffolding",
+            )
+
         if quote is not None:
             if char == quote:
                 if index + 1 < len(sql) and sql[index + 1] == quote:
@@ -144,33 +189,62 @@ def _unsafe_sql_tokens(sql: str) -> Iterator[tuple[int, str]]:
             index += 1
             continue
 
+        prefixed = _PREFIXED_STRING.match(sql, index)
+        if prefixed is not None and (
+            index == 0 or not (sql[index - 1].isalnum() or sql[index - 1] == "_")
+        ):
+            raise _sql_error(
+                label,
+                f"contains dialect-specific prefixed string literal {prefixed.group(0)!r}",
+                "use an ordinary quoted literal with doubled quotes instead",
+            )
+
         if char in {"'", '"', "`"}:
             quote = char
             index += 1
             continue
-        if char == "\x00":
-            yield index, "NUL"
-        elif char == ";":
-            yield index, ";"
+
+        token: str | None = None
+        if char == ";":
+            if allow_trailing_separator and not sql[index + 1 :].strip():
+                index += 1
+                continue
+            token = ";"
         elif sql.startswith("--", index):
-            yield index, "--"
-            index += 1
+            token = "--"
         elif sql.startswith("/*", index):
-            yield index, "/*"
-            index += 1
+            token = "/*"
         elif sql.startswith("*/", index):
-            yield index, "*/"
-            index += 1
+            token = "*/"
+        elif char == "#":
+            token = "#"
+        if token is not None:
+            raise _sql_error(
+                label,
+                f"contains forbidden SQL separator/comment token {token!r} outside a quoted span",
+                "remove it and provide one expression or one uncommented SELECT/WITH query",
+            )
         index += 1
 
-
-def _validate_sql_expression(sql: str, *, label: str) -> None:
-    unsafe = next(_unsafe_sql_tokens(sql), None)
-    if unsafe is not None:
-        token = unsafe[1]
-        raise OssieModelError(
-            f"{label} contains forbidden SQL token {token!r} outside a quoted string literal."
+    if quote is not None:
+        quote_name = {"'": "single", '"': "double", "`": "backtick"}[quote]
+        raise _sql_error(
+            label,
+            f"contains an unterminated {quote_name}-quoted span",
+            f"close the {quote_name}-quoted span and escape embedded quotes by doubling them",
         )
+
+
+def _safe_comment_lines(text: str) -> list[str]:
+    """Render bounded comment text with every physical line safely prefixed."""
+    raw_lines = text.splitlines() or [""]
+    clean_text = "\n".join(
+        "".join(char for char in line if not unicodedata.category(char).startswith("C"))
+        for line in raw_lines
+    )
+    if len(clean_text) > _COMMENT_TEXT_LIMIT:
+        clean_text = clean_text[: _COMMENT_TEXT_LIMIT - 3] + "..."
+    return [f"# {line}" for line in clean_text.split("\n")]
 
 
 def _validate_alias(identifier: str, *, label: str) -> str:
@@ -476,17 +550,12 @@ def _select_expression(dataset: OssieDataset, field: OssieField, dialect: str) -
 def _render_source(dataset: OssieDataset) -> str:
     source = dataset.source.strip()
     if _QUERY_START.match(source):
-        trailing_separator = False
-        for position, token in _unsafe_sql_tokens(source):
-            if token == ";" and position == len(source) - 1:
-                trailing_separator = True
-                continue
-            raise OssieModelError(
-                f"Dataset {dataset.name!r} source query contains forbidden SQL token "
-                f"{token!r} outside a quoted string literal; only one uncommented "
-                "SELECT/WITH query can be scaffolded."
-            )
-        if trailing_separator:
+        _validate_sql_expression(
+            source,
+            label=f"Dataset {dataset.name!r} source query",
+            allow_trailing_separator=True,
+        )
+        if source.endswith(";"):
             source = source[:-1].rstrip()
         return f"(\n{source}\n) AS _ossie_source"
 
@@ -527,26 +596,30 @@ def _todo_comments(
     implicit_primary_key_fields: list[str],
 ) -> list[str]:
     comments = [
-        f"# Generated from Apache Ossie model {model.name!r}.",
         "# TODO before running:",
         "#   - Configure drt_project.yml and the source profile/credentials.",
         "#   - Replace destination credential and target placeholders.",
         "#   - Review column/property names; add sync.field_mappings where they differ.",
     ]
+    comments[0:0] = _safe_comment_lines(f"Generated from Apache Ossie model {model.name!r}.")
     if destination == "postgres":
         comments.append("#   - Replace destination.table with the real target table name.")
     elif destination == "hubspot":
         comments.append("#   - Review object_type for the real HubSpot object.")
     if implicit_primary_key_fields:
         names = ", ".join(implicit_primary_key_fields)
-        comments.append(
-            "# Primary-key columns added directly because Ossie fields did not declare them: "
-            + names
+        comments.extend(
+            _safe_comment_lines(
+                "Primary-key columns added directly because Ossie fields did not declare them: "
+                + names
+            )
         )
     if model.metrics:
         names = ", ".join(metric.name for metric in model.metrics)
-        comments.append(
-            "# Ossie metrics available but not generated (entity grain unclear): " + names
+        comments.extend(
+            _safe_comment_lines(
+                "Ossie metrics available but not generated (entity grain unclear): " + names
+            )
         )
     comments.append("")
     return comments
@@ -602,14 +675,13 @@ def build_ossie_scaffold(
     sync_name = f"sync_{dataset.name}"
     sync_data = {
         "name": sync_name,
-        "description": _LiteralString("\n".join(description_lines)),
-        "model": _LiteralString(sql),
+        "description": "\n".join(description_lines),
+        "model": sql,
         "destination": _destination_config(destination, dataset),
         "sync": {"mode": "upsert"},
     }
-    rendered = yaml.dump(
+    rendered = yaml.safe_dump(
         sync_data,
-        Dumper=_ScaffoldDumper,
         default_flow_style=False,
         sort_keys=False,
         allow_unicode=True,

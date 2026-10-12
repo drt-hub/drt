@@ -50,7 +50,8 @@ exists, generation stops before writing any files and names the dataset,
 field, and missing dialect.
 
 Generated files contain `sync.mode: upsert`, provenance, and TODOs for source
-credentials, destination table/endpoint, and destination property mappings.
+credentials, the destination table or HubSpot object, and destination property
+mappings.
 Ossie metrics are listed but deliberately not selected: the model has no
 activation entity grain from which drt could safely infer a `GROUP BY`.
 
@@ -59,9 +60,12 @@ versions, because `0.2.0.dev0` is explicitly unstable. It still rejects a
 document without a usable model/dataset/field shape and refuses input larger
 than 5 MB. Field aliases must be safe lowercase, non-reserved SQL identifiers.
 Table sources may have at most three safe, non-reserved identifier segments; a
-single `SELECT`/`WITH` source is wrapped as a subquery. SQL separators, comments,
-and NUL bytes are rejected outside single-, double-, or backtick-quoted spans;
-one trailing query semicolon is allowed. See the [spike
+single `SELECT`/`WITH` source is wrapped as a subquery. The SQL safety check is
+deliberately conservative rather than dialect-aware: it requires balanced
+single, double, or backtick quotes with doubled-quote escaping, and rejects
+backslashes, dollar signs, prefixed string literals, control characters,
+separators, and comment markers when their interpretation could be ambiguous.
+One trailing query semicolon is allowed. See the [spike
 findings](../research/ossie-activation-spike.md) for the mapping gaps and
 recommendation.
 

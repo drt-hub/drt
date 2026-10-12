@@ -55,8 +55,8 @@ Guide the user through initializing a new drt project.
    ```
    By default this writes one upsert sync per dataset with a `primary_key` and
    prints why unkeyed datasets are skipped. Supported destination stubs are
-   `postgres`, `hubspot`, and `rest_api`; generated TODOs still need credentials,
-   target table/object, and property mappings. A requested field dialect falls
+   `postgres` and `hubspot`; generated TODOs still need credentials, target
+   table/object, and property mappings. A requested field dialect falls
    back to `ANSI_SQL`; metrics are listed but not generated because entity grain
    is unclear.
 

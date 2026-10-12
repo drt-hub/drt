@@ -54,9 +54,11 @@ Ossie dependency on the run path. The reader is isolated in
 - **Field expressions are dialect-specific.** A field can have several opaque
   dialect expressions. drt can select the requested one or fall back to
   `ANSI_SQL`, but it cannot prove that an ANSI expression runs unchanged on
-  every configured warehouse. The scaffold rejects statement separators, SQL
-  comment markers, and NUL bytes outside quoted spans before interpolation; it
-  does not attempt to parse or validate the remaining dialect-specific SQL.
+  every configured warehouse. The scaffold does not try to emulate each
+  database parser. It conservatively refuses dialect-specific quoting and
+  escaping, control characters, separators, or comment markers when it cannot
+  tokenize them unambiguously; the accepted subset requires balanced quotes
+  and doubled-quote escapes.
 - **Metrics need a group-by grain.** Model-level metrics may span datasets and
   contain aggregation/window logic, but Ossie does not provide the activation
   entity grain needed to build one row per destination object. Metrics are
@@ -69,8 +71,10 @@ Ossie dependency on the run path. The reader is isolated in
   identifier segments.
 - **The specification is unstable.** `0.2.0.dev0` is explicitly unreleased and
   has already changed the document root from a `semantic_model` array to one
-  flat model. Unknown versions warn instead of failing; structurally unusable
-  documents still fail clearly.
+  flat model. The repository's older flights example still uses that nested
+  document shape and is rejected, while the current flat TPC-DS example
+  scaffolds successfully. Unknown versions warn instead of failing;
+  structurally unusable documents still fail clearly.
 - **There is no write/activation concept.** Ossie describes analytical
   semantics, not destination credentials, endpoints, object/table names,
   create-vs-update policy, field mappings, rate limits, error policy, or data

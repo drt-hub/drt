@@ -197,7 +197,36 @@ def test_reader_rejects_unsafe_field_expression_tokens(tmp_path: Path, token: st
 
     with pytest.raises(
         OssieModelError,
-        match=r"Dataset 'customers' field 'email' expression contains forbidden SQL token",
+        match=r"Dataset 'customers' field 'email' expression contains forbidden",
+    ):
+        load_ossie_model(_write_model(tmp_path, data))
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "$q$'$q$; DROP TABLE victims; /*",
+        "E'x\\''; DROP TABLE victims; /*",
+        "'unterminated; DROP TABLE victims",
+        '"unterminated; DROP TABLE victims',
+        "`unterminated; DROP TABLE victims",
+        "'mysql\\'; DROP TABLE victims; /*'",
+        "U&'unicode'",
+        "B'0101'",
+        "R'raw'",
+        "value # comment",
+        "value\rDROP TABLE victims",
+    ],
+)
+def test_reader_refuses_ambiguous_or_dialect_specific_field_expressions(
+    tmp_path: Path, expression: str
+) -> None:
+    data = _model_data()
+    data["datasets"][0]["fields"][1]["expression"]["dialects"][0]["expression"] = expression
+
+    with pytest.raises(
+        OssieModelError,
+        match="before scaffolding|quoted span|remove it|ordinary quoted literal",
     ):
         load_ossie_model(_write_model(tmp_path, data))
 
@@ -208,7 +237,7 @@ def test_reader_rejects_unsafe_metric_expression(tmp_path: Path) -> None:
 
     with pytest.raises(
         OssieModelError,
-        match=r"Metric 'customer_count' expression contains forbidden SQL token '--'",
+        match=r"Metric 'customer_count' expression contains forbidden SQL.*'--'",
     ):
         load_ossie_model(_write_model(tmp_path, data))
 
@@ -218,13 +247,34 @@ def test_expression_scanner_allows_tokens_inside_all_supported_quote_styles(
 ) -> None:
     data = _model_data()
     data["datasets"][0]["fields"][1]["expression"]["dialects"][0]["expression"] = (
-        "COALESCE('it''s; --', \"double; /*\", `backtick; */`)"
+        "COALESCE('it''s; --', \"double\"\"; /*\", `backtick``; */`)"
     )
 
     model = load_ossie_model(_write_model(tmp_path, data))
     scaffold = build_ossie_scaffold(model, model.datasets[0])
 
     assert "COALESCE('it''s; --'" in yaml.safe_load(scaffold.yaml_text)["model"]
+
+
+def test_all_vendored_tpcds_datasets_still_scaffold_and_validate(tmp_path: Path) -> None:
+    model = load_ossie_model(FIXTURES / "tpcds_semantic_model.yaml")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+
+    for dataset in model.datasets:
+        scaffold = build_ossie_scaffold(model, dataset)
+        (syncs_dir / scaffold.filename).write_text(scaffold.yaml_text)
+
+    result = load_syncs_safe(tmp_path)
+
+    assert result.errors == {}
+    assert {sync.name for sync in result.syncs} == {
+        "sync_customer",
+        "sync_date_dim",
+        "sync_item",
+        "sync_store",
+        "sync_store_sales",
+    }
 
 
 def test_dialect_selection_prefers_requested_then_falls_back_to_ansi(tmp_path: Path) -> None:
@@ -310,7 +360,9 @@ def test_source_query_allows_separator_and_comments_inside_quoted_literals(
     tmp_path: Path,
 ) -> None:
     data = _model_data()
-    data["datasets"][0]["source"] = "SELECT customer_id, '; -- /* */' AS note FROM raw.customers;"
+    data["datasets"][0]["source"] = (
+        'SELECT customer_id, \'; -- /* */\' AS note, "a""; --" AS quoted FROM raw.customers;'
+    )
     model = load_ossie_model(_write_model(tmp_path, data))
 
     scaffold = build_ossie_scaffold(model, model.datasets[0])
@@ -318,12 +370,32 @@ def test_source_query_allows_separator_and_comments_inside_quoted_literals(
     assert "'; -- /* */' AS note" in yaml.safe_load(scaffold.yaml_text)["model"]
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "SELECT $q$'$q$; DROP TABLE victims; /*",
+        "SELECT E'x\\''; DROP TABLE victims; /*",
+        "SELECT 'unterminated; DROP TABLE victims",
+        "SELECT 'mysql\\'; DROP TABLE victims; /*'",
+    ],
+)
+def test_source_query_refuses_ambiguous_dialect_quoting(tmp_path: Path, source: str) -> None:
+    data = _model_data()
+    data["datasets"][0]["source"] = source
+    model = load_ossie_model(_write_model(tmp_path, data))
+
+    with pytest.raises(
+        OssieModelError, match="before scaffolding|quoted span|ordinary quoted literal"
+    ):
+        build_ossie_scaffold(model, model.datasets[0])
+
+
 def test_source_query_rejects_more_than_one_statement(tmp_path: Path) -> None:
     data = _model_data()
     data["datasets"][0]["source"] = "SELECT * FROM raw.customers; SELECT 1;"
     model = load_ossie_model(_write_model(tmp_path, data))
 
-    with pytest.raises(OssieModelError, match="forbidden SQL token ';'"):
+    with pytest.raises(OssieModelError, match="forbidden SQL separator/comment token ';'"):
         build_ossie_scaffold(model, model.datasets[0])
 
 
@@ -353,6 +425,31 @@ def test_output_alias_must_be_safe_lowercase_and_not_reserved(
         build_ossie_scaffold(model, model.datasets[0])
 
 
+@pytest.mark.parametrize("word", ["case", "default", "distinct", "values", "window", "qualify"])
+def test_common_cross_dialect_reserved_words_are_rejected_as_aliases(
+    tmp_path: Path, word: str
+) -> None:
+    data = _model_data()
+    data["datasets"][0]["fields"][0]["name"] = word
+    data["datasets"][0]["primary_key"] = [word]
+    model = load_ossie_model(_write_model(tmp_path, data))
+
+    with pytest.raises(OssieModelError, match="reserved SQL word"):
+        build_ossie_scaffold(model, model.datasets[0])
+
+
+@pytest.mark.parametrize("word", ["case", "default", "distinct", "values", "window", "qualify"])
+def test_common_cross_dialect_reserved_words_are_rejected_in_source_segments(
+    tmp_path: Path, word: str
+) -> None:
+    data = _model_data()
+    data["datasets"][0]["source"] = f"analytics.{word}"
+    model = load_ossie_model(_write_model(tmp_path, data))
+
+    with pytest.raises(OssieModelError, match="reserved SQL word"):
+        build_ossie_scaffold(model, model.datasets[0])
+
+
 def test_duplicate_primary_key_columns_are_rejected(tmp_path: Path) -> None:
     data = _model_data()
     data["datasets"][0]["primary_key"] = ["external_id", "external_id"]
@@ -379,6 +476,38 @@ def test_generated_yaml_round_trips_through_real_sync_parser(
     syncs_dir.mkdir()
     (syncs_dir / scaffold.filename).write_text(scaffold.yaml_text)
 
+    result = load_syncs_safe(tmp_path)
+
+    assert result.errors == {}
+    assert [sync.name for sync in result.syncs] == ["sync_customers"]
+
+
+def test_generated_yaml_safely_serializes_adversarial_metadata(tmp_path: Path) -> None:
+    data = _model_data()
+    data["name"] = "activation\r---\n...\n# model\n- model"
+    data["datasets"][0]["description"] = (
+        "Customers\r---\n...\ntags: [injected]\n# dataset\n- dataset"
+    )
+    data["metrics"][0]["name"] = "m\ntags: [injected]\r---\n...\n# metric\n- metric"
+    data["metrics"][0]["description"] = (
+        "Metric description\r---\n...\ntags: [injected]\n# description\n- description"
+    )
+    model = load_ossie_model(_write_model(tmp_path, data))
+    scaffold = build_ossie_scaffold(model, model.datasets[0])
+
+    parsed = yaml.safe_load(scaffold.yaml_text)
+    assert set(parsed) == {"name", "description", "model", "destination", "sync"}
+    assert "tags" not in parsed
+    assert parsed["name"] == "sync_customers"
+    assert parsed["description"].startswith(model.datasets[0].description)
+
+    yaml_start = scaffold.yaml_text.index("name:")
+    comment_block = scaffold.yaml_text[:yaml_start]
+    assert all(not line or line.startswith("#") for line in comment_block.splitlines())
+
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / scaffold.filename).write_text(scaffold.yaml_text)
     result = load_syncs_safe(tmp_path)
 
     assert result.errors == {}

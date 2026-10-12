@@ -139,7 +139,7 @@ useful when hand-authoring beyond the templates.
 Existing metadata can seed the same sync files: `drt init --from-dbt
 target/manifest.json` interactively scaffolds dbt models, while `drt init
 --from-ossie semantic_model.yaml [--dataset NAME ...] [--destination
-postgres|hubspot|rest_api]` scaffolds keyed Apache Ossie datasets. Review the
+postgres|hubspot]` scaffolds keyed Apache Ossie datasets. Review the
 generated TODOs, then run `drt validate`.
 
 ---
