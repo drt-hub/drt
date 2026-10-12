@@ -294,6 +294,50 @@ def test_batch_read_includes_history_and_accepts_correlated_not_found() -> None:
     }
 
 
+def test_batch_read_accepts_one_not_found_error_for_multiple_requested_ids() -> None:
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = httpx.Response(
+        207,
+        json={
+            "status": "COMPLETE",
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("a@b.com", "b@b.com")],
+        },
+        request=httpx.Request("POST", "https://example.test/batch/read"),
+    )
+
+    current = HubSpotDestination._read_current_properties(
+        client,
+        "https://example.test/batch/read",
+        {"Authorization": "Bearer token"},
+        "email",
+        ["firstname"],
+        ["a@b.com", "b@b.com"],
+    )
+
+    assert current == {}
+
+
+def test_batch_read_requires_complete_status_to_be_present() -> None:
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = httpx.Response(
+        200,
+        json={"results": [{"id": "a@b.com", "properties": {"firstname": "Ada"}}]},
+        request=httpx.Request("POST", "https://example.test/batch/read"),
+    )
+
+    with pytest.raises(ValueError, match="status must be COMPLETE"):
+        HubSpotDestination._read_current_properties(
+            client,
+            "https://example.test/batch/read",
+            {"Authorization": "Bearer token"},
+            "email",
+            ["firstname"],
+            ["a@b.com"],
+        )
+
+
 def test_fill_empty_batch_read_shape_and_100_input_limit(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -302,10 +346,11 @@ def test_fill_empty_batch_read_shape_and_100_input_limit(
         return Response(
             json.dumps(
                 {
+                    "status": "COMPLETE",
                     "results": [
                         {"id": item["id"], "properties": {"firstname": "already set"}}
                         for item in body["inputs"]
-                    ]
+                    ],
                 }
             ),
             content_type="application/json",
@@ -347,12 +392,13 @@ def test_fill_empty_correlates_internal_ids_and_lowercased_emails(
         return Response(
             json.dumps(
                 {
+                    "status": "COMPLETE",
                     "results": [
                         {
                             "id": "98765",  # internal object id, not the email
                             "properties": {"email": "mixed.case@example.com", "firstname": "Ann"},
                         }
-                    ]
+                    ],
                 }
             ),
             content_type="application/json",
@@ -392,6 +438,7 @@ def test_fill_empty_207_filters_patch_and_posts_missing_record_in_full(
         "/crm/v3/objects/contacts/batch/read", method="POST"
     ).respond_with_json(
         {
+            "status": "COMPLETE",
             "results": [
                 {
                     "id": "101",
@@ -401,7 +448,6 @@ def test_fill_empty_207_filters_patch_and_posts_missing_record_in_full(
                     },
                 }
             ],
-            "status": "COMPLETE",
             "numErrors": 1,
             "errors": [_not_found("new@example.com")],
         },
@@ -466,12 +512,13 @@ def test_fill_empty_writes_blank_text_but_keeps_string_zero(
         "/crm/v3/objects/contacts/batch/read", method="POST"
     ).respond_with_json(
         {
+            "status": "COMPLETE",
             "results": [
                 {
                     "id": "a@b.com",
                     "properties": {"firstname": "", "lastname": "   ", "score": "0"},
                 }
-            ]
+            ],
         }
     )
     httpserver.expect_request(
@@ -498,7 +545,12 @@ def test_fill_empty_all_properties_kept_skips_write(
 ) -> None:
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
-    ).respond_with_json({"results": [{"id": "a@b.com", "properties": {"firstname": "Human edit"}}]})
+    ).respond_with_json(
+        {
+            "status": "COMPLETE",
+            "results": [{"id": "a@b.com", "properties": {"firstname": "Human edit"}}],
+        }
+    )
     _use_server(httpserver, monkeypatch)
 
     result = HubSpotDestination().load(
@@ -546,7 +598,12 @@ def test_fill_empty_read_failure_is_fail_closed(
     "body",
     [
         {},
-        {"results": {}},
+        {
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("a@b.com")],
+        },
+        {"status": "COMPLETE", "results": {}},
         {
             "status": "PENDING",
             "results": [],
@@ -565,11 +622,12 @@ def test_fill_empty_read_failure_is_fail_closed(
             ],
         },
         {
+            "status": "COMPLETE",
             "results": [],
             "numErrors": 1,
-            "errors": [_not_found("somebody-else@example.com")],
+            "errors": [_not_found("a@b.com", "somebody-else@example.com")],
         },
-        {"results": [], "numErrors": 1, "errors": []},
+        {"status": "COMPLETE", "results": [], "numErrors": 1, "errors": []},
     ],
 )
 def test_fill_empty_invalid_batch_read_body_fails_closed(
@@ -599,7 +657,7 @@ def test_fill_empty_omitted_input_without_not_found_error_fails_closed(
 ) -> None:
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
-    ).respond_with_json({"results": []}, status=207)
+    ).respond_with_json({"status": "COMPLETE", "results": []}, status=207)
     _use_server(httpserver, monkeypatch)
 
     result = HubSpotDestination().load([_RECORD], _config(), _options(write_policy="fill_empty"))
@@ -614,7 +672,12 @@ def test_fill_empty_create_race_is_a_row_error_and_never_patches(
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
     ).respond_with_json(
-        {"results": [], "numErrors": 1, "errors": [_not_found("a@b.com")]},
+        {
+            "status": "COMPLETE",
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("a@b.com")],
+        },
         status=207,
     )
     httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
@@ -635,7 +698,12 @@ def test_fill_empty_create_only_still_treats_post_409_as_no_match_skip(
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
     ).respond_with_json(
-        {"results": [], "numErrors": 1, "errors": [_not_found("a@b.com")]},
+        {
+            "status": "COMPLETE",
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("a@b.com")],
+        },
         status=207,
     )
     httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
@@ -656,7 +724,12 @@ def test_fill_empty_duplicate_ids_are_first_writer_wins(
 ) -> None:
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
-    ).respond_with_json({"results": [{"id": "a@b.com", "properties": {"firstname": None}}]})
+    ).respond_with_json(
+        {
+            "status": "COMPLETE",
+            "results": [{"id": "a@b.com", "properties": {"firstname": None}}],
+        }
+    )
     httpserver.expect_request(
         "/crm/v3/objects/contacts/a@b.com",
         method="PATCH",
@@ -678,13 +751,54 @@ def test_fill_empty_duplicate_ids_are_first_writer_wins(
     assert (result.success, result.skipped, result.kept_values) == (1, 1, 1)
 
 
+def test_fill_empty_duplicate_after_no_fill_subchunk_uses_first_writer_state(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request("/crm/v3/properties/contacts", method="GET").respond_with_json(
+        {"results": [{"name": "email"}, {"name": "firstname"}, {"name": "lastname"}]}
+    )
+    httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
+        {"id": "created"}, status=201
+    )
+    httpserver.expect_request(
+        "/crm/v3/objects/contacts/batch/read", method="POST"
+    ).respond_with_json(
+        {
+            "status": "COMPLETE",
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("person-0@example.com")],
+        },
+        status=207,
+    )
+    _use_server(httpserver, monkeypatch)
+    records = [{"email": f"person-{i}@example.com", "firstname": f"Name {i}"} for i in range(100)]
+    records.append({"email": "person-0@example.com", "lastname": "Later value"})
+
+    result = HubSpotDestination().load(
+        records,
+        _config(),
+        _options(write_policy_overrides={"lastname": "fill_empty"}),
+    )
+
+    paths = [request.path for request, _ in httpserver.log]
+    assert paths.count("/crm/v3/objects/contacts") == 100
+    assert paths[-1] == "/crm/v3/objects/contacts/batch/read"
+    assert (result.success, result.skipped, result.failed, result.kept_values) == (100, 1, 0, 1)
+
+
 def test_fill_empty_template_error_remains_a_row_error(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
     ).respond_with_json(
-        {"results": [], "numErrors": 1, "errors": [_not_found("good@example.com")]},
+        {
+            "status": "COMPLETE",
+            "results": [],
+            "numErrors": 1,
+            "errors": [_not_found("good@example.com")],
+        },
         status=207,
     )
     httpserver.expect_request("/crm/v3/objects/contacts", method="POST").respond_with_json(
@@ -741,7 +855,12 @@ def test_write_policy_override_validation_403_is_skipped_once(
     )
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
-    ).respond_with_json({"results": [{"id": "a@b.com", "properties": {"firstname": "set"}}]})
+    ).respond_with_json(
+        {
+            "status": "COMPLETE",
+            "results": [{"id": "a@b.com", "properties": {"firstname": "set"}}],
+        }
+    )
     _use_server(httpserver, monkeypatch)
     destination = HubSpotDestination()
     options = _options(write_policy_overrides={"firstname": "fill_empty"})
@@ -754,6 +873,54 @@ def test_write_policy_override_validation_403_is_skipped_once(
     assert paths.count("/crm/v3/properties/contacts") == 1
     assert paths.count("/crm/v3/objects/contacts/batch/read") == 2
     assert caplog.text.count("property-name validation skipped") == 1
+
+
+def test_write_policy_override_cache_is_scoped_to_resolved_token(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_ordered_request(
+        "/crm/v3/properties/contacts",
+        method="GET",
+        headers={"Authorization": "Bearer portal-a"},
+    ).respond_with_json({"message": "missing schemas scope"}, status=403)
+    httpserver.expect_ordered_request(
+        "/crm/v3/objects/contacts/batch/read", method="POST"
+    ).respond_with_json(
+        {
+            "status": "COMPLETE",
+            "results": [{"id": "a@b.com", "properties": {"firstname": "set"}}],
+        }
+    )
+    httpserver.expect_ordered_request(
+        "/crm/v3/properties/contacts",
+        method="GET",
+        headers={"Authorization": "Bearer portal-b"},
+    ).respond_with_json({"results": [{"name": "email"}]})
+    _use_server(httpserver, monkeypatch)
+    destination = HubSpotDestination()
+    options = _options(write_policy_overrides={"firstname": "fill_empty"})
+
+    first = destination.load(
+        [_RECORD],
+        _config(auth={"type": "bearer", "token": "portal-a"}),
+        options,
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"write_policy_overrides names property/properties.*firstname",
+    ):
+        destination.load(
+            [_RECORD],
+            _config(auth={"type": "bearer", "token": "portal-b"}),
+            options,
+        )
+
+    assert (first.skipped, first.failed) == (1, 0)
+    assert [request.path for request, _ in httpserver.log] == [
+        "/crm/v3/properties/contacts",
+        "/crm/v3/objects/contacts/batch/read",
+        "/crm/v3/properties/contacts",
+    ]
 
 
 def _json_requests_with_method(httpserver: HTTPServer, method: str) -> list[tuple[str, Any]]:
@@ -775,7 +942,12 @@ def test_valid_override_absent_from_one_engine_batch_passes_schema_validation(
     )
     httpserver.expect_request(
         "/crm/v3/objects/contacts/batch/read", method="POST"
-    ).respond_with_json({"results": [{"id": "b@b.com", "properties": {"lastname": "set"}}]})
+    ).respond_with_json(
+        {
+            "status": "COMPLETE",
+            "results": [{"id": "b@b.com", "properties": {"lastname": "set"}}],
+        }
+    )
     httpserver.expect_request("/crm/v3/objects/contacts/b@b.com", method="PATCH").respond_with_json(
         {"id": "2"}
     )
@@ -882,6 +1054,7 @@ def test_fill_empty_match_policy_interplay(
         "/crm/v3/objects/contacts/batch/read", method="POST"
     ).respond_with_json(
         {
+            "status": "COMPLETE",
             "results": read_results,
             **({"numErrors": 1, "errors": [_not_found("a@b.com")]} if not read_results else {}),
         },

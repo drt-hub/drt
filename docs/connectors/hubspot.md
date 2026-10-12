@@ -111,17 +111,19 @@ properties are removed from the PATCH, while overwrite properties and
 same behavior works with `mode: full`, `upsert`, or `incremental`, and composes
 with `match_policy: update_only` / `create_only`.
 
-The read is fail-closed: after retries, any non-200/207 response, incomplete
-body status, missing or malformed `results`, or batch error other than a
-per-input `OBJECT_NOT_FOUND` records row errors and writes none of that read's
-records. A 207 partial response is accepted only when every absent result has a
-correlated `OBJECT_NOT_FOUND`; those IDs are treated as new. The batch-read and
-PATCH-by-`idProperty` APIs require `id_property` to be `hs_object_id` or a
-HubSpot property whose values are unique. A non-unique choice such as
-`dealname` makes the fill-empty read fail, producing row errors and no writes.
+The read is fail-closed: after retries, any non-200/207 response, absent body
+status or a status other than exactly `COMPLETE`, missing or malformed `results`,
+or batch error other than `OBJECT_NOT_FOUND` records row errors and writes none
+of that read's records. Each `OBJECT_NOT_FOUND` must carry a non-empty ID list
+containing only requested inputs; one error may group multiple IDs. A 207 partial
+response is accepted only when every absent result has a correlated error; those
+IDs are treated as new. The batch-read and PATCH-by-`idProperty` APIs require
+`id_property` to be `hs_object_id` or a HubSpot property whose values are
+unique. A non-unique choice such as `dealname` makes the fill-empty read fail,
+producing row errors and no writes.
 
 Override names are lowercase and case-sensitive. When the private-app token can
-read schemas, drt checks them once against
+read schemas, drt checks them once per object type and resolved token against
 `crm/v3/properties/{object_type}` before writing. If that endpoint is unavailable,
 unusable, or returns 401/403/404 (a token may lack the schemas scope), validation
 is skipped with one warning and the sync continues. Repeated IDs are

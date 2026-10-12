@@ -81,11 +81,13 @@ one `batch/read` request for only the fill-only properties present in that group
 For an existing object, non-empty fill-only properties are removed from the
 PATCH while overwrite properties and `id_property` remain. A new object is
 POSTed in full. A 207 partial read is valid only when every absent result is
-reported by a per-input `OBJECT_NOT_FOUND`; any other batch error, incomplete
-status, or missing/malformed `results` fails the group closed and writes none of
-it. The batch read and PATCH-by-`idProperty` require a unique-valued HubSpot
-property or `hs_object_id`. A non-unique key such as `dealname` therefore fails
-the read with row errors and no writes. If a supposedly missing object appears
+reported by `OBJECT_NOT_FOUND`; one error may group multiple IDs, but its
+non-empty ID list must contain only requested inputs. Any other batch error,
+status absent or not exactly `COMPLETE`, or missing/malformed `results` fails the
+group closed and writes none of it. The batch read and PATCH-by-`idProperty`
+require a unique-valued HubSpot property or `hs_object_id`. A non-unique key
+such as `dealname` therefore fails the read with row errors and no writes. If a
+supposedly missing object appears
 before its POST and HubSpot returns 409, drt also fails that row closed and asks
 you to re-run—it does not send an unfiltered PATCH.
 

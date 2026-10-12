@@ -42,6 +42,7 @@ Example sync YAML — deals:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -73,10 +74,10 @@ class HubSpotDestination:
     identifiers_case_insensitive = False
 
     def __init__(self) -> None:
-        # One destination instance is created per sync run. ``None`` means the
-        # best-effort lookup was unavailable or unusable, so later engine
-        # batches do not repeatedly call or warn about the same endpoint.
-        self._property_names: dict[str, frozenset[str] | None] = {}
+        # ``None`` means the best-effort lookup was unavailable or unusable, so
+        # later engine batches do not repeatedly call or warn for the same
+        # object type and resolved token. The token itself is never retained.
+        self._property_names: dict[tuple[str, str], frozenset[str] | None] = {}
 
     def load(
         self,
@@ -183,7 +184,13 @@ class HubSpotDestination:
                 return result
 
             self._validate_write_policy_overrides(
-                client, headers, config, sync_options, rate_limiter, retry_config
+                client,
+                headers,
+                config,
+                sync_options,
+                rate_limiter,
+                retry_config,
+                hashlib.sha256(token.encode("utf-8")).hexdigest(),
             )
 
             stop = False
@@ -286,11 +293,15 @@ class HubSpotDestination:
                         fill_for_record = sync_options.fill_empty_columns(properties) - {
                             config.id_property
                         }
-                        kept = {
-                            property_name
-                            for property_name in fill_for_record
-                            if not _is_empty(current_by_id[id_key].get(property_name))
-                        }
+                        kept = (
+                            fill_for_record
+                            if id_key in written_current_by_id
+                            else {
+                                property_name
+                                for property_name in fill_for_record
+                                if not _is_empty(current_by_id[id_key].get(property_name))
+                            }
+                        )
                         result.kept_values += len(kept)
                         if kept:
                             write_properties = {
@@ -365,11 +376,9 @@ class HubSpotDestination:
                             result.skipped_no_match += 1
                         else:
                             result.success += 1
+                            written_current_by_id.setdefault(id_key, {}).update(write_properties)
                             if fill_properties:
                                 current_by_id.setdefault(id_key, {}).update(write_properties)
-                                written_current_by_id.setdefault(id_key, {}).update(
-                                    write_properties
-                                )
                     except httpx.HTTPStatusError as e:
                         record_row_error(
                             result,
@@ -400,13 +409,15 @@ class HubSpotDestination:
         sync_options: SyncOptions,
         rate_limiter: RateLimiterBackend,
         retry_config: RetryConfig,
+        token_digest: str,
     ) -> None:
-        """Validate override names once when HubSpot exposes its property schema."""
+        """Validate override names once per object type and token when schemas are exposed."""
         if not sync_options.write_policy_overrides:
             return
 
         object_type = config.object_type
-        if object_type not in self._property_names:
+        cache_key = (object_type, token_digest)
+        if cache_key not in self._property_names:
             rate_limiter.acquire()
 
             def fetch_properties() -> frozenset[str]:
@@ -429,14 +440,14 @@ class HubSpotDestination:
                 return frozenset(names)
 
             try:
-                self._property_names[object_type] = with_retry(fetch_properties, retry_config)
+                self._property_names[cache_key] = with_retry(fetch_properties, retry_config)
             except Exception as exc:
-                self._property_names[object_type] = None
+                self._property_names[cache_key] = None
                 logger.warning(
                     "HubSpot property-name validation skipped for %s: %s", object_type, exc
                 )
 
-        property_names = self._property_names[object_type]
+        property_names = self._property_names[cache_key]
         if property_names is None:
             return
         unseen = sync_options.unseen_write_policy_overrides(property_names)
@@ -487,7 +498,7 @@ class HubSpotDestination:
         body = response.json()
         if not isinstance(body, dict):
             raise ValueError("HubSpot batch read response must be an object")
-        if "status" in body and body["status"] != "COMPLETE":
+        if body.get("status") != "COMPLETE":
             raise ValueError("HubSpot batch read response status must be COMPLETE")
         results = body.get("results")
         if not isinstance(results, list):
@@ -552,9 +563,9 @@ class HubSpotDestination:
                 raise ValueError("HubSpot batch read reported an error other than OBJECT_NOT_FOUND")
             context = error.get("context")
             context_ids = context.get("ids") if isinstance(context, dict) else None
-            if not isinstance(context_ids, list) or len(context_ids) != 1:
+            if not isinstance(context_ids, list) or not context_ids:
                 raise ValueError(
-                    "HubSpot OBJECT_NOT_FOUND error must identify exactly one requested input"
+                    "HubSpot OBJECT_NOT_FOUND error must identify at least one requested input"
                 )
             for context_id in context_ids:
                 requested = str(context_id)
@@ -564,7 +575,7 @@ class HubSpotDestination:
                     raise ValueError(
                         "HubSpot OBJECT_NOT_FOUND error references an unrequested input"
                     )
-                if requested in current or requested in missing_ids:
+                if requested in current:
                     raise ValueError("HubSpot batch read response has conflicting input outcomes")
                 missing_ids.add(requested)
 
