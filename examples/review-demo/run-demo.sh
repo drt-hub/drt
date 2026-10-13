@@ -55,21 +55,17 @@ reset_demo() {
 }
 
 wait_for_crm() {
-  local attempts=0
-  until [[ "$(docker compose ps --status healthy -q crm 2>/dev/null)" != "" ]]; do
-    attempts=$((attempts + 1))
-    if (( attempts >= 60 )); then
-      echo "Postgres did not become healthy; inspect: docker compose logs crm" >&2
-      exit 1
-    fi
-    sleep 1
-  done
+  # `up --wait` blocks until the service's healthcheck reports healthy. (`ps --status`
+  # has no "healthy" value, so polling it can never succeed.)
+  if ! docker compose up -d --wait --wait-timeout 120 crm; then
+    echo "Postgres did not become healthy; inspect: docker compose logs crm" >&2
+    exit 1
+  fi
 }
 
 setup_demo() {
   mkdir -p "$DEMO_HOME/.drt"
   cp profiles.yml.example "$DEMO_HOME/.drt/profiles.yml"
-  docker compose up -d
   wait_for_crm
   python seed.py
   echo
