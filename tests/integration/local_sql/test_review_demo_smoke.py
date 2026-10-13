@@ -112,11 +112,44 @@ def test_review_demo_plan_apply_and_guard(
     assert plan["guards"]["tripped"] == []
     assert dict(_rows(pg)) == before, "planning must be read-only"
 
+    from drt.engine import sync as sync_module
+
+    apply_results: list[Any] = []
+    real_run_sync = sync_module.run_sync
+
+    def capture_apply_result(*args: Any, **kwargs: Any) -> Any:
+        # apply's JSON entry has aggregate counts but not SyncResult.row_errors;
+        # retain the real result so a CI assertion shows the connector cause.
+        result = real_run_sync(*args, **kwargs)
+        apply_results.append(result)
+        return result
+
+    monkeypatch.setattr(sync_module, "run_sync", capture_apply_result)
     applied = runner.invoke(
         app,
-        ["apply", "plan.json", "--auto-approve", "--approved-by", "local smoke"],
+        [
+            "apply",
+            "plan.json",
+            "--auto-approve",
+            "--approved-by",
+            "local smoke",
+            "--output",
+            "json",
+        ],
     )
-    assert applied.exit_code == 0, applied.output
+    all_row_errors = [
+        error.error_message
+        for result in apply_results
+        for error in getattr(result, "row_errors", [])
+    ]
+    apply_diagnostics = {
+        "output": applied.output,
+        "row_error_count": len(all_row_errors),
+        "row_errors": list(dict.fromkeys(all_row_errors))[:20],
+        "exception": repr(applied.exception) if applied.exception else None,
+    }
+    assert applied.exit_code == 0, json.dumps(apply_diagnostics, indent=2)
+    assert json.loads(applied.stdout)["result"]["rows_failed"] == 0
     assert seed.verify_postgres_after_apply(_dsn(pg), data) == counts
 
     after_fill = dict(_rows(pg))

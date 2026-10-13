@@ -7,17 +7,23 @@ STAGE="all"
 RESET=0
 
 usage() {
-  echo "Usage: ./run-demo.sh [--reset] [all|setup|plan|apply|danger]"
+  echo "Usage: ./run-demo.sh [--reset] [all|setup|plan|apply|danger|mcp-env]"
 }
 
 for argument in "$@"; do
   case "$argument" in
     --reset) RESET=1 ;;
-    all|setup|plan|apply|danger) STAGE="$argument" ;;
+    all|setup|plan|apply|danger|mcp-env) STAGE="$argument" ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
 done
+
+if (( RESET )) && [[ "$STAGE" != "all" && "$STAGE" != "setup" ]]; then
+  echo "--reset is only valid with the all or setup stage." >&2
+  usage >&2
+  exit 2
+fi
 
 cd "$DEMO_DIR"
 
@@ -32,7 +38,9 @@ set -a
 source .env
 set +a
 
+export REVIEW_DEMO_PG_DSN="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_HOST_PORT}/${POSTGRES_DB}"
 export DRT_PLAN_KEY="review-demo-fixed-local-key"
+export COMPOSE_PROJECT_NAME="drt-review-demo"
 
 drt_local() {
   HOME="$DEMO_HOME" command drt "$@"
@@ -101,6 +109,39 @@ show_danger() {
   python seed.py --verify
 }
 
+show_mcp_env() {
+  python - "$DEMO_DIR" "$DEMO_HOME" "$REVIEW_DEMO_PG_DSN" "$DRT_PLAN_KEY" <<'PY'
+import json
+import shlex
+import sys
+
+demo_dir, demo_home, postgres_dsn, plan_key = sys.argv[1:]
+direct = (
+    f"cd {shlex.quote(demo_dir)} && set -a && source .env && set +a && "
+    f"export REVIEW_DEMO_PG_DSN={shlex.quote(postgres_dsn)} && "
+    f"HOME={shlex.quote(demo_home)} DRT_PLAN_KEY={shlex.quote(plan_key)} drt mcp run"
+)
+config = {
+    "mcpServers": {
+        "drt-review-demo": {
+            "type": "stdio",
+            "command": "/bin/bash",
+            "args": ["-c", f"cd {shlex.quote(demo_dir)} && exec drt mcp run"],
+            "env": {
+                "HOME": demo_home,
+                "REVIEW_DEMO_PG_DSN": postgres_dsn,
+                "DRT_PLAN_KEY": plan_key,
+            },
+        }
+    }
+}
+print("Direct stdio server launch (run after ./run-demo.sh setup):")
+print(direct)
+print("\nReady-to-paste Claude Code .mcp.json entry:")
+print(json.dumps(config, indent=2))
+PY
+}
+
 if (( RESET )); then
   reset_demo
 fi
@@ -110,6 +151,7 @@ case "$STAGE" in
   plan) plan_fill ;;
   apply) apply_fill ;;
   danger) show_danger ;;
+  mcp-env) show_mcp_env ;;
   all)
     setup_demo
     echo

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -96,3 +97,63 @@ def test_review_demo_seed_counts_are_derived_and_duckdb_is_real(tmp_path: Path) 
         ).fetchone() == (1_500,)
     finally:
         connection.close()
+
+
+def test_review_demo_partial_upsert_columns_are_nullable() -> None:
+    seed_source = (EXAMPLE / "seed.py").read_text()
+
+    assert (
+        "CREATE TABLE companies (\n"
+        "                    company_id BIGINT PRIMARY KEY,\n"
+        "                    domain TEXT,\n"
+        "                    name TEXT,\n"
+        "                    industry TEXT\n" in seed_source
+    )
+    assert "every unselected column must be nullable or have a" in seed_source
+
+
+def test_review_demo_shell_contracts(tmp_path: Path) -> None:
+    demo = tmp_path / "review-demo"
+    demo.mkdir()
+    script = demo / "run-demo.sh"
+    script.write_text((EXAMPLE / "run-demo.sh").read_text())
+    script.chmod(0o755)
+    (demo / ".env").write_text(
+        "POSTGRES_USER=drt\nPOSTGRES_PASSWORD=drt\nPOSTGRES_DB=crm\nPOSTGRES_HOST_PORT=56543\n"
+    )
+
+    mcp_env = subprocess.run(
+        ["bash", str(script), "mcp-env"],
+        cwd=demo,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert mcp_env.returncode == 0, mcp_env.stderr
+    assert "postgresql://drt:drt@localhost:56543/crm" in mcp_env.stdout
+    assert f'"HOME": "{demo}/.demo-home"' in mcp_env.stdout
+    assert '"DRT_PLAN_KEY": "review-demo-fixed-local-key"' in mcp_env.stdout
+    assert "drt mcp run" in mcp_env.stdout
+
+    invalid_reset = subprocess.run(
+        ["bash", str(script), "--reset", "plan"],
+        cwd=demo,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert invalid_reset.returncode == 2
+    assert "--reset is only valid with the all or setup stage" in invalid_reset.stderr
+
+
+def test_review_demo_compose_and_docs_contracts() -> None:
+    assert (EXAMPLE / "docker-compose.yml").read_text().startswith("name: drt-review-demo\n")
+    assert "REVIEW_DEMO_PG_DSN=" not in (EXAMPLE / ".env.example").read_text()
+
+    readme = (EXAMPLE / "README.md").read_text()
+    assert "Partial-upsert schema gotcha" in readme
+    assert "explicitly named `drt-review-demo`" in readme
+
+    prompts = (EXAMPLE / "AGENT_PROMPTS.md").read_text()
+    assert "./run-demo.sh mcp-env" in prompts
+    assert "returns the generic sync-configuration JSON" in prompts

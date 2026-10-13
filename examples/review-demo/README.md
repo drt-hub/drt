@@ -23,7 +23,9 @@ The script starts Postgres on host port `55432`, waits for its healthcheck,
 seeds both databases, plans and applies the safe change, then plans an unsafe
 mirror and proves that apply refuses it. It does not edit `~/.drt`: each drt
 command gets an example-local `HOME`, whose `.drt/profiles.yml` is copied from
-`profiles.yml.example`.
+`profiles.yml.example`. `run-demo.sh` derives `REVIEW_DEMO_PG_DSN` from the
+Postgres user, password, database, and `POSTGRES_HOST_PORT` in `.env`, so changing
+only the host port is sufficient.
 
 The deterministic seed (fixed RNG seed `20261013`) always produces:
 
@@ -72,6 +74,16 @@ create appears. Replace that line with `match_policy: update_only` when planner
 support lands. The limitation and apply's extraction race are documented in
 the [plan guide](../../docs/guides/plan.md).
 
+### Partial-upsert schema gotcha
+
+`fill_industry` selects only `company_id` and `industry`. With PostgreSQL's
+`INSERT ... ON CONFLICT` upsert, the proposed insert row is checked before the
+conflict update runs. Destination columns omitted by a partial-column upsert
+therefore need to be nullable or have defaults; this demo deliberately makes
+`domain` and `name` nullable. A native `match_policy: update_only` UPDATE would
+not hit this INSERT-time constraint, but the planner limitation above is why
+the executable demo currently uses guarded `upsert`.
+
 ## Regenerate the video
 
 Install [VHS v0.11](https://github.com/charmbracelet/vhs) and its runtime
@@ -98,6 +110,10 @@ the CLI and MCP paths.
 ```bash
 docker compose down -v
 ```
+
+The Compose project is explicitly named `drt-review-demo`, so this command and
+the script's reset path target only this demo's container, network, and volume
+rather than inheriting a possibly-colliding parent-directory name.
 
 Or run `./run-demo.sh --reset setup` to discard and immediately rebuild all
 local demo state.

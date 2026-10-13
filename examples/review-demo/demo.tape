@@ -12,23 +12,29 @@ Set WindowBar Colorful
 
 Type "cp .env.example .env"
 Enter
-Sleep 2s
+Wait /[$#] $/
+Sleep 1s
 
 Type "./run-demo.sh --reset setup"
 Enter
-Sleep 8s
+Wait+Screen@5m /Ready: DuckDB warehouse/
+Sleep 2s
 
 Type "./run-demo.sh plan"
 Enter
-Sleep 10s
+Wait+Screen@2m /Review checkpoint: 450 updates/
+Sleep 2s
 
 Type "./run-demo.sh apply"
 Enter
-Sleep 10s
+Wait+Screen@2m /Verified: 450 blanks filled/
+Sleep 2s
 
 Type "./run-demo.sh danger"
 Enter
-Sleep 16s
+Wait+Screen@2m /drt apply exit code: 1/
+Wait+Screen@2m /Verified: 450 blanks filled/
+Sleep 2s
 
 Type "# 1,487 deletes refused. The CRM still has all 1,512 rows."
 Sleep 5s

@@ -1,3 +1,5 @@
+name: drt-review-demo
+
 services:
   crm:
     image: postgres:16-alpine

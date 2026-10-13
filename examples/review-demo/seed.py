@@ -180,12 +180,17 @@ def seed_postgres(dsn: str, data: DemoData | None = None) -> dict[str, int]:
     try:
         with connection.cursor() as cursor:
             cursor.execute("DROP TABLE IF EXISTS companies")
+            # The enrichment sync selects only company_id + industry. PostgreSQL
+            # validates the proposed INSERT row before ON CONFLICT can update the
+            # existing row, so every unselected column must be nullable or have a
+            # default when a partial-column upsert uses match_policy: upsert. The
+            # native update_only UPDATE form would not hit this INSERT-time check.
             cursor.execute(
                 """
                 CREATE TABLE companies (
                     company_id BIGINT PRIMARY KEY,
-                    domain TEXT NOT NULL,
-                    name TEXT NOT NULL,
+                    domain TEXT,
+                    name TEXT,
                     industry TEXT
                 )
                 """
