@@ -35,6 +35,7 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
     from drt.config.base import QueryTaggingConfig
     from drt.config.models import SyncConfig
     from drt.config.profiles import ProfileConfigLike
-    from drt.destinations.base import Destination  # noqa: F401 — _RunContext field
+    from drt.destinations.base import Destination, StagedDestination
     from drt.sources.base import Source
     from drt.state.audit_trail import ComplianceAuditTrail
     from drt.state.dlq import DlqBackend
@@ -154,6 +155,14 @@ class _RunContext:
     # Where the project lives. ``drt run`` is always invoked from it; the MCP
     # server may not be, so ``drt apply`` passes it explicitly.
     project_dir: Path = Path(".")
+    # Apply-only execution controls (#1255). Their defaults preserve the
+    # byte-for-byte call shape and behaviour of ordinary ``drt run``.
+    destination: Destination | StagedDestination | None = None
+    row_filter: Callable[[dict[str, Any]], bool] | None = None
+    finalize_sync: bool = True
+    save_watermark: bool = True
+    completion_gate: Callable[[Any], bool] | None = None
+    mirror_state_only: bool = False
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -219,13 +228,25 @@ def _run_one(
             # None of these three are referenced below by the failure branch,
             # only by the success path, so widening the try changes nothing
             # about what a run_sync() failure itself reports.
-            dest = get_destination(sync)
+            dest = ctx.destination or get_destination(sync)
             wm_storage = get_watermark_storage(sync, ctx.project_dir)
             observer = _build_observer(sync, ctx, wm_storage)
             if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
                 print_sync_start(sync.name, ctx.dry_run)
             if ctx.log_json:
                 logging.info("sync_started", extra={"sync": sync.name})
+
+            apply_controls: dict[str, Any] = {}
+            if ctx.row_filter is not None:
+                apply_controls["row_filter"] = ctx.row_filter
+            if not ctx.finalize_sync:
+                apply_controls["finalize_sync"] = False
+            if not ctx.save_watermark:
+                apply_controls["save_watermark"] = False
+            if ctx.completion_gate is not None:
+                apply_controls["completion_gate"] = ctx.completion_gate
+            if ctx.mirror_state_only:
+                apply_controls["mirror_state_only"] = True
 
             result = run_sync(
                 sync,
@@ -253,6 +274,7 @@ def _run_one(
                 audit_trail=ctx.audit_trail,
                 audit_fields=ctx.audit_fields,
                 audit_retain_days=ctx.audit_retain_days,
+                **apply_controls,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console

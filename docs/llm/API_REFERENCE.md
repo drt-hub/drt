@@ -466,6 +466,37 @@ A percentage that cannot be evaluated (a delete strategy that does not report
 how many rows it looked at, such as `strategy: diff`) trips the guard instead of
 passing; use `max_deletes` there.
 
+### Canary apply (`sync.rollout`, #1255)
+
+`sync.rollout` is used by `drt apply` only; plain `drt run` ignores it.
+Cumulative waves are ascending percentages in `(0, 100]`; 100 is appended when
+omitted and duplicates/unknown keys are rejected.
+
+```yaml
+sync:
+  rollout:
+    waves: [1, 10, 100]
+    max_error_pct: 2
+    soak: 30s
+```
+
+CLI overrides are `--canary 1,10,100`, `--canary-max-error-pct`, and
+`--canary-soak 30s`; `--resume` continues the same halted plan. MCP
+`drt_apply` accepts `canary: [1, 10, 100]`, `canary_max_error_pct`, and
+`resume`. Rows use a stable SHA-256 bucket over canonical destination-key JSON
+(or the whole row without an `upsert_key`). A wave halts when
+`failed / (success + failed)` is strictly above the threshold; zero rows pass.
+Only a passing final wave runs destination finalize/mirror deletes and saves
+the watermark.
+
+Resume verifies the sealed document, version/age, config/environment/cursor
+fingerprints, original guards and pinned cursor, but skips digest comparison
+because earlier waves have already changed the destination. It therefore does
+not detect drift between waves and is not transactional. Staged destinations
+are unsupported in this spike; replace requires an `upsert_key`; and an
+`upsert_key` produced by a destination lookup or run metadata is rejected
+because it is unavailable at the pre-batch hash point.
+
 ### Snapshot-diff incremental and diff mirror (#755/#1110)
 
 `incremental_strategy: diff` is for curated models that have no reliable

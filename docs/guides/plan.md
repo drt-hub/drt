@@ -289,6 +289,69 @@ plan's claim file.
 | 1 | Error, or the plan is unavailable |
 | 2 | Plan computed and changes are present (`--detailed-exitcode` only) |
 
+## Canary apply
+
+Canary apply splits a verified plan's write into stable, cumulative percentage
+waves. The final 100% wave is appended when omitted:
+
+```bash
+drt apply plan.json --canary 1,10,100 --auto-approve
+# wave 1/3 (1% cumulative): ... PASS
+# wave 2/3 (10% cumulative): ... PASS
+# wave 3/3 (100% cumulative): ... PASS
+```
+
+Rows are assigned by SHA-256 of canonical JSON: the destination's
+`upsert_key` values when configured, otherwise the whole row. Each wave owns
+an exclusive bucket range, so the same row always belongs to the same wave.
+`sync.rollout` makes the policy reviewable in YAML; CLI values override it:
+
+```yaml
+sync:
+  rollout:
+    waves: [1, 10, 100]
+    max_error_pct: 2
+    soak: 30s
+```
+
+After each wave, drt computes `failed / (success + failed)` for that wave. A
+zero-row wave passes. A rate strictly above `max_error_pct` halts immediately;
+no later wave is written. `--canary-max-error-pct` and `--canary-soak 30s`
+override the YAML values. Plain `drt run` ignores `sync.rollout`; rollout is an
+apply-only safety gate in this spike.
+
+A claim records the waves, completed indexes, per-wave counts and run IDs.
+Resume only the same halted plan file and plan ID:
+
+```bash
+drt apply plan.json --resume
+```
+
+Plain re-apply remains refused. Resume verifies the plan seal/key, drt major
+version, original-start age, config/environment/cursor fingerprints, pinned
+cursor, and the original plan's guards. It deliberately does **not** compare a
+fresh digest: completed waves already changed the destination. Consequently,
+source or destination drift between waves is not detected. Every wave also
+re-extracts the source, which can increase warehouse cost.
+
+Canary apply is not transactional. Rows in a completed wave remain written if
+a later check halts. A halted apply never runs mirror deletes and never advances
+the watermark; both happen only after the final wave passes. Mirror resume
+re-extracts completed ranges only to reconstruct observed-key state, without
+writing those rows again. Staged destinations are rejected in this spike
+because their in-memory upload cannot survive a halted process. Replace needs
+an `upsert_key`; on resume it rebuilds completed ranges because replace staging
+is destination-local. An `upsert_key` produced by a destination lookup or run
+metadata is also rejected because its stable value does not exist at the
+pre-batch partition point. Notification destinations are the strongest use case:
+the stable exclusive waves bound irreversible sends without re-sending a
+completed wave.
+
+A halt is an apply failure and exits 1, using the existing error exit code. In
+JSON mode, `result.canary` contains the wave documents, status, halt reason and
+run IDs. MCP `drt_apply` exposes `canary`, `canary_max_error_pct`, and `resume`;
+a halt is returned as structured data with `halted: true`.
+
 ## Applying a plan
 
 ```bash

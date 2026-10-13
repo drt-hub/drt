@@ -177,6 +177,10 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
             "MCP approval is the client's permission prompt for drt_apply plus the "
             "mandatory approved_by, both recorded with the run (#1220)"
         ),
+        "--canary-soak": (
+            "MCP canary calls return between tool invocations; the spike exposes waves and "
+            "the error threshold, while wall-clock soak remains a CLI/config scheduler concern"
+        ),
     },
     "docs generate": {
         "--inline": "HTML packaging (single-object bundling); MCP returns the manifest",
@@ -199,7 +203,7 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
 OPTION_ALIASES: dict[str, dict[str, str]] = {
     "run": {"--diff": "compute_diff", "--profile": "profile_name"},
     "plan": {"--profile": "profile_name"},
-    "apply": {"--profile": "profile_name"},
+    "apply": {"--profile": "profile_name", "--canary": "canary"},
     "status": {"--sync": "sync_name"},
     "docs generate": {"--no-state": "include_state"},
 }

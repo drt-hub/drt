@@ -6,6 +6,7 @@ the three ``destinations_*`` modules and consumed by :class:`SyncConfig`.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from typing import Annotated, Any, Literal, get_args
 
@@ -17,6 +18,7 @@ from pydantic import (
     PrivateAttr,
     SerializeAsAny,
     Tag,
+    field_validator,
     model_validator,
 )
 
@@ -330,6 +332,44 @@ class MetadataColumnsConfig(BaseModel):
         return self
 
 
+class RolloutConfig(BaseModel):
+    """Apply-only canary rollout policy (#1255).
+
+    ``drt run`` deliberately ignores this block.  Percentages are cumulative;
+    the final 100% wave is supplied automatically when omitted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    waves: list[float]
+    max_error_pct: float = Field(default=2.0, ge=0, le=100)
+    soak: str | None = None
+
+    @field_validator("waves")
+    @classmethod
+    def _validate_waves(cls, value: list[float]) -> list[float]:
+        if not value:
+            raise ValueError("rollout.waves must contain at least one cumulative percentage.")
+        waves = [float(wave) for wave in value]
+        if any(not 0 < wave <= 100 for wave in waves):
+            raise ValueError("rollout.waves entries must be greater than 0 and at most 100.")
+        if len(set(waves)) != len(waves):
+            raise ValueError("rollout.waves must not contain duplicates.")
+        if waves != sorted(waves):
+            raise ValueError("rollout.waves must be in ascending order.")
+        if waves[-1] != 100:
+            waves.append(100.0)
+        return waves
+
+    @field_validator("soak")
+    @classmethod
+    def _validate_soak(cls, value: str | None) -> str | None:
+        if value is not None:
+            if not re.fullmatch(r"[1-9]\d*[smhd]", value.strip()):
+                parse_duration(value, field_name="sync.rollout.soak")
+        return value
+
+
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
@@ -408,6 +448,8 @@ class SyncOptions(BaseModel):
     # Mirror-mode delete behaviour (#686). None = destination strategy (#340).
     mirror: MirrorConfig | None = None
     guards: GuardsConfig | None = None
+    # Apply-only progressive rollout (#1255). Plain ``drt run`` ignores it.
+    rollout: RolloutConfig | None = None
     # Per-record dedup key for the warehouse-backed idempotency ledger
     # (#1099), Jinja template read against the record as it reaches the
     # destination (after field_mappings/mask, same seam as metadata_columns

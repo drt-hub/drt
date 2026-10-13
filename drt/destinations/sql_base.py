@@ -561,6 +561,24 @@ class BaseSqlDestination:
                 assert self._mirror_scopes is not None
                 self._mirror_scopes.add(tuple(record.get(c) for c in scope_cols))
 
+    def restore_canary_mirror_state(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """Rebuild observed keys for a resumed canary without writing rows.
+
+        Canary claims store wave progress, not row values. A resumed mirror
+        therefore re-extracts completed hash ranges and feeds their transformed
+        records through this hook before processing new waves.
+        """
+        cfg: Any = config
+        self._validate_mirror_scope(records, cfg, sync_options)
+        self._validate_upsert_keys_present(records, cfg, sync_options)
+        result = SyncResult(success=len(records))
+        self._accumulate_mirror_state(records, result, config, sync_options)
+
     def _record_row_error(
         self, result: SyncResult, i: int, record: dict[str, Any], exc: Exception
     ) -> None:

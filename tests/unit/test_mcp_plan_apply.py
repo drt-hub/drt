@@ -133,6 +133,8 @@ async def test_tools_are_registered_with_a_mandatory_approver(project_dir: Path)
     assert {"drt_plan", "drt_apply"} <= set(tools)
     required = tools["drt_apply"].parameters["required"]
     assert set(required) == {"plan_id", "approved_by"}
+    properties = tools["drt_apply"].parameters["properties"]
+    assert {"canary", "canary_max_error_pct", "resume"} <= set(properties)
     assert tools["drt_plan"].parameters["required"] == ["sync_name"]
 
 
@@ -162,6 +164,26 @@ async def test_plan_then_apply_end_to_end(project_dir: Path, world: _World) -> N
     results = json.loads((project_dir / "target" / "drt" / "run_results.json").read_text())
     assert results["results"][0]["approved_by"] == "masukai (reviewed in PR 12)"
     assert not (Path.cwd() / ".drt").exists()  # nothing leaked into the working directory
+
+
+@pytest.mark.asyncio
+async def test_mcp_apply_returns_canary_waves_as_data(project_dir: Path) -> None:
+    server = create_server(project_dir)
+    planned = await call(server, "drt_plan", sync_name="orders_to_pg")
+
+    applied = await call(
+        server,
+        "drt_apply",
+        plan_id=planned["plan_id"],
+        approved_by="reviewer",
+        canary=[1, 10],
+        canary_max_error_pct=2,
+    )
+
+    assert applied["applied"] is True
+    assert applied["halted"] is False
+    assert applied["canary"]["waves"] == [1.0, 10.0, 100.0]
+    assert len(applied["canary"]["results"]) == 3
 
 
 @pytest.mark.asyncio

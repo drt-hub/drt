@@ -53,6 +53,26 @@ def apply(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     vars_raw: str = typer.Option(None, "--vars", help="Override project vars, as for `drt run`."),
     profile_name: str = typer.Option(None, "--profile", "-p", help="Override profile."),
+    canary: str = typer.Option(
+        None,
+        "--canary",
+        help="Apply in cumulative percentage waves, e.g. 1,10,100 (100 is appended).",
+    ),
+    canary_max_error_pct: float = typer.Option(
+        None,
+        "--canary-max-error-pct",
+        help="Halt when a wave's failed-row percentage is above this value (default 2).",
+    ),
+    canary_soak: str = typer.Option(
+        None,
+        "--canary-soak",
+        help="Wait between successful waves (for example 30s or 2m).",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Continue the halted canary claim for this same plan file and plan_id.",
+    ),
 ) -> None:
     """Apply a plan only if recomputing it gives the same change set.
 
@@ -88,6 +108,18 @@ def apply(
         print_error(f"--max-age: {e}")
         raise typer.Exit(1)
     try:
+        canary_waves = (
+            [float(part.strip()) for part in canary.split(",") if part.strip()]
+            if canary is not None
+            else None
+        )
+        canary_soak_delta = parse_duration(canary_soak) if canary_soak is not None else None
+    except ValueError as e:
+        print_error(f"--canary: {e}")
+        raise typer.Exit(1)
+    try:
+        if resume and plan_file.is_dir():
+            raise ApplyRefused("--resume accepts one plan file, not a plan directory.")
         if plan_file.is_dir():
             plan_texts = [
                 (Path(name), text)
@@ -124,7 +156,7 @@ def apply(
         try:
             outcome = apply_plan(
                 plan_text,
-                approved=auto_approve,
+                approved=auto_approve or resume,
                 approved_by=approved_by,
                 confirm=confirm,
                 max_age=max_age_delta,
@@ -136,6 +168,11 @@ def apply(
                 json_output=output == "json",
                 # stderr, so `--output json` stays one parseable document on stdout.
                 notify=lambda message: typer.echo(message, err=True),
+                canary_waves=canary_waves,
+                canary_max_error_pct=canary_max_error_pct,
+                canary_soak=canary_soak_delta,
+                resume=resume,
+                resume_hint=f"drt apply {source_file} --resume",
             )
         except ApplyRefused as e:
             if isinstance(e, ApplyAborted):  # the person declined: not an error

@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from itertools import chain, islice
 from pathlib import Path
@@ -338,6 +338,11 @@ def run_sync(
     audit_trail: ComplianceAuditTrail | None = None,
     audit_fields: list[str] | None = None,
     audit_retain_days: int = 30,
+    row_filter: Callable[[dict[str, Any]], bool] | None = None,
+    finalize_sync: bool = True,
+    save_watermark: bool = True,
+    completion_gate: Callable[[SyncResult], bool] | None = None,
+    mirror_state_only: bool = False,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -401,6 +406,16 @@ def run_sync(
         audit_retain_days: Purge window for the audit log (#1100), from
             ``state.audit_trail.retain_days``. Ignored when ``audit_trail``
             is ``None``.
+        row_filter: Optional predicate applied to extracted rows before
+            batching. Used by canary apply to select one stable hash range.
+        finalize_sync: Run destination finalization. Canary apply disables it
+            for every non-final wave so mirror deletes cannot run early.
+        save_watermark: Emit ``on_sync_completed``. Canary apply disables it
+            until the final wave has passed its health check.
+        completion_gate: Optional final pre-finalize check. Returning false
+            skips destination finalization and watermark/state persistence.
+        mirror_state_only: Rebuild a destination's observed-key state without
+            writing rows. Used only to resume a halted mirror canary.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -467,6 +482,11 @@ def run_sync(
                     idempotency_ledger=idempotency_ledger,
                     audit_trail=audit_trail,
                     audit_fields=audit_fields,
+                    row_filter=row_filter,
+                    finalize_sync=finalize_sync,
+                    save_watermark=save_watermark,
+                    completion_gate=completion_gate,
+                    mirror_state_only=mirror_state_only,
                 )
             except BaseException as exc:
                 raised = exc
@@ -584,7 +604,7 @@ def run_sync(
         # instance's lifetime if reused. dry_run never calls
         # destination.load()/stage(), so there's no write-state to reset —
         # gated the same as every sibling block in this `finally`.
-        if not dry_run:
+        if not dry_run and (finalize_sync or raised is not None):
             resetter = getattr(destination, "reset_write_state", None)
             if callable(resetter):
                 try:
@@ -628,6 +648,11 @@ def _run_sync_body(
     idempotency_ledger: IdempotencyLedger | None = None,
     audit_trail: ComplianceAuditTrail | None = None,
     audit_fields: list[str] | None = None,
+    row_filter: Callable[[dict[str, Any]], bool] | None = None,
+    finalize_sync: bool = True,
+    save_watermark: bool = True,
+    completion_gate: Callable[[SyncResult], bool] | None = None,
+    mirror_state_only: bool = False,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -827,6 +852,27 @@ def _run_sync_body(
     # for REST/file sources and avoids per-dialect LIMIT/TOP SQL rendering).
     if extract_limit is not None:
         records_iter = islice(records_iter, extract_limit)
+    # Canary selection happens before batching, but cursor discovery must see
+    # the complete extraction. Otherwise the final hash range could omit the
+    # greatest cursor and advance the watermark only part way through the
+    # verified window.
+    filtered_cursor_value: list[str | None] = [last_cursor_value]
+    if row_filter is not None:
+        unfiltered_records = records_iter
+
+        def _filtered_records() -> Iterator[dict[str, Any]]:
+            for record in unfiltered_records:
+                if cursor_field and extract_limit is None:
+                    value = record.get(cursor_field)
+                    if value is not None:
+                        text = _stringify_cursor_value(value)
+                        current = filtered_cursor_value[0]
+                        if current is None or _cursor_gt(text, current):
+                            filtered_cursor_value[0] = text
+                if row_filter(record):
+                    yield record
+
+        records_iter = _filtered_records()
     new_cursor_value: str | None = last_cursor_value
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
@@ -993,6 +1039,18 @@ def _run_sync_body(
                 run_id=total_result.run_id,
                 sync_name=sync.name,
             )
+
+            if mirror_state_only:
+                restorer = getattr(destination, "restore_canary_mirror_state", None)
+                if not callable(restorer):
+                    raise ValueError(
+                        f"Canary resume cannot safely reconstruct mirror state for "
+                        f"{type(destination).__name__}; this destination does not implement "
+                        "restore_canary_mirror_state()."
+                    )
+                with _stage_ctx("destination"):
+                    restorer(record_batch, sync.destination, sync.sync)
+                continue
 
             if dry_run:
                 total_result.success += len(record_batch)
@@ -1177,6 +1235,9 @@ def _run_sync_body(
     # more before any finalize hook: destructive mirror deletes and diff
     # baseline promotion must both remain off for an interrupted run, even
     # when there was no destination load batch at all.
+    if row_filter is not None:
+        new_cursor_value = filtered_cursor_value[0]
+
     if stop_event is not None and stop_event.is_set() and not total_result.interrupted:
         total_result.interrupted = True
         sync.sync._interrupted = True
@@ -1185,7 +1246,9 @@ def _run_sync_body(
     # Finalize staged destinations (upload file, trigger job, poll).
     # finalize() is authoritative for staged success/failed counts —
     # stage() only buffers, so records aren't "successful" until finalize.
-    if is_staged and not dry_run and staged_count > 0:
+    completion_allowed = completion_gate is None or completion_gate(total_result)
+
+    if finalize_sync and completion_allowed and is_staged and not dry_run and staged_count > 0:
         assert isinstance(destination, StagedDestination)
         with _stage_ctx("destination"):
             finalize_result = destination.finalize(sync.destination, sync.sync)
@@ -1213,7 +1276,7 @@ def _run_sync_body(
     # (e.g. swap-finalize for replace_strategy=swap on Postgres/MySQL/ClickHouse).
     # The hook is intentionally NOT a Protocol — destinations opt in by simply
     # defining a finalize_sync() method.
-    if not is_staged and not dry_run:
+    if finalize_sync and completion_allowed and not is_staged and not dry_run:
         finalizer = getattr(destination, "finalize_sync", None)
         if callable(finalizer):
             with _stage_ctx("destination"):
@@ -1241,6 +1304,7 @@ def _run_sync_body(
         and not dry_run
         and total_result.failed == 0
         and not total_result.interrupted
+        and not mirror_state_only
         and extract_limit is None
         and isinstance(source, SnapshotDiffSource)
     ):
@@ -1272,6 +1336,12 @@ def _run_sync_body(
     # data that was only previewed, never sent (#978) — new_cursor_value
     # above reflects rows *seen* during extraction regardless of dry_run,
     # since extraction itself is not skipped; only destination.load() is.
-    observer.on_sync_completed(sync.name, total_result, started_at, new_cursor_value, cursor_field)
+    persistence_allowed = completion_allowed and (
+        completion_gate is None or completion_gate(total_result)
+    )
+    if save_watermark and persistence_allowed:
+        observer.on_sync_completed(
+            sync.name, total_result, started_at, new_cursor_value, cursor_field
+        )
 
     return total_result

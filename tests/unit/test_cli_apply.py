@@ -235,6 +235,53 @@ def test_applying_twice_is_refused_the_second_time(project: Path, world: _World)
     assert len(_writes(world)) == 1
 
 
+def test_canary_halts_records_claim_and_resume_continues(project: Path, world: _World) -> None:
+    plan = _plan(project)
+    world.fail_writes = True
+
+    halted = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+
+    assert halted.exit_code == 1
+    assert "wave 1/3" in halted.output and "HALTED" in halted.output
+    claim_path = project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json"
+    claim = json.loads(claim_path.read_text())
+    assert claim["status"] == "halted"
+    assert claim["waves"] == [1.0, 10.0, 100.0]
+    assert claim["completed_wave_indexes"] == [0]
+    assert claim["wave_results"][0]["failed"] == 1
+    assert len(claim["run_ids"]) == 1
+
+    ordinary_retry = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+    assert ordinary_retry.exit_code == 1
+    assert "already attempted" in ordinary_retry.output
+
+    world.fail_writes = False
+    resumed = runner.invoke(app, ["apply", "plan.json", "--resume"])
+    assert resumed.exit_code == 0, resumed.output
+    claim = json.loads(claim_path.read_text())
+    assert claim["status"] == "success"
+    assert claim["completed_wave_indexes"] == [0, 1, 2]
+    assert len(claim["run_ids"]) == 3
+
+
+def test_canary_json_output_is_one_per_wave_document(project: Path, world: _World) -> None:
+    _plan(project)
+
+    result = runner.invoke(
+        app,
+        ["apply", "plan.json", "--auto-approve", "--canary", "1,10", "--output", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.stdout)
+    assert document["result"]["canary"]["status"] == "success"
+    assert [wave["cumulative_pct"] for wave in document["result"]["canary"]["results"]] == [
+        1.0,
+        10.0,
+        100.0,
+    ]
+
+
 def test_losing_the_claim_race_writes_nothing(
     project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
