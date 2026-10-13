@@ -648,3 +648,29 @@ def test_reader_rejects_overlong_dataset_names(tmp_path: Path) -> None:
     with pytest.raises(OssieModelError, match="limit is 64"):
         model = load_ossie_model(_write_model(tmp_path, data))
         build_ossie_scaffold(model, model.datasets[0])
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "${AWS_SECRET_ACCESS_KEY}",
+        "{{ cycler.__init__.__globals__.os.environ.AWS_SECRET_ACCESS_KEY }}{{ var('noop', '') }}",
+        "{% if True %}x{% endif %}",
+        "{# note #}",
+    ],
+)
+@pytest.mark.parametrize("where", ["dataset_description", "model_name", "model_version"])
+def test_template_or_env_syntax_in_generated_description_text_is_refused(
+    tmp_path: Path, marker: str, where: str
+) -> None:
+    data = _model_data()
+    if where == "dataset_description":
+        data["datasets"][0]["description"] = f"Customers {marker}"
+    elif where == "model_name":
+        data["name"] = f"activation {marker}"
+    else:
+        data["version"] = f"0.2.0 {marker}"
+    model = load_ossie_model(_write_model(tmp_path, data))
+
+    with pytest.raises(OssieModelError, match="would expand when loading"):
+        build_ossie_scaffold(model, model.datasets[0])

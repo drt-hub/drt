@@ -159,6 +159,20 @@ _RESERVED_WORDS = _RESERVED_WORDS | frozenset(
 )
 
 
+def _reject_template_syntax(text: str, *, label: str) -> None:
+    """Refuse text that drt would expand when it loads a generated sync.
+
+    drt substitutes ``${VAR}`` from the environment and renders Jinja (``{{``, ``{%``,
+    ``{#``) in config strings, so untrusted semantic-model text must not carry either.
+    """
+    for marker in ("${", "{{", "{%", "{#"):
+        if marker in text:
+            raise OssieModelError(
+                f"{label} contains {marker!r}, which drt would expand when loading the "
+                "generated sync; remove the template or environment syntax from the Ossie model."
+            )
+
+
 def _sql_error(label: str, problem: str, change: str) -> OssieModelError:
     return OssieModelError(f"{label} {problem}; {change}.")
 
@@ -706,6 +720,12 @@ def build_ossie_scaffold(
     sql = "SELECT\n" + ",\n".join(select_items) + f"\nFROM {_render_source(dataset)}"
 
     version = model.version or "unspecified"
+    # These strings become a YAML *value*, which drt expands on load (`${VAR}`
+    # environment substitution and Jinja `{{ ... }}`), so template syntax in them could
+    # read environment values into the config, docs and manifest. Refuse it.
+    _reject_template_syntax(dataset.description, label=f"Dataset {dataset.name!r} description")
+    _reject_template_syntax(model.name, label="Ossie model name")
+    _reject_template_syntax(version, label="Ossie model version")
     description_lines = [dataset.description or f"Sync {dataset.name} to destination"]
     description_lines.append(f"Generated from Apache Ossie model {model.name} (version {version}).")
     sync_name = f"sync_{dataset.name}"
