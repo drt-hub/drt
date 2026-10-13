@@ -1,0 +1,4 @@
+# run-demo.sh copies this into an example-local HOME. It never edits ~/.drt.
+review_demo:
+  type: duckdb
+  database: ./warehouse.duckdb
