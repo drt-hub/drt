@@ -96,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **MySQL `sync.match_policy` support** ([#757](https://github.com/drt-hub/drt/issues/757), MySQL leg, contributed by [@Muawiya-contact](https://github.com/Muawiya-contact) in [#1231](https://github.com/drt-hub/drt/pull/1231) and [#1232](https://github.com/drt-hub/drt/pull/1232)): `update_only` now emits a keyed `UPDATE` and skips missing destination rows, while an existence probe disambiguates MySQL's zero-row response for an existing row whose values were already unchanged. `create_only` uses a plain `INSERT` and verifies duplicate-key error `1062` against the configured upsert key, so existing matches are skipped without hiding collisions on unrelated unique constraints; this avoids `INSERT IGNORE`'s data-coercion behavior and no-op upserts that would fire UPDATE triggers. Both paths support composite keys, preserve the existing per-row savepoint/error accounting, and report policy-declined rows through `skipped` / `skipped_no_match`. Focused unit tests cover SQL shape, unchanged-row detection, duplicate vs. real errors, and rollback accounting; a Testcontainers smoke test covers both policies against MySQL 8.0.
 
+### Fixed
+
+- **`drt plan` text output no longer colours a fragment of the plan id / digest**: Rich's automatic highlighter coloured part of the `sha256:` digest (e.g. `a256:f777`), which read as noise on screen and in recordings. The `plan_id:` and `digest:` lines are printed without highlighting; numbers in the summary keep theirs.
+
 ## [1.1.0] - 2026-10-06
 
 **Warehouse parity.** Every capability that shipped Postgres-first in v1.0 (managed tables, warehouse-backed state/history/DLQ, diff-based incremental, `replace`/`mirror`, `mirror.strategy: diff`) now reaches Snowflake, Databricks and BigQuery, each leg verified against a live warehouse. No breaking changes — drop-in upgrade from v1.0.0.
