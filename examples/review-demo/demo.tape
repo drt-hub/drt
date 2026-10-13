@@ -32,7 +32,11 @@ Sleep 500ms
 Type "./run-demo.sh apply"
 Enter
 Wait+Screen@2m /Verified: 450 blanks filled/
-Sleep 2s
+Sleep 1s
+Type "# All 1,500 rows go through fill_empty; only the 450 blanks change."
+Sleep 3s
+Enter
+Sleep 1s
 
 Ctrl+L
 Sleep 500ms
