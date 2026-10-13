@@ -262,38 +262,6 @@ class ClickHouseDestination:
         runs.append((run_columns, run_records))
         return runs
 
-    def restore_canary_mirror_state(
-        self,
-        records: list[dict[str, Any]],
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> None:
-        """Rebuild observed mirror keys during canary resume without INSERTs."""
-        assert isinstance(config, ClickHouseDestinationConfig)
-        from drt.destinations.sql_utils import check_mirror_supported
-
-        check_mirror_supported(
-            config,
-            sync_options,
-            "clickhouse",
-            supports_tracked_scope=True,
-            supports_diff_strategy=True,
-        )
-        assert config.upsert_key
-        missing = [key for key in config.upsert_key if not all(key in row for row in records)]
-        if missing:
-            raise ValueError(f"upsert_key columns missing from the model output: {missing}")
-        if self._mirror_keys is None:
-            self._mirror_keys = []
-        scope = sync_options.mirror.scope if sync_options.mirror is not None else None
-        if scope and self._mirror_scopes is None:
-            self._mirror_scopes = set()
-        for record in records:
-            self._mirror_keys.append(tuple(record[key] for key in config.upsert_key))
-            if scope:
-                assert self._mirror_scopes is not None
-                self._mirror_scopes.add(tuple(record[column] for column in scope))
-
     def _insert_all_runs(
         self,
         client: Any,

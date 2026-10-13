@@ -178,8 +178,8 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
             "mandatory approved_by, both recorded with the run (#1220)"
         ),
         "--canary-soak": (
-            "MCP canary calls return between tool invocations; the spike exposes waves and "
-            "the error threshold, while wall-clock soak remains a CLI/config scheduler concern"
+            "MCP exposes waves and the error threshold; wall-clock soak remains a CLI/config "
+            "scheduler concern"
         ),
     },
     "docs generate": {

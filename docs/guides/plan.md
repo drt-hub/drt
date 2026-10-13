@@ -301,9 +301,14 @@ drt apply plan.json --canary 1,10,100 --auto-approve
 # wave 3/3 (100% cumulative): ... PASS
 ```
 
-Rows are assigned by SHA-256 of canonical JSON: the destination's
-`upsert_key` values when configured, otherwise the whole row. Each wave owns
-an exclusive bucket range, so the same row always belongs to the same wave.
+Rows are assigned by SHA-256 of a canonical, typed encoding of the destination
+`upsert_key`. Each wave owns an exclusive bucket range, so the same row always
+belongs to the same wave. Missing key columns are errors (not null). Numeric
+values that a destination commonly coerces to the same key hash together (`True`,
+`1`, `1.0`, and `Decimal('1')`); the string `'1'` stays distinct. Strings are NFC
+normalized, datetimes are converted to UTC, and date/bytes/null have explicit
+type tags. Unsupported key types fail clearly. Wave percentages are strictly
+increasing multiples of 0.01 in `(0, 100]`.
 `sync.rollout` makes the policy reviewable in YAML; CLI values override it:
 
 ```yaml
@@ -314,43 +319,37 @@ sync:
     soak: 30s
 ```
 
-After each wave, drt computes `failed / (success + failed)` for that wave. A
-zero-row wave passes. A rate strictly above `max_error_pct` halts immediately;
-no later wave is written. `--canary-max-error-pct` and `--canary-soak 30s`
-override the YAML values. Plain `drt run` ignores `sync.rollout`; rollout is an
-apply-only safety gate in this spike.
+After each wave, drt computes `(failed + error-skipped rows) / rows selected`.
+Error-skipped rows include lookup, computed-field, and transform failures under
+`on_error: skip`; destination failure under `on_error: fail` always halts,
+regardless of the threshold. A zero-row wave passes without division.
+`--canary-max-error-pct` and `--canary-soak 30s` override YAML. Each wave is a
+normal run with ordinary finalization and persistence.
 
-A claim records the waves, completed indexes, per-wave counts and run IDs.
-Resume only the same halted plan file and plan ID:
+> **Halt = stop; continue = re-plan and re-review.** A halt is terminal for
+> that plan. There is no resume operation, and plain re-apply is refused. Run
+> `drt plan` again: already-applied keyed upserts disappear from the new plan,
+> leaving only what still needs to change. Review that new plan and apply it
+> normally.
 
-```bash
-drt apply plan.json --resume
-```
+A claim records per-wave counts and run IDs for audit. An interruption during a
+wave or soak records terminal `halted` with reason `interrupted`. Canary apply
+is not transactional: rows from earlier waves remain written after a halt, and
+every wave re-extracts the source.
 
-Plain re-apply remains refused. Resume verifies the plan seal/key, drt major
-version, original-start age, config/environment/cursor fingerprints, pinned
-cursor, and the original plan's guards. It deliberately does **not** compare a
-fresh digest: completed waves already changed the destination. Consequently,
-source or destination drift between waves is not detected. Every wave also
-re-extracts the source, which can increase warehouse cost.
-
-Canary apply is not transactional. Rows in a completed wave remain written if
-a later check halts. A halted apply never runs mirror deletes and never advances
-the watermark; both happen only after the final wave passes. Mirror resume
-re-extracts completed ranges only to reconstruct observed-key state, without
-writing those rows again. Staged destinations are rejected in this spike
-because their in-memory upload cannot survive a halted process. Replace needs
-an `upsert_key`; on resume it rebuilds completed ranges because replace staging
-is destination-local. An `upsert_key` produced by a destination lookup or run
-metadata is also rejected because its stable value does not exist at the
-pre-batch partition point. Notification destinations are the strongest use case:
-the stable exclusive waves bound irreversible sends without re-sending a
-completed wave.
+Canary v1 supports only the plain, non-incremental per-row write path:
+`sync.mode: full` or `upsert`, with `destination.upsert_key`. It rejects
+incremental syncs (a per-wave cursor/watermark can skip rows),
+`incremental_strategy: diff` (waves would mutate the snapshot baseline),
+mirror/replace and tracked mirror state (per-run finalization is unsafe), staged
+destinations, and keys produced by destination lookups or run metadata. These
+rules are enforced both for `sync.rollout` validation and CLI/MCP canary
+overrides. Plain `drt run` ignores `sync.rollout`.
 
 A halt is an apply failure and exits 1, using the existing error exit code. In
 JSON mode, `result.canary` contains the wave documents, status, halt reason and
-run IDs. MCP `drt_apply` exposes `canary`, `canary_max_error_pct`, and `resume`;
-a halt is returned as structured data with `halted: true`.
+run IDs. MCP `drt_apply` exposes `canary` and `canary_max_error_pct`; a halt is
+returned as structured data with `halted: true`.
 
 ## Applying a plan
 

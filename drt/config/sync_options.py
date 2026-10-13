@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from decimal import Decimal
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
@@ -342,21 +343,27 @@ class RolloutConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     waves: list[float]
-    max_error_pct: float = Field(default=2.0, ge=0, le=100)
+    max_error_pct: float = Field(default=2.0, ge=0, le=100, allow_inf_nan=False, strict=True)
     soak: str | None = None
 
-    @field_validator("waves")
+    @field_validator("waves", mode="before")
     @classmethod
-    def _validate_waves(cls, value: list[float]) -> list[float]:
+    def _validate_waves(cls, value: Any) -> list[float]:
+        if not isinstance(value, list) or any(
+            isinstance(wave, bool) or not isinstance(wave, int | float) for wave in value
+        ):
+            raise ValueError("rollout.waves must be a list of numbers (not booleans or strings).")
         if not value:
             raise ValueError("rollout.waves must contain at least one cumulative percentage.")
         waves = [float(wave) for wave in value]
-        if any(not 0 < wave <= 100 for wave in waves):
+        if any(not 0 < wave <= 100 or wave != wave or abs(wave) == float("inf") for wave in waves):
             raise ValueError("rollout.waves entries must be greater than 0 and at most 100.")
-        if len(set(waves)) != len(waves):
-            raise ValueError("rollout.waves must not contain duplicates.")
-        if waves != sorted(waves):
-            raise ValueError("rollout.waves must be in ascending order.")
+        if any((Decimal(str(wave)) * 100) % 1 for wave in waves):
+            raise ValueError(
+                "rollout.waves entries must be multiples of 0.01 (the bucket resolution)."
+            )
+        if any(left >= right for left, right in zip(waves, waves[1:], strict=False)):
+            raise ValueError("rollout.waves must be strictly increasing without duplicates.")
         if waves[-1] != 100:
             waves.append(100.0)
         return waves
@@ -984,6 +991,54 @@ class SyncConfig(BaseModel):
     # queries the real destination after a sync has run.
     unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_canary_rollout_safety(self) -> SyncConfig:
+        if self.sync.rollout is None:
+            return self
+        if self.sync.mode not in {"full", "upsert"}:
+            raise ValueError(
+                "sync.rollout v1 supports only non-incremental mode: full or upsert; "
+                "incremental, mirror, and replace have unsafe per-wave state/finalization."
+            )
+        if self.sync.incremental_strategy == "diff":
+            raise ValueError(
+                "sync.rollout v1 does not support incremental_strategy: diff because waves "
+                "would mutate the snapshot baseline."
+            )
+        destination_type = destination_type_of(self.destination)
+        if destination_type in {"staged_upload", "salesforce_bulk"}:
+            raise ValueError(
+                "sync.rollout v1 supports only non-staged per-row destinations; "
+                f"destination type {destination_type!r} is staged."
+            )
+        upsert_key = getattr(self.destination, "upsert_key", None)
+        if not upsert_key:
+            raise ValueError(
+                "sync.rollout v1 requires destination.upsert_key so wave membership is stable "
+                "and a new plan after a halt can identify remaining rows."
+            )
+        lookup_outputs = {
+            (self.sync.field_mappings or {}).get(name, name)
+            for name in (getattr(self.destination, "lookups", None) or {})
+        }
+        metadata = self.sync.metadata_columns
+        metadata_outputs = {
+            value
+            for value in (
+                metadata.synced_at if metadata is not None else None,
+                metadata.run_id if metadata is not None else None,
+                metadata.sync_name if metadata is not None else None,
+            )
+            if value is not None
+        }
+        unstable_keys = set(upsert_key) & (lookup_outputs | metadata_outputs)
+        if unstable_keys:
+            raise ValueError(
+                "sync.rollout cannot use an upsert_key produced by a destination lookup or "
+                f"run metadata: {sorted(unstable_keys)}. Choose source/computed key columns."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_write_policy_destination_mode(self) -> SyncConfig:

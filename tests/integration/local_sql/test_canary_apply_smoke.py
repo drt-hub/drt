@@ -1,9 +1,4 @@
-"""Live PostgreSQL proof for canary halt/resume and deferred mirror delete (#1255).
-
-The middle-wave health failure is injected after the real database write. This
-keeps the test focused on rollout orchestration while every extraction, upsert,
-resume reconstruction and final mirror DELETE still runs against PostgreSQL.
-"""
+"""Live PostgreSQL proof for terminal canary halt, re-plan, and completion (#1255)."""
 
 from __future__ import annotations
 
@@ -70,7 +65,7 @@ def _sql(pg: PostgresProfile, *statements: str) -> list[tuple[Any, ...]]:
         connection.close()
 
 
-def test_three_wave_mirror_halts_then_resumes_without_early_delete(
+def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
     pg: PostgresProfile,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -87,7 +82,6 @@ def test_three_wave_mirror_halts_then_resumes_without_early_delete(
         f"CREATE TABLE {destination_table} (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
         f"INSERT INTO {source_table} "
         "SELECT value, 'row-' || value::text FROM generate_series(1, 400) AS value",
-        f"INSERT INTO {destination_table} VALUES (999, 'delete-only-after-final-wave')",
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DRT_PLAN_KEY", "canary-smoke-key")
@@ -96,25 +90,23 @@ def test_three_wave_mirror_halts_then_resumes_without_early_delete(
         yaml.dump({"name": "canary-smoke", "version": "0.1", "profile": "default"})
     )
     (tmp_path / "syncs").mkdir()
-    (tmp_path / "syncs" / "canary.yml").write_text(
-        yaml.dump(
-            {
-                "name": "canary",
-                "model": f"SELECT id, name FROM {source_table}",
-                "destination": {
-                    "type": "postgres",
-                    "host": pg.host,
-                    "port": pg.port,
-                    "dbname": pg.dbname,
-                    "user": pg.user,
-                    "password": pg.password,
-                    "table": destination_table,
-                    "upsert_key": ["id"],
-                },
-                "sync": {"mode": "mirror", "mirror": {"strategy": "destination"}},
-            }
-        )
-    )
+    sync_path = tmp_path / "syncs" / "canary.yml"
+    sync_document = {
+        "name": "canary",
+        "model": f"SELECT id, name FROM {source_table}",
+        "destination": {
+            "type": "postgres",
+            "host": pg.host,
+            "port": pg.port,
+            "dbname": pg.dbname,
+            "user": pg.user,
+            "password": pg.password,
+            "table": destination_table,
+            "upsert_key": ["id"],
+        },
+        "sync": {"mode": "upsert"},
+    }
+    sync_path.write_text(yaml.dump(sync_document))
 
     planned = runner.invoke(app, ["plan", "canary", "--out", "plan.json"])
     assert planned.exit_code == 0, planned.output
@@ -122,37 +114,55 @@ def test_three_wave_mirror_halts_then_resumes_without_early_delete(
     real_run_one = run_command._run_one
     wave_calls = 0
 
-    def fail_second_check(*args: Any, **kwargs: Any) -> tuple[str, dict[str, object], bool]:
+    def fail_second_health_check(*args: Any, **kwargs: Any) -> tuple[str, dict[str, object], bool]:
         nonlocal wave_calls
         name, entry, had_error = real_run_one(*args, **kwargs)
-        if not args[1].mirror_state_only:
-            wave_calls += 1
+        wave_calls += 1
         if wave_calls == 2:
             entry = dict(entry)
-            synced = int(entry.get("rows_synced", 0))
-            entry["rows_failed"] = max(synced, 1)
-            had_error = True
+            entry["_row_error_count"] = int(entry.get("rows_extracted", 0)) or 1
         return name, entry, had_error
 
-    monkeypatch.setattr(run_command, "_run_one", fail_second_check)
+    monkeypatch.setattr(run_command, "_run_one", fail_second_health_check)
     halted = runner.invoke(
         app,
         ["apply", "plan.json", "--auto-approve", "--canary", "1,10,100"],
     )
     assert halted.exit_code == 1, halted.output
     assert "wave 2/3" in halted.output and "HALTED" in halted.output
-    # Mirror's destructive pass has not run: the stale destination-only row remains.
-    assert _sql(pg, f"SELECT COUNT(*) FROM {destination_table} WHERE id = 999") == [(1,)]
+
+    applied_before_replan = int(_sql(pg, f"SELECT COUNT(*) FROM {destination_table}")[0][0])
+    assert 0 < applied_before_replan < 400
+    old_plan_id = json.loads((tmp_path / "plan.json").read_text())["plan_id"]
+    old_claim = json.loads(
+        (tmp_path / ".drt" / "applied_plans" / f"{old_plan_id}.json").read_text()
+    )
+    assert old_claim["status"] == "halted"
 
     monkeypatch.setattr(run_command, "_run_one", real_run_one)
-    resumed = runner.invoke(app, ["apply", "plan.json", "--resume"])
-    assert resumed.exit_code == 0, resumed.output
+    replanned = runner.invoke(app, ["plan", "canary", "--out", "remaining.json"])
+    assert replanned.exit_code == 0, replanned.output
+    remaining = json.loads((tmp_path / "remaining.json").read_text())
+    assert len(remaining["entries"]) == 400 - applied_before_replan
 
+    completed = runner.invoke(app, ["apply", "remaining.json", "--auto-approve"])
+    assert completed.exit_code == 0, completed.output
     actual = _sql(pg, f"SELECT id, name FROM {destination_table} ORDER BY id")
     expected = [(index, f"row-{index}") for index in range(1, 401)]
     assert actual == expected
     assert len({row[0] for row in actual}) == 400
-    plan_id = json.loads((tmp_path / "plan.json").read_text())["plan_id"]
-    claim = json.loads((tmp_path / ".drt" / "applied_plans" / f"{plan_id}.json").read_text())
-    assert claim["status"] == "success"
-    assert claim["completed_wave_indexes"] == [0, 1, 2]
+
+    # CLI overrides are checked at apply time even when the freshly replanned
+    # destination has no remaining changes.
+    for mode, extra, message in (
+        ("incremental", {"cursor_field": "id"}, "non-incremental"),
+        ("mirror", {}, "non-incremental"),
+    ):
+        sync_document["sync"] = {"mode": mode, **extra}
+        sync_path.write_text(yaml.dump(sync_document))
+        plan_file = f"{mode}.json"
+        planned_unsupported = runner.invoke(app, ["plan", "canary", "--out", plan_file])
+        assert planned_unsupported.exit_code == 0, planned_unsupported.output
+        refused = runner.invoke(app, ["apply", plan_file, "--auto-approve", "--canary", "1,10,100"])
+        assert refused.exit_code == 1
+        assert message in refused.output

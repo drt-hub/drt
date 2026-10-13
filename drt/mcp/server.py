@@ -224,7 +224,6 @@ def create_server(project_dir: Path | None = None) -> Any:
         vars: dict[str, Any] | None = None,
         canary: list[float] | None = None,
         canary_max_error_pct: float | None = None,
-        resume: bool = False,
     ) -> dict[str, Any]:
         """Apply a plan from ``drt_plan``, only if the world still matches.
 
@@ -251,7 +250,6 @@ def create_server(project_dir: Path | None = None) -> Any:
             vars: Override project vars, already parsed (mirrors ``--vars``).
             canary: Cumulative rollout percentages; 100 is appended when absent.
             canary_max_error_pct: Halt above this per-wave failed-row percentage.
-            resume: Continue this plan's halted canary claim without digest recheck.
 
         Returns:
             ``applied`` plus, when written, ``run_id`` and a ``result``; when
@@ -269,7 +267,6 @@ def create_server(project_dir: Path | None = None) -> Any:
             vars=vars,
             canary=canary,
             canary_max_error_pct=canary_max_error_pct,
-            resume=resume,
         )
 
     # -----------------------------------------------------------------------

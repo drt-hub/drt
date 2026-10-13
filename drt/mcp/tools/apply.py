@@ -31,7 +31,6 @@ def apply(
     vars: dict[str, Any] | None = None,
     canary: list[float] | None = None,
     canary_max_error_pct: float | None = None,
-    resume: bool = False,
 ) -> dict[str, Any]:
     from drt.cli._apply_flow import PLAN_ID_PATTERN, ApplyRefused, apply_plan, parse_duration
     from drt.cli._plan_runner import load_plan_key
@@ -79,8 +78,6 @@ def apply(
             expect_plan_id=plan_id,
             canary_waves=canary,
             canary_max_error_pct=canary_max_error_pct,
-            resume=resume,
-            resume_hint=f"drt_apply(plan_id={plan_id!r}, approved_by={who!r}, resume=true)",
         )
     except ApplyRefused as e:
         plan_key = load_plan_key(ctx.project_dir)

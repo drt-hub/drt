@@ -42,6 +42,7 @@ class _World:
         self.baseline: int | None = None
         self.calls: list[dict[str, Any]] = []
         self.unsupported = False
+        self.fail_writes = False
 
     def diff(self) -> DiffResult:
         if self.unsupported:
@@ -70,11 +71,11 @@ class _Result:
     interrupted = False
     run_id: str | None = None
     sync_run_id: str | None = "s"
-    failed = 0
     cursor_value_used: str | None = None
 
-    def __init__(self, world: _World) -> None:
+    def __init__(self, world: _World, dry_run: bool) -> None:
         self.diff = world.diff()
+        self.failed = 1 if world.fail_writes and not dry_run else 0
 
 
 @pytest.fixture
@@ -103,7 +104,7 @@ def project_dir(
 
     def fake_run_sync(*args: Any, **kwargs: Any) -> _Result:
         world.calls.append({"dry_run": args[5], "project_dir": args[4], **kwargs})
-        return _Result(world)
+        return _Result(world, bool(args[5]))
 
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync)
     monkeypatch.setattr(
@@ -134,7 +135,8 @@ async def test_tools_are_registered_with_a_mandatory_approver(project_dir: Path)
     required = tools["drt_apply"].parameters["required"]
     assert set(required) == {"plan_id", "approved_by"}
     properties = tools["drt_apply"].parameters["properties"]
-    assert {"canary", "canary_max_error_pct", "resume"} <= set(properties)
+    assert {"canary", "canary_max_error_pct"} <= set(properties)
+    assert "resume" not in properties
     assert tools["drt_plan"].parameters["required"] == ["sync_name"]
 
 
@@ -184,6 +186,28 @@ async def test_mcp_apply_returns_canary_waves_as_data(project_dir: Path) -> None
     assert applied["halted"] is False
     assert applied["canary"]["waves"] == [1.0, 10.0, 100.0]
     assert len(applied["canary"]["results"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_mcp_canary_halt_is_structured_and_terminal(project_dir: Path, world: _World) -> None:
+    server = create_server(project_dir)
+    planned = await call(server, "drt_plan", sync_name="orders_to_pg")
+    world.fail_writes = True
+
+    halted = await call(
+        server,
+        "drt_apply",
+        plan_id=planned["plan_id"],
+        approved_by="reviewer",
+        canary=[1, 10],
+        canary_max_error_pct=100,
+    )
+
+    assert halted["applied"] is True
+    assert halted["halted"] is True
+    assert halted["failed"] is True
+    assert halted["canary"]["status"] == "halted"
+    assert "run `drt plan` again" in halted["notes"][-1]
 
 
 @pytest.mark.asyncio

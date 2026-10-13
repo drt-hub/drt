@@ -471,33 +471,6 @@ class BigQueryDestination:
             ),
         ).result()
 
-    def restore_canary_mirror_state(
-        self,
-        records: list[dict[str, Any]],
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> None:
-        """Restage observed keys for completed waves during canary resume."""
-        assert isinstance(config, BigQueryDestinationConfig)
-        self._validate_sync_options(config, sync_options)
-        self._validate_records(records)
-        self._validate_sql_columns(records)
-        self._validate_mirror(records, config, sync_options)
-        assert config.upsert_key
-        table_id = self._table_id(config)
-        client = self._build_client(config)
-        labels = self._labels(sync_options._query_tags)
-        target_schema = self._get_target_schema(client, table_id)
-        self._stage_mirror_keys(
-            client,
-            table_id,
-            records,
-            config.upsert_key,
-            sync_options,
-            labels,
-            target_schema,
-        )
-
     def finalize_sync(
         self,
         config: DestinationConfig,

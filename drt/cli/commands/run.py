@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from drt.config.base import QueryTaggingConfig
     from drt.config.models import SyncConfig
     from drt.config.profiles import ProfileConfigLike
-    from drt.destinations.base import Destination, StagedDestination
+    from drt.destinations.base import Destination  # noqa: F401 — _RunContext field
     from drt.sources.base import Source
     from drt.state.audit_trail import ComplianceAuditTrail
     from drt.state.dlq import DlqBackend
@@ -155,14 +155,8 @@ class _RunContext:
     # Where the project lives. ``drt run`` is always invoked from it; the MCP
     # server may not be, so ``drt apply`` passes it explicitly.
     project_dir: Path = Path(".")
-    # Apply-only execution controls (#1255). Their defaults preserve the
-    # byte-for-byte call shape and behaviour of ordinary ``drt run``.
-    destination: Destination | StagedDestination | None = None
+    # Apply-only canary selection. The default preserves the ordinary run call shape.
     row_filter: Callable[[dict[str, Any]], bool] | None = None
-    finalize_sync: bool = True
-    save_watermark: bool = True
-    completion_gate: Callable[[Any], bool] | None = None
-    mirror_state_only: bool = False
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -228,7 +222,7 @@ def _run_one(
             # None of these three are referenced below by the failure branch,
             # only by the success path, so widening the try changes nothing
             # about what a run_sync() failure itself reports.
-            dest = ctx.destination or get_destination(sync)
+            dest = get_destination(sync)
             wm_storage = get_watermark_storage(sync, ctx.project_dir)
             observer = _build_observer(sync, ctx, wm_storage)
             if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
@@ -239,14 +233,6 @@ def _run_one(
             apply_controls: dict[str, Any] = {}
             if ctx.row_filter is not None:
                 apply_controls["row_filter"] = ctx.row_filter
-            if not ctx.finalize_sync:
-                apply_controls["finalize_sync"] = False
-            if not ctx.save_watermark:
-                apply_controls["save_watermark"] = False
-            if ctx.completion_gate is not None:
-                apply_controls["completion_gate"] = ctx.completion_gate
-            if ctx.mirror_state_only:
-                apply_controls["mirror_state_only"] = True
 
             result = run_sync(
                 sync,
@@ -348,6 +334,10 @@ def _run_one(
         # emitted when present so healthy runs keep a lean entry.
         if result.skipped_no_match:
             entry["rows_skipped_no_match"] = result.skipped_no_match
+        if ctx.row_filter is not None:
+            # Internal canary health input. The apply flow removes this before
+            # exposing/persisting the wave result, so ordinary run output is unchanged.
+            entry["_row_error_count"] = len(result.row_errors)
         if getattr(result, "kept_values", 0):
             entry["kept_values"] = result.kept_values
         if result.watermark_source:

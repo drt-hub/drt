@@ -209,6 +209,7 @@ def _claim_file(project: Path, plan_id: str, state: str) -> None:
         ("success", "already applied"),
         ("pending", "being applied"),
         ("failed", "already attempted"),
+        ("halted", "already attempted"),
     ],
 )
 def test_a_claimed_plan_is_refused_in_every_state(
@@ -235,7 +236,7 @@ def test_applying_twice_is_refused_the_second_time(project: Path, world: _World)
     assert len(_writes(world)) == 1
 
 
-def test_canary_halts_records_claim_and_resume_continues(project: Path, world: _World) -> None:
+def test_canary_halt_is_terminal_and_same_plan_is_refused(project: Path, world: _World) -> None:
     plan = _plan(project)
     world.fail_writes = True
 
@@ -247,21 +248,16 @@ def test_canary_halts_records_claim_and_resume_continues(project: Path, world: _
     claim = json.loads(claim_path.read_text())
     assert claim["status"] == "halted"
     assert claim["waves"] == [1.0, 10.0, 100.0]
-    assert claim["completed_wave_indexes"] == [0]
     assert claim["wave_results"][0]["failed"] == 1
     assert len(claim["run_ids"]) == 1
+    assert "completed_wave_indexes" not in claim
+    assert "pinned_cursor" not in claim
+    assert "apply_started_at" not in claim
 
     ordinary_retry = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
     assert ordinary_retry.exit_code == 1
     assert "already attempted" in ordinary_retry.output
-
-    world.fail_writes = False
-    resumed = runner.invoke(app, ["apply", "plan.json", "--resume"])
-    assert resumed.exit_code == 0, resumed.output
-    claim = json.loads(claim_path.read_text())
-    assert claim["status"] == "success"
-    assert claim["completed_wave_indexes"] == [0, 1, 2]
-    assert len(claim["run_ids"]) == 3
+    assert "--resume" not in runner.invoke(app, ["apply", "--help"]).output
 
 
 def test_canary_json_output_is_one_per_wave_document(project: Path, world: _World) -> None:
@@ -280,6 +276,95 @@ def test_canary_json_output_is_one_per_wave_document(project: Path, world: _Worl
         10.0,
         100.0,
     ]
+
+
+def test_canary_interruption_during_soak_leaves_terminal_halted_claim(
+    project: Path, world: _World
+) -> None:
+    from drt.cli._apply_flow import apply_plan
+
+    plan = _plan(project)
+
+    def interrupt(_seconds: float) -> None:
+        raise SystemExit(143)
+
+    with pytest.raises(SystemExit):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_waves=[1, 10],
+            canary_soak=timedelta(seconds=1),
+            sleep=interrupt,
+        )
+
+    claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
+    assert claim["status"] == "halted"
+    assert claim["reason"] == "interrupted"
+    assert "finished_at" in claim
+    refused = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+    assert refused.exit_code == 1
+    assert "already attempted" in refused.output
+
+
+@pytest.mark.parametrize(
+    ("sync_options", "message"),
+    [
+        ({"mode": "incremental", "cursor_field": "id"}, "non-incremental"),
+        ({"mode": "upsert", "incremental_strategy": "diff"}, "snapshot baseline"),
+        ({"mode": "mirror"}, "non-incremental"),
+        ({"mode": "replace"}, "non-incremental"),
+    ],
+)
+def test_cli_canary_override_rejects_unsupported_sync_before_writes(
+    project: Path,
+    world: _World,
+    sync_options: dict[str, Any],
+    message: str,
+) -> None:
+    config = json.loads(json.dumps(SYNC_YML))
+    config["sync"] = sync_options
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(config))
+    _plan(project)
+
+    refused = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+
+    assert refused.exit_code == 1
+    assert message in refused.output
+    assert _writes(world) == []
+
+
+def test_apply_time_canary_guard_rejects_staged_destination() -> None:
+    from drt.cli._apply_flow import ApplyRefused, _validate_canary_compatibility
+    from drt.config.models import SyncConfig
+    from drt.destinations.base import SyncResult
+
+    sync = SyncConfig.model_validate(
+        {
+            "name": "orders",
+            "model": "SELECT 1",
+            "destination": {
+                "type": "postgres",
+                "host": "localhost",
+                "dbname": "d",
+                "user": "u",
+                "password": "p",
+                "table": "orders",
+                "upsert_key": ["id"],
+            },
+            "sync": {"mode": "upsert"},
+        }
+    )
+
+    class _Staged:
+        def stage(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def finalize(self, *_args: Any, **_kwargs: Any) -> SyncResult:
+            return SyncResult()
+
+    with pytest.raises(ApplyRefused, match="non-staged"):
+        _validate_canary_compatibility(sync, _Staged())
 
 
 def test_losing_the_claim_race_writes_nothing(

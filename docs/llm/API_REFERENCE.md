@@ -469,8 +469,9 @@ passing; use `max_deletes` there.
 ### Canary apply (`sync.rollout`, #1255)
 
 `sync.rollout` is used by `drt apply` only; plain `drt run` ignores it.
-Cumulative waves are ascending percentages in `(0, 100]`; 100 is appended when
-omitted and duplicates/unknown keys are rejected.
+Cumulative waves are strictly increasing numeric multiples of 0.01 in
+`(0, 100]`; 100 is appended once when omitted. Booleans, strings, NaN,
+infinity, duplicates and unknown keys are rejected.
 
 ```yaml
 sync:
@@ -481,21 +482,24 @@ sync:
 ```
 
 CLI overrides are `--canary 1,10,100`, `--canary-max-error-pct`, and
-`--canary-soak 30s`; `--resume` continues the same halted plan. MCP
-`drt_apply` accepts `canary: [1, 10, 100]`, `canary_max_error_pct`, and
-`resume`. Rows use a stable SHA-256 bucket over canonical destination-key JSON
-(or the whole row without an `upsert_key`). A wave halts when
-`failed / (success + failed)` is strictly above the threshold; zero rows pass.
-Only a passing final wave runs destination finalize/mirror deletes and saves
-the watermark.
+`--canary-soak 30s`. MCP `drt_apply` accepts `canary: [1, 10, 100]` and
+`canary_max_error_pct`. Rows use a stable SHA-256 bucket over a typed canonical
+encoding of `destination.upsert_key`: null, normalized numbers, NFC strings,
+UTC datetimes, dates and bytes are distinct encodings; `True`, `1`, `1.0`, and
+`Decimal('1')` hash together, while `'1'` hashes separately. Missing key
+columns and unsupported types are errors.
 
-Resume verifies the sealed document, version/age, config/environment/cursor
-fingerprints, original guards and pinned cursor, but skips digest comparison
-because earlier waves have already changed the destination. It therefore does
-not detect drift between waves and is not transactional. Staged destinations
-are unsupported in this spike; replace requires an `upsert_key`; and an
-`upsert_key` produced by a destination lookup or run metadata is rejected
-because it is unavailable at the pre-batch hash point.
+A wave halts when `(failed + error-skipped rows) / rows selected` is strictly
+above the threshold. Computed-field/transform errors under `on_error: skip`
+count; destination failure under `on_error: fail` always halts; zero rows pass.
+Each wave is an ordinary run.
+
+**A halt is terminal: stop, re-plan, re-review, and apply the new plan.** There
+is no resume operation and the halted plan remains single-use. Canary v1 only
+supports non-incremental `mode: full | upsert` with an `upsert_key`. It rejects
+incremental/cursor and snapshot-diff syncs, mirror/replace/tracked state,
+staged destinations, and lookup- or run-metadata-derived keys. Configured
+rollouts fail validation; CLI/MCP overrides fail during apply before writes.
 
 ### Snapshot-diff incremental and diff mirror (#755/#1110)
 

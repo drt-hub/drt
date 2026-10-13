@@ -23,9 +23,11 @@ import os
 import re
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -74,25 +76,72 @@ def normalize_canary_waves(waves: list[float | int]) -> list[float]:
     """Validate cumulative canary percentages and append 100 when absent."""
     if not waves:
         raise ValueError("canary waves must contain at least one percentage")
+    if any(isinstance(wave, bool) or not isinstance(wave, int | float) for wave in waves):
+        raise ValueError("canary waves must contain only numbers (not booleans or strings)")
     normalized = [float(wave) for wave in waves]
     if any(not math.isfinite(wave) or not 0 < wave <= 100 for wave in normalized):
         raise ValueError("canary waves must each be greater than 0 and at most 100")
-    if len(set(normalized)) != len(normalized):
-        raise ValueError("canary waves must not contain duplicates")
-    if normalized != sorted(normalized):
-        raise ValueError("canary waves must be in ascending order")
+    if any((Decimal(str(wave)) * 100) % 1 for wave in normalized):
+        raise ValueError("canary waves must be multiples of 0.01 (the bucket resolution)")
+    if any(left >= right for left, right in zip(normalized, normalized[1:], strict=False)):
+        raise ValueError("canary waves must be strictly increasing without duplicates")
     if normalized[-1] != 100:
         normalized.append(100.0)
     return normalized
 
 
-def canary_bucket(record: dict[str, Any], upsert_key: list[str] | None = None) -> int:
-    """Return the stable 0..9999 rollout bucket for one extracted record."""
-    value: Any = [record.get(column) for column in upsert_key] if upsert_key else record
-    canonical = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+def parse_canary_waves(text: str) -> list[float]:
+    """Parse the CLI's comma-separated numeric wave list strictly."""
+    parts = [part.strip() for part in text.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ValueError("canary waves must be a comma-separated list of numbers")
+    try:
+        values = [float(part) for part in parts]
+    except ValueError as e:
+        raise ValueError("canary waves must contain only numbers") from e
+    return normalize_canary_waves(values)
+
+
+def _canonical_key_value(value: Any) -> bytes:
+    """Encode one destination key value with an unambiguous, stable type tag."""
+    if value is None:
+        return b"null:"
+    if isinstance(value, bool | int | float | Decimal):
+        number = Decimal(int(value)) if isinstance(value, bool) else Decimal(str(value))
+        if not number.is_finite():
+            raise ValueError(f"Unsupported non-finite canary key number: {value!r}")
+        if number == 0:
+            number = Decimal(0)
+        text = format(number.normalize(), "f")
+        return f"number:{text}".encode()
+    if isinstance(value, str):
+        return b"string:" + unicodedata.normalize("NFC", value).encode("utf-8")
+    if isinstance(value, datetime):
+        aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+        return b"datetime:" + aware.astimezone(timezone.utc).isoformat().encode()
+    if isinstance(value, date):
+        return b"date:" + value.isoformat().encode()
+    if isinstance(value, bytes):
+        return b"bytes:" + value.hex().encode()
+    raise ValueError(
+        "Unsupported canary key type "
+        f"{type(value).__name__}; use null, bool/number, string, date/datetime, or bytes."
     )
-    return int(hashlib.sha256(canonical.encode("utf-8")).hexdigest(), 16) % 10_000
+
+
+def canary_bucket(record: dict[str, Any], upsert_key: list[str] | None = None) -> int:
+    """Return the stable 0..9999 rollout bucket for destination key values."""
+    if not upsert_key:
+        raise ValueError("Canary apply requires destination.upsert_key for stable wave keys.")
+    encoded: list[bytes] = []
+    for column in upsert_key:
+        if column not in record:
+            raise ValueError(
+                f"Canary key column {column!r} is missing after transforms; missing is not null."
+            )
+        token = _canonical_key_value(record[column])
+        encoded.append(len(token).to_bytes(8, "big") + token)
+    return int.from_bytes(hashlib.sha256(b"".join(encoded)).digest(), "big") % 10_000
 
 
 def canary_filter(
@@ -112,7 +161,15 @@ def canary_filter(
             from drt.engine.field_mappings import apply_field_mappings
             from drt.engine.masking import apply_mask
 
-            transformed, _errors = apply_computed_fields([dict(record)], computed_fields, "fail")
+            # Only derive fields that can become a destination key here. Other
+            # computed fields must run in the engine so on_error: skip can count
+            # them as error-skipped rows in this wave's health check.
+            key_fields = {
+                name: template
+                for name, template in (computed_fields or {}).items()
+                if (field_mappings or {}).get(name, name) in upsert_key
+            }
+            transformed, _errors = apply_computed_fields([dict(record)], key_fields, "fail")
             transformed = apply_field_mappings(transformed, field_mappings)
             transformed = apply_mask(transformed, mask)
             keyed = transformed[0]
@@ -120,6 +177,75 @@ def canary_filter(
         return lower_pct * 100 <= bucket < upper_pct * 100
 
     return selected
+
+
+def _canary_health(
+    entry: dict[str, Any], *, had_error: bool, on_error: str, max_error_pct: float
+) -> tuple[int, int, int, float, bool]:
+    """Return rows, successes, error rows, error percentage, and wave verdict."""
+    row_error_value = entry.pop("_row_error_count", 0)
+    row_errors = int(row_error_value) if isinstance(row_error_value, int | float) else 0
+    ok_value = entry.get("rows_synced", 0)
+    failed_value = entry.get("rows_failed", 0)
+    rows_value = entry.get("rows_extracted", 0)
+    ok = int(ok_value) if isinstance(ok_value, int | float) else 0
+    destination_failed = int(failed_value) if isinstance(failed_value, int | float) else 0
+    rows = int(rows_value) if isinstance(rows_value, int | float) else 0
+    error_rows = max(destination_failed, row_errors)
+    rate = 0.0 if rows == 0 else error_rows * 100.0 / rows
+    fatal_destination_error = had_error or (on_error == "fail" and destination_failed > 0)
+    return rows, ok, error_rows, rate, not fatal_destination_error and rate <= max_error_pct
+
+
+def _validate_canary_compatibility(sync: Any, destination: Any) -> list[str]:
+    """Fail closed unless this is the stateless, keyed per-row v1 path."""
+    from drt.destinations.base import StagedDestination
+
+    if isinstance(destination, StagedDestination):
+        raise ApplyRefused(
+            "Canary apply v1 supports only non-staged per-row destinations; "
+            "remove --canary/sync.rollout or use a non-staged destination."
+        )
+    upsert_key = getattr(sync.destination, "upsert_key", None)
+    if sync.sync.mode not in {"full", "upsert"}:
+        raise ApplyRefused(
+            "Canary apply v1 supports only non-incremental sync.mode: full or upsert; "
+            f"mode: {sync.sync.mode} can change watermark/finalize state across waves. "
+            "Remove --canary/sync.rollout or use a plain full/upsert sync."
+        )
+    if sync.sync.incremental_strategy == "diff":
+        raise ApplyRefused(
+            "Canary apply v1 does not support incremental_strategy: diff because each wave "
+            "would mutate the snapshot baseline. Remove --canary/sync.rollout or use the "
+            "plain non-incremental write path."
+        )
+    if not upsert_key:
+        raise ApplyRefused(
+            "Canary apply v1 requires destination.upsert_key so rows have stable wave keys "
+            "and a re-plan after a halt can identify what remains."
+        )
+    lookup_outputs = {
+        (sync.sync.field_mappings or {}).get(name, name)
+        for name in (getattr(sync.destination, "lookups", None) or {})
+    }
+    metadata = sync.sync.metadata_columns
+    metadata_outputs = {
+        value
+        for value in (
+            metadata.synced_at if metadata is not None else None,
+            metadata.run_id if metadata is not None else None,
+            metadata.sync_name if metadata is not None else None,
+        )
+        if value is not None
+    }
+    unstable_keys = set(upsert_key) & (lookup_outputs | metadata_outputs)
+    if unstable_keys:
+        raise ApplyRefused(
+            "Canary apply v1 cannot use an upsert_key produced by a destination lookup or "
+            f"run metadata because it is not stable before each wave: {sorted(unstable_keys)}. "
+            "Choose source/computed key columns or remove canary rollout."
+        )
+    return list(upsert_key)
 
 
 def describe_drift(report: dict[str, Any]) -> str:
@@ -187,13 +313,11 @@ def _claim(
     forced: list[str] | None = None,
     approved_by: str | None = None,
     waves: list[float] | None = None,
-    cursor_value: str | None = None,
 ) -> None:
     """Atomically take the plan. Raises ``FileExistsError`` if someone already did."""
     claims_dir(project_dir).mkdir(parents=True, exist_ok=True)
     fd = os.open(_claim_path(project_dir, plan_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        claimed_at = datetime.now(timezone.utc).isoformat()
         json.dump(
             {
                 "plan_id": plan_id,
@@ -201,15 +325,12 @@ def _claim(
                 "run_id": run_id,
                 "state": "pending",
                 "status": "pending",
-                "claimed_at": claimed_at,
-                "apply_started_at": claimed_at,
+                "claimed_at": datetime.now(timezone.utc).isoformat(),
                 **(
                     {
                         "waves": waves,
-                        "completed_wave_indexes": [],
                         "wave_results": [],
                         "run_ids": [],
-                        "pinned_cursor": cursor_value,
                     }
                     if waves is not None
                     else {}
@@ -228,7 +349,7 @@ def _finish_claim(project_dir: Path, plan_id: str, state: str, **updates: Any) -
     try:
         claim = _read_claim(project_dir, plan_id) or {"plan_id": plan_id}
         claim.update(state=state, status=state, **updates)
-        if state in {"success", "failed"}:
+        if state in {"success", "failed", "halted"}:
             claim["finished_at"] = datetime.now(timezone.utc).isoformat()
         # Private, exclusive temp file in the same directory (mkstemp is 0600 and
         # does not follow a pre-existing symlink), then an atomic rename.
@@ -245,13 +366,16 @@ def _finish_claim(project_dir: Path, plan_id: str, state: str, **updates: Any) -
             except OSError:
                 pass
             raise
-    except Exception as e:  # noqa: BLE001 - see docstring
-        log.warning(
-            "Could not record the outcome of plan %s (%s); %s still says 'pending'.",
-            plan_id,
-            e,
-            _claim_path(project_dir, plan_id),
-        )
+    except BaseException as e:  # noqa: BLE001 - see docstring; must never mask interruption
+        try:
+            log.warning(
+                "Could not record the outcome of plan %s (%s); %s may still say 'pending'.",
+                plan_id,
+                e,
+                _claim_path(project_dir, plan_id),
+            )
+        except BaseException:  # logging is also best-effort on this terminal path
+            pass
 
 
 def preflight_document(
@@ -259,7 +383,6 @@ def preflight_document(
     *,
     project_dir: Path = Path("."),
     max_age: timedelta = timedelta(hours=24),
-    resume: bool = False,
 ) -> dict[str, Any]:
     """Every check on a plan that needs no source or destination access.
 
@@ -295,28 +418,7 @@ def preflight_document(
         raise ApplyRefused("The plan's created_at is not a valid timestamp.") from e
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
-    claim = _read_claim(project_dir, doc["plan_id"]) if resume else None
-    age_reference = datetime.now(timezone.utc)
-    if resume:
-        if claim is None or not _claim_path(project_dir, doc["plan_id"]).exists():
-            raise ApplyRefused(f"Plan {doc['plan_id']} has no halted canary apply to resume.")
-        state = claim.get("status", claim.get("state"))
-        if state != "halted":
-            raise ApplyRefused(
-                f"Plan {doc['plan_id']} cannot be resumed because its claim is {state!r}, "
-                "not 'halted'."
-            )
-        try:
-            age_reference = datetime.fromisoformat(
-                str(claim.get("apply_started_at", claim["claimed_at"]))
-            )
-        except (KeyError, ValueError) as e:
-            raise ApplyRefused(
-                "The halted claim has no valid apply start time; refusing resume."
-            ) from e
-        if age_reference.tzinfo is None:
-            age_reference = age_reference.replace(tzinfo=timezone.utc)
-    age = age_reference - created
+    age = datetime.now(timezone.utc) - created
     if age < -_CLOCK_SKEW:
         raise ApplyRefused(
             "The plan's created_at is in the future; refusing it. Re-run `drt plan`."
@@ -325,11 +427,10 @@ def preflight_document(
         raise ApplyRefused(
             f"The plan is {age} old, older than --max-age {max_age}. Re-run `drt plan`."
         )
-    if not resume:
-        try:
-            _refuse_if_claimed(project_dir, doc["plan_id"])
-        except PlanCliError as e:
-            raise ApplyRefused(str(e)) from e
+    try:
+        _refuse_if_claimed(project_dir, doc["plan_id"])
+    except PlanCliError as e:
+        raise ApplyRefused(str(e)) from e
     return doc
 
 
@@ -643,20 +744,17 @@ def apply_plan(
     canary_waves: list[float | int] | None = None,
     canary_max_error_pct: float | None = None,
     canary_soak: timedelta | None = None,
-    resume: bool = False,
     sleep: Callable[[float], None] = time.sleep,
-    resume_hint: str | None = None,
 ) -> ApplyOutcome:
     """Apply once, or progressively when CLI/config selects a canary rollout."""
     rollout = _rollout_from_config(plan_text, project_dir, cli_vars)
     if (
         canary_waves is None
         and rollout is None
-        and not resume
         and (canary_max_error_pct is not None or canary_soak is not None)
     ):
         raise ApplyRefused("--canary-max-error-pct/--canary-soak require --canary or sync.rollout.")
-    if canary_waves is None and rollout is None and not resume:
+    if canary_waves is None and rollout is None:
         return _apply_plan_once(
             plan_text,
             project_dir=project_dir,
@@ -691,9 +789,7 @@ def apply_plan(
         canary_waves=canary_waves,
         canary_max_error_pct=canary_max_error_pct,
         canary_soak=canary_soak,
-        resume=resume,
         sleep=sleep,
-        resume_hint=resume_hint,
         configured_rollout=rollout,
     )
 
@@ -717,18 +813,15 @@ def _apply_plan_canary(
     canary_waves: list[float | int] | None,
     canary_max_error_pct: float | None,
     canary_soak: timedelta | None,
-    resume: bool,
     sleep: Callable[[float], None],
-    resume_hint: str | None,
     configured_rollout: Any,
 ) -> ApplyOutcome:
-    """Verified progressive apply with durable, resumable wave bookkeeping."""
+    """Verified progressive apply whose halt is terminal for this plan."""
     from drt._identifiers import new_run_id
     from drt.cli._helpers import get_destination, get_source
     from drt.cli._plan_runner import PlanCliError, compute_plan
     from drt.cli.commands.run import _run_one, _RunContext, _write_run_results
     from drt.config.duration import parse_duration as parse_config_duration
-    from drt.destinations.base import StagedDestination
     from drt.engine.plan import drift_report
 
     say = notify or (lambda _message: None)
@@ -739,7 +832,7 @@ def _apply_plan_canary(
     ):
         raise ApplyRefused("canary_max_error_pct must be between 0 and 100.")
 
-    doc = preflight_document(plan_text, project_dir=project_dir, max_age=max_age, resume=resume)
+    doc = preflight_document(plan_text, project_dir=project_dir, max_age=max_age)
     plan_id = str(doc["plan_id"])
     sync_name = str(doc["sync"]["name"])
     if expect_plan_id is not None and plan_id != expect_plan_id:
@@ -747,11 +840,9 @@ def _apply_plan_canary(
             f"The stored plan is {plan_id}, not the requested {expect_plan_id}; refusing it. "
             "Call drt_plan again."
         )
-    claim = _read_claim(project_dir, plan_id) if resume else None
 
     def claim_preflight(_project: Any, _state: Any, _sync: Any) -> None:
-        if not resume:
-            _refuse_if_claimed(project_dir, plan_id)
+        _refuse_if_claimed(project_dir, plan_id)
 
     try:
         ctx_plan = compute_plan(
@@ -787,7 +878,7 @@ def _apply_plan_canary(
             raise ApplyRefused(f"{message} Re-run `drt plan`.")
 
     drifted = 0
-    if not resume and current.digest != doc["digest"]:
+    if current.digest != doc["digest"]:
         report = drift_report(doc["entries"], [entry.to_dict() for entry in current.entries])
         drifted = int(report["drifted"])
         pct = 100.0 * drifted / max(len(doc["entries"]), 1)
@@ -799,23 +890,16 @@ def _apply_plan_canary(
             )
         say(f"Proceeding despite drift: {drifted} entries ({pct:.1f}% <= {allow_drift_pct}%).")
 
-    if not resume and not current.has_changes:
+    destination = get_destination(ctx_plan.sync)
+    upsert_key = _validate_canary_compatibility(ctx_plan.sync, destination)
+
+    if not current.has_changes:
         return ApplyOutcome(
             plan_id, sync_name, applied=False, message="The plan has no changes; nothing to apply."
         )
-    summary = doc["summary"] if resume else current.summary
-    tripped = (
-        list(doc.get("guards", {}).get("tripped", []))
-        if resume
-        else [trip.to_dict() for trip in current.guard_trips]
-    )
-    forced_on_first_apply = bool(
-        resume
-        and claim is not None
-        and {str(trip["guard"]) for trip in tripped}
-        <= {str(guard) for guard in claim.get("guards_forced", [])}
-    )
-    if tripped and not force_guards and not forced_on_first_apply:
+    summary = current.summary
+    tripped = [trip.to_dict() for trip in current.guard_trips]
+    if tripped and not force_guards:
         raise ApplyRefused(
             "Change guards tripped; nothing was written:\n"
             + "\n".join(f"  - {trip['message']}" for trip in tripped)
@@ -828,124 +912,60 @@ def _apply_plan_canary(
         if not confirm(f"Apply plan {plan_id} to {current.destination}: {', '.join(parts)}."):
             raise ApplyAborted("Aborted. Nothing was written.")
 
-    if resume:
-        assert claim is not None
-        claimed_waves = claim.get("waves")
-        if not isinstance(claimed_waves, list):
-            raise ApplyRefused("The halted claim has no canary wave definition.")
-        waves = normalize_canary_waves(claimed_waves)
-        if canary_waves is not None and normalize_canary_waves(canary_waves) != waves:
-            raise ApplyRefused("--canary must match the halted claim's waves when resuming.")
-        max_error_pct = float(claim.get("max_error_pct", 2.0))
-        soak_seconds = float(claim.get("soak_seconds", 0.0))
-        if claim.get("pinned_cursor") != ctx_plan.cursor_value_used:
-            raise ApplyRefused("The halted apply's pinned cursor no longer matches this plan.")
-    else:
-        configured_waves = configured_rollout.waves if configured_rollout is not None else None
-        waves = normalize_canary_waves(canary_waves or configured_waves or [])
-        max_error_pct = configured_rollout.max_error_pct if configured_rollout is not None else 2.0
-        soak_seconds = 0.0
-        if configured_rollout is not None and configured_rollout.soak is not None:
-            try:
-                soak_delta = parse_duration(configured_rollout.soak)
-            except ValueError:
-                soak_delta = parse_config_duration(
-                    configured_rollout.soak, field_name="sync.rollout.soak"
-                )
-            soak_seconds = soak_delta.total_seconds()
+    configured_waves = configured_rollout.waves if configured_rollout is not None else None
+    waves = normalize_canary_waves(canary_waves or configured_waves or [])
+    max_error_pct = configured_rollout.max_error_pct if configured_rollout is not None else 2.0
+    soak_seconds = 0.0
+    if configured_rollout is not None and configured_rollout.soak is not None:
+        try:
+            soak_delta = parse_duration(configured_rollout.soak)
+        except ValueError:
+            soak_delta = parse_config_duration(
+                configured_rollout.soak, field_name="sync.rollout.soak"
+            )
+        soak_seconds = soak_delta.total_seconds()
     if canary_max_error_pct is not None:
         max_error_pct = canary_max_error_pct
     if canary_soak is not None:
         soak_seconds = canary_soak.total_seconds()
 
-    destination = get_destination(ctx_plan.sync)
-    if isinstance(destination, StagedDestination):
-        raise ApplyRefused(
-            "Canary apply does not support staged destinations in this spike: a halted "
-            "process cannot safely resume their in-memory upload."
-        )
-    upsert_key = getattr(ctx_plan.sync.destination, "upsert_key", None)
-    if ctx_plan.sync.sync.mode == "replace" and not upsert_key:
-        raise ApplyRefused(
-            "Canary apply with sync.mode: replace requires destination.upsert_key; "
-            "without one, progressive replace would truncate prior waves."
-        )
-    if ctx_plan.sync.sync.mode == "mirror" and not callable(
-        getattr(destination, "restore_canary_mirror_state", None)
-    ):
-        raise ApplyRefused(
-            f"Canary mirror is unsafe for {type(destination).__name__}: its observed-key "
-            "state cannot be reconstructed on --resume."
-        )
-    lookup_outputs = {
-        (ctx_plan.sync.sync.field_mappings or {}).get(name, name)
-        for name in (getattr(ctx_plan.sync.destination, "lookups", None) or {})
-    }
-    metadata = ctx_plan.sync.sync.metadata_columns
-    metadata_outputs = {
-        value
-        for value in (
-            metadata.synced_at if metadata is not None else None,
-            metadata.run_id if metadata is not None else None,
-            metadata.sync_name if metadata is not None else None,
-        )
-        if value is not None
-    }
-    unstable_keys = set(upsert_key or []) & (lookup_outputs | metadata_outputs)
-    if unstable_keys:
-        raise ApplyRefused(
-            "Canary apply cannot hash an upsert_key produced by a destination lookup or "
-            f"run metadata in this spike: {sorted(unstable_keys)}."
-        )
-
     first_run_id = new_run_id()
-    if not resume:
-        try:
-            _claim(
-                project_dir,
-                plan_id,
-                sync_name,
-                first_run_id,
-                [str(trip["guard"]) for trip in tripped],
-                approved_by,
-                waves=waves,
-                cursor_value=ctx_plan.cursor_value_used,
-            )
-        except FileExistsError as e:
-            raise ApplyRefused(f"Plan {plan_id} was just taken by another apply.") from e
-        _finish_claim(
+    try:
+        _claim(
             project_dir,
             plan_id,
-            "pending",
-            max_error_pct=max_error_pct,
-            soak_seconds=soak_seconds,
+            sync_name,
+            first_run_id,
+            [str(trip["guard"]) for trip in tripped],
+            approved_by,
+            waves=waves,
         )
-        claim = _read_claim(project_dir, plan_id)
-    assert claim is not None
+    except FileExistsError as e:
+        raise ApplyRefused(f"Plan {plan_id} was just taken by another apply.") from e
+    _finish_claim(
+        project_dir,
+        plan_id,
+        "pending",
+        max_error_pct=max_error_pct,
+        soak_seconds=soak_seconds,
+    )
 
-    completed = [int(index) for index in claim.get("completed_wave_indexes", [])]
-    if completed != list(range(len(completed))):
-        raise ApplyRefused("The halted claim's completed wave indexes are not contiguous.")
-    wave_results: list[dict[str, Any]] = list(claim.get("wave_results", []))
-    run_ids: list[str] = list(claim.get("run_ids", []))
+    wave_results: list[dict[str, Any]] = []
+    run_ids: list[str] = []
     project = ctx_plan.project
     state_bundle = ctx_plan.state_bundle
     source = get_source(ctx_plan.profile)
-    started_at = str(claim.get("apply_started_at", datetime.now(timezone.utc).isoformat()))
+    started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
 
     def context(
         run_id: str,
         predicate: Callable[[dict[str, Any]], bool],
-        *,
-        final: bool,
-        state_only: bool = False,
-        gate: Callable[[Any], bool] | None = None,
     ) -> _RunContext:
         return _RunContext(
             source=source,
             state_mgr=state_bundle.state,
-            history_mgr=None if state_only else state_bundle.history,
+            history_mgr=state_bundle.history,
             dlq_store=state_bundle.dlq,
             history_retention_days=project.history.retention_days,
             json_mode=True,
@@ -957,26 +977,19 @@ def _apply_plan_canary(
             vars=ctx_plan.project_vars,
             query_tagging=project.query_tagging,
             run_id=run_id,
-            idempotency_ledger=None if state_only else state_bundle.ledger,
-            audit_trail=None if state_only else state_bundle.audit_trail,
+            idempotency_ledger=state_bundle.ledger,
+            audit_trail=state_bundle.audit_trail,
             audit_fields=project.state.audit_trail.fields,
             audit_retain_days=project.state.audit_trail.retain_days or 30,
             project_dir=project_dir,
-            destination=destination,
             row_filter=predicate,
-            finalize_sync=final,
-            save_watermark=final,
-            completion_gate=gate,
-            mirror_state_only=state_only,
         )
 
-    # Resume reconstructs destination-local state without re-sending mirror
-    # rows. Replace has no equivalent key-only state, so it deliberately
-    # rebuilds its target/shadow from completed waves before continuing.
-    if resume and completed and ctx_plan.sync.sync.mode in {"mirror", "replace"}:
-        lower = 0.0
-        for index in completed:
-            upper = waves[index]
+    halted = False
+    reason: str | None = None
+    try:
+        for index, upper in enumerate(waves):
+            lower = 0.0 if index == 0 else waves[index - 1]
             predicate = canary_filter(
                 lower,
                 upper,
@@ -985,145 +998,86 @@ def _apply_plan_canary(
                 ctx_plan.sync.sync.computed_fields,
                 ctx_plan.sync.sync.mask,
             )
-            restore_ctx = context(
-                new_run_id(),
-                predicate,
-                final=False,
-                state_only=ctx_plan.sync.sync.mode == "mirror",
+            run_id = first_run_id if not run_ids else new_run_id()
+            wave_ctx = context(run_id, predicate)
+            _name, entry, had_error = _run_one(ctx_plan.sync, wave_ctx, ctx_plan.profile)
+            rows, ok, error_rows, rate, passed = _canary_health(
+                entry,
+                had_error=had_error,
+                on_error=ctx_plan.sync.sync.on_error,
+                max_error_pct=max_error_pct,
             )
-            _name, restored, restore_error = _run_one(ctx_plan.sync, restore_ctx, ctx_plan.profile)
-            if restore_error:
-                _finish_claim(project_dir, plan_id, "failed", reason="resume reconstruction failed")
-                raise ApplyRefused(
-                    f"Could not reconstruct completed wave {index + 1}: "
-                    f"{restored.get('error', 'destination error')}"
+            verdict = "PASS" if passed else "HALT"
+            wave_result = {
+                "index": index,
+                "wave": index + 1,
+                "total_waves": len(waves),
+                "cumulative_pct": upper,
+                "rows": rows,
+                "ok": ok,
+                "failed": error_rows,
+                "error_pct": round(rate, 4),
+                "verdict": verdict.lower(),
+                "run_id": run_id,
+            }
+            wave_results.append(wave_result)
+            run_ids.append(run_id)
+            say(
+                f"wave {index + 1}/{len(waves)} ({upper:g}% cumulative): "
+                f"{rows} rows, {ok} ok, {error_rows} failed — {verdict}"
+            )
+            if not passed:
+                halted = True
+                reason = (
+                    str(entry.get("error", "destination failure under on_error: fail"))
+                    if had_error or (ctx_plan.sync.sync.on_error == "fail" and error_rows > 0)
+                    else f"wave error rate {rate:.2f}% exceeded {max_error_pct:.2f}%"
                 )
-            lower = upper
-
-    halted = False
-    failed_apply = False
-    reason: str | None = None
-    start_index = len(completed)
-    for index in range(start_index, len(waves)):
-        lower = 0.0 if index == 0 else waves[index - 1]
-        upper = waves[index]
-        predicate = canary_filter(
-            lower,
-            upper,
-            upsert_key,
-            ctx_plan.sync.sync.field_mappings,
-            ctx_plan.sync.sync.computed_fields,
-            ctx_plan.sync.sync.mask,
-        )
-        run_id = first_run_id if not run_ids else new_run_id()
-        gate_state = {"passed": True}
-
-        def final_gate(result: Any) -> bool:
-            attempted = result.success + result.failed
-            rate = 0.0 if attempted == 0 else result.failed * 100.0 / attempted
-            gate_state["passed"] = rate <= max_error_pct
-            return gate_state["passed"]
-
-        final = index == len(waves) - 1
-        wave_ctx = context(run_id, predicate, final=final, gate=final_gate if final else None)
-        _name, entry, _had_error = _run_one(ctx_plan.sync, wave_ctx, ctx_plan.profile)
-        ok_value = entry.get("rows_synced", 0)
-        failed_value = entry.get("rows_failed", 0)
-        ok = int(ok_value) if isinstance(ok_value, int | float) else 0
-        failed = int(failed_value) if isinstance(failed_value, int | float) else 0
-        attempted = ok + failed
-        rate = 0.0 if attempted == 0 else failed * 100.0 / attempted
-        runtime_failure = "error" in entry
-        passed = not runtime_failure and rate <= max_error_pct and gate_state["passed"]
-        verdict = "PASS" if passed else "HALT"
-        rows_value = entry.get("rows_extracted", attempted)
-        wave_result = {
-            "index": index,
-            "wave": index + 1,
-            "total_waves": len(waves),
-            "cumulative_pct": upper,
-            "rows": int(rows_value) if isinstance(rows_value, int | float) else attempted,
-            "ok": ok,
-            "failed": failed,
-            "error_pct": round(rate, 4),
-            "verdict": verdict.lower(),
-            "run_id": run_id,
-        }
-        wave_results.append(wave_result)
-        run_ids.append(run_id)
-        completed.append(index)
-        say(
-            f"wave {index + 1}/{len(waves)} ({upper:g}% cumulative): "
-            f"{wave_result['rows']} rows, {ok} ok, {failed} failed — {verdict}"
-        )
-        if not passed:
-            failed_apply = runtime_failure
-            halted = not runtime_failure
-            reason = (
-                str(entry["error"])
-                if runtime_failure
-                else f"wave error rate {rate:.2f}% exceeded {max_error_pct:.2f}%"
+            _finish_claim(
+                project_dir,
+                plan_id,
+                "halted" if halted else "pending",
+                wave_results=wave_results,
+                run_ids=run_ids,
+                halted_at=index if halted else None,
+                reason=reason,
             )
+            if halted:
+                break
+            if index < len(waves) - 1 and soak_seconds > 0:
+                sleep(soak_seconds)
+    except BaseException:
         _finish_claim(
             project_dir,
             plan_id,
-            "failed" if failed_apply else "halted" if halted else "pending",
-            completed_wave_indexes=completed,
+            "halted",
             wave_results=wave_results,
             run_ids=run_ids,
-            halted_at=index if halted else None,
-            reason=reason,
+            reason="interrupted",
         )
-        if halted or failed_apply:
-            resetter = getattr(destination, "reset_write_state", None)
-            if callable(resetter):
-                try:
-                    resetter(ctx_plan.sync.destination, ctx_plan.sync.sync)
-                except Exception as exc:  # noqa: BLE001 - halt result remains authoritative
-                    say(f"warning: could not clean canary destination staging: {exc}")
-            break
-        if not final and soak_seconds > 0:
-            sleep(soak_seconds)
-
-    # If the final wave itself halted, it was deliberately not finalized and
-    # its watermark was not saved. Resume reconstructs state above, then this
-    # empty selected range performs only those deferred completion hooks.
-    if resume and not halted and not failed_apply and start_index == len(waves):
-        completion_id = new_run_id()
-        completion_ctx = context(completion_id, lambda _row: False, final=True)
-        _name, completion_entry, completion_error = _run_one(
-            ctx_plan.sync, completion_ctx, ctx_plan.profile
-        )
-        if completion_error:
-            _finish_claim(project_dir, plan_id, "failed", reason="deferred finalize failed")
-            raise ApplyRefused(
-                f"Deferred canary finalize failed: {completion_entry.get('error', 'error')}"
-            )
-        run_ids.append(completion_id)
+        raise
 
     canary = {
         "waves": waves,
-        "completed_wave_indexes": completed,
         "results": wave_results,
-        "status": "failed" if failed_apply else "halted" if halted else "success",
-        "halted_at": completed[-1] if halted and completed else None,
+        "status": "halted" if halted else "success",
+        "halted_at": wave_results[-1]["index"] if halted and wave_results else None,
         "reason": reason,
         "run_ids": run_ids,
     }
     message = ""
-    if failed_apply:
-        message = f"FAILED during wave {completed[-1] + 1}: {reason}"
-        say(message)
-    elif halted:
-        hint = resume_hint or "drt apply <same-plan-file> --resume"
-        message = f"HALTED after wave {completed[-1] + 1}: {reason}. Resume with: {hint}"
+    if halted:
+        halted_wave = int(wave_results[-1]["wave"]) if wave_results else 1
+        message = (
+            f"HALTED after wave {halted_wave}: {reason}. This plan is terminal; "
+            "run `drt plan` again, review the remaining changes, and apply the new plan."
+        )
         say(message)
     else:
         _finish_claim(
             project_dir,
             plan_id,
             "success",
-            completed_wave_indexes=completed,
             wave_results=wave_results,
             run_ids=run_ids,
             halted_at=None,
@@ -1131,7 +1085,7 @@ def _apply_plan_canary(
         )
     entry = {
         "name": sync_name,
-        "status": "failed" if failed_apply else "halted" if halted else "success",
+        "status": "halted" if halted else "success",
         "plan_id": plan_id,
         "canary": canary,
     }
@@ -1145,11 +1099,11 @@ def _apply_plan_canary(
         run_id=artifact_run_id,
         started_at=started_at,
         results=[entry],
-        succeeded=0 if halted or failed_apply else 1,
-        failed=1 if halted or failed_apply else 0,
+        succeeded=0 if halted else 1,
+        failed=1 if halted else 0,
         skipped=0,
         total_duration=round(time.monotonic() - t0, 2),
-        exit_code=1 if halted or failed_apply else 0,
+        exit_code=1 if halted else 0,
     )
     return ApplyOutcome(
         plan_id,
@@ -1158,7 +1112,7 @@ def _apply_plan_canary(
         message=message,
         run_id=artifact_run_id,
         entry=entry,
-        had_error=halted or failed_apply,
+        had_error=halted,
         guards_forced=tripped,
         drifted=drifted,
         run_ids=run_ids,
