@@ -240,6 +240,13 @@ def test_hash_uses_transformed_destination_key_without_mutating_source() -> None
     assert source == {"raw_id": 7}
 
 
+def test_filter_without_a_key_fails_closed_when_evaluated() -> None:
+    predicate = canary_filter(0, 100, None)
+
+    with pytest.raises(ValueError, match="requires destination.upsert_key"):
+        predicate({"id": 1})
+
+
 def _config(
     *, mode: str = "upsert", destination_type: str = "postgres", **sync: Any
 ) -> dict[str, Any]:
@@ -277,6 +284,17 @@ def test_rollout_config_is_strict_and_schema_keeps_numeric_items() -> None:
     assert rollout["properties"]["waves"]["items"]["type"] == "number"
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         SyncConfig.model_validate(_config(rollout={"waves": [1], "typo": True}))
+
+
+def test_rollout_preserves_an_explicit_final_wave_and_accepts_compact_soak() -> None:
+    configured = SyncConfig.model_validate(_config(rollout={"waves": [1, 100], "soak": "1s"}))
+    explicit_none = SyncConfig.model_validate(_config(rollout={"waves": [1], "soak": None}))
+
+    assert configured.sync.rollout is not None
+    assert configured.sync.rollout.waves == [1.0, 100.0]
+    assert configured.sync.rollout.soak == "1s"
+    assert explicit_none.sync.rollout is not None
+    assert explicit_none.sync.rollout.soak is None
 
 
 @pytest.mark.parametrize(

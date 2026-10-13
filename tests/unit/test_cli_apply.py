@@ -40,6 +40,10 @@ class _World:
         self.cursor: str | None = None
         self.calls: list[dict[str, Any]] = []
         self.fail_writes = False
+        self.raise_write: Exception | None = None
+        self.rows_extracted = 2
+        self.success = 2
+        self.row_errors: list[Any] = []
         self.deleted: list[dict[str, Any]] = []
         self.baseline: int | None = None
 
@@ -55,11 +59,8 @@ class _World:
 
 
 class _Result:
-    success = 2
     skipped = 0
     skipped_no_match = 0
-    rows_extracted = 2
-    row_errors: list[Any] = []
     errors: list[str] = []
     watermark_source: str | None = None
     watermark_lag: str | None = None
@@ -70,7 +71,10 @@ class _Result:
     sync_run_id: str | None = "s"
 
     def __init__(self, world: _World, dry_run: bool) -> None:
+        self.success = world.success
         self.failed = 1 if world.fail_writes and not dry_run else 0
+        self.rows_extracted = world.rows_extracted
+        self.row_errors = list(world.row_errors)
         self.diff = world.diff()
         self.cursor_value_used = world.cursor
 
@@ -101,6 +105,8 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _World) -> P
 
     def fake_run_sync(*args: Any, **kwargs: Any) -> _Result:
         world.calls.append({"dry_run": args[5], **kwargs})
+        if world.raise_write is not None and not args[5]:
+            raise world.raise_write
         return _Result(world, bool(args[5]))
 
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync)
@@ -278,6 +284,71 @@ def test_canary_json_output_is_one_per_wave_document(project: Path, world: _Worl
     ]
 
 
+def test_canary_text_output_reports_every_passing_wave(project: Path) -> None:
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+
+    assert result.exit_code == 0, result.output
+    assert "wave 1/3 (1% cumulative): 2 rows, 2 ok, 0 failed — PASS" in result.output
+    assert "wave 2/3 (10% cumulative): 2 rows, 2 ok, 0 failed — PASS" in result.output
+    assert "wave 3/3 (100% cumulative): 2 rows, 2 ok, 0 failed — PASS" in result.output
+
+
+def test_canary_json_halt_reports_the_terminal_verdict(project: Path, world: _World) -> None:
+    _plan(project)
+    world.fail_writes = True
+
+    result = runner.invoke(
+        app,
+        ["apply", "plan.json", "--auto-approve", "--canary", "1,10", "--output", "json"],
+    )
+
+    assert result.exit_code == 1
+    document = json.loads(result.stdout)
+    assert document["result"]["status"] == "halted"
+    assert document["result"]["canary"]["status"] == "halted"
+    assert document["result"]["canary"]["results"][0]["verdict"] == "halt"
+    assert "destination failure under on_error: fail" in document["result"]["canary"]["reason"]
+
+
+def test_canary_skip_policy_halts_on_the_error_rate(project: Path, world: _World) -> None:
+    config = json.loads(json.dumps(SYNC_YML))
+    config["sync"] = {"mode": "upsert", "on_error": "skip"}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(config))
+    _plan(project)
+    world.success = 1
+    world.row_errors = ["transform failed"]
+
+    result = runner.invoke(
+        app,
+        [
+            "apply",
+            "plan.json",
+            "--auto-approve",
+            "--canary",
+            "1,10",
+            "--canary-max-error-pct",
+            "40",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "wave error rate 50.00% exceeded 40.00%" in result.output
+
+
+def test_canary_exception_halt_preserves_the_destination_reason(
+    project: Path, world: _World
+) -> None:
+    _plan(project)
+    world.raise_write = RuntimeError("connector rejected the canary")
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+
+    assert result.exit_code == 1
+    assert "connector rejected the canary" in result.output
+
+
 def test_canary_interruption_during_soak_leaves_terminal_halted_claim(
     project: Path, world: _World
 ) -> None:
@@ -305,6 +376,230 @@ def test_canary_interruption_during_soak_leaves_terminal_halted_claim(
     refused = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
     assert refused.exit_code == 1
     assert "already attempted" in refused.output
+
+
+@pytest.mark.parametrize("soak", ["1s", "1 second"])
+def test_configured_canary_soak_uses_the_injected_sleep(project: Path, soak: str) -> None:
+    from drt.cli._apply_flow import apply_plan
+
+    config = json.loads(json.dumps(SYNC_YML))
+    config["sync"] = {"mode": "upsert", "rollout": {"waves": [1, 10], "soak": soak}}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(config))
+    _plan(project)
+    sleeps: list[float] = []
+
+    outcome = apply_plan(
+        (project / "plan.json").read_text(),
+        project_dir=project,
+        approved=True,
+        sleep=sleeps.append,
+    )
+
+    assert outcome.canary is not None and outcome.canary["status"] == "success"
+    assert sleeps == [1.0, 1.0]
+
+
+def test_canary_only_controls_require_a_rollout(project: Path) -> None:
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+
+    with pytest.raises(ApplyRefused, match="require --canary or sync.rollout"):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_soak=timedelta(seconds=1),
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"allow_drift_pct": float("nan")}, "allow_drift_pct must be between 0 and 100"),
+        ({"canary_max_error_pct": -1}, "canary_max_error_pct must be between 0 and 100"),
+    ],
+)
+def test_canary_library_rejects_invalid_percentages(
+    project: Path, kwargs: dict[str, Any], message: str
+) -> None:
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+
+    with pytest.raises(ApplyRefused, match=message):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_waves=[1, 10],
+            **kwargs,
+        )
+
+
+def test_canary_library_rejects_a_different_expected_plan_id(project: Path) -> None:
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+
+    with pytest.raises(ApplyRefused, match="not the requested wrong-plan-id"):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            expect_plan_id="wrong-plan-id",
+            canary_waves=[1, 10],
+        )
+
+
+def test_canary_turns_plan_recomputation_errors_into_refusals(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _plan_runner
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+
+    def unavailable(*_args: Any, **_kwargs: Any) -> None:
+        raise _plan_runner.PlanCliError("source could not be verified")
+
+    monkeypatch.setattr(_plan_runner, "compute_plan", unavailable)
+
+    with pytest.raises(ApplyRefused, match="source could not be verified"):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_waves=[1, 10],
+        )
+
+
+def test_canary_refuses_an_unavailable_recomputed_plan(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _plan(project)
+
+    def unsupported(_self: _World) -> DiffResult:
+        return DiffResult(supported=False, fallback_reason="not queryable now")
+
+    monkeypatch.setattr(_World, "diff", unsupported)
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+
+    assert result.exit_code == 1
+    assert "Cannot verify the plan: not queryable now" in result.output
+
+
+def test_canary_refuses_changed_fingerprints(project: Path, world: _World) -> None:
+    _plan(project)
+    config = {**SYNC_YML, "sync": {"mode": "upsert", "batch_size": 7}}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(config))
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+
+    assert result.exit_code == 1
+    assert "sync definition changed" in result.output
+    assert _writes(world) == []
+
+
+def test_canary_drift_is_refused_or_explicitly_allowed(project: Path, world: _World) -> None:
+    _plan(project)
+    world.added.append({"id": 3, "name": "c"})
+
+    refused = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+    allowed = runner.invoke(
+        app,
+        [
+            "apply",
+            "plan.json",
+            "--auto-approve",
+            "--canary",
+            "1,10",
+            "--allow-drift-pct",
+            "60",
+        ],
+    )
+
+    assert refused.exit_code == 1 and "no longer matches" in refused.output
+    assert allowed.exit_code == 0, allowed.output
+    assert "Proceeding despite drift: 1 entries (50.0% <= 60.0%)" in allowed.output
+
+
+def test_canary_plan_without_changes_is_a_noop(project: Path, world: _World) -> None:
+    world.added.clear()
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+
+    assert result.exit_code == 0
+    assert "nothing to apply" in result.output
+    assert _writes(world) == []
+
+
+def test_canary_guards_are_refused_or_forced_and_recorded(project: Path, world: _World) -> None:
+    _guarded_sync(project, {"max_creates": 1})
+    _plan(project)
+
+    refused = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+    forced = runner.invoke(
+        app,
+        ["apply", "plan.json", "--auto-approve", "--canary", "1,10", "--force-guards"],
+    )
+
+    assert refused.exit_code == 1 and "Change guards tripped" in refused.output
+    assert forced.exit_code == 0, forced.output
+    artifact = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    assert artifact["results"][0]["guards_forced"][0]["guard"] == "max_creates"
+
+
+@pytest.mark.parametrize(
+    ("confirm", "exception", "writes"),
+    [
+        (None, "Approval is required", 0),
+        (lambda _question: False, "Aborted", 0),
+        (lambda _question: True, None, 3),
+    ],
+)
+def test_canary_library_confirmation_paths(
+    project: Path,
+    world: _World,
+    confirm: Any,
+    exception: str | None,
+    writes: int,
+) -> None:
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+    kwargs = {
+        "project_dir": project,
+        "canary_waves": [1, 10],
+        "confirm": confirm,
+    }
+
+    if exception is not None:
+        with pytest.raises(ApplyRefused, match=exception):
+            apply_plan((project / "plan.json").read_text(), **kwargs)
+    else:
+        outcome = apply_plan((project / "plan.json").read_text(), **kwargs)
+        assert outcome.applied and not outcome.halted
+    assert len(_writes(world)) == writes
+
+
+def test_canary_losing_the_claim_race_writes_nothing(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _apply_flow
+
+    _plan(project)
+
+    def lost(*_args: Any, **_kwargs: Any) -> None:
+        raise FileExistsError
+
+    monkeypatch.setattr(_apply_flow, "_claim", lost)
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+
+    assert result.exit_code == 1
+    assert "just taken" in result.output
+    assert _writes(world) == []
 
 
 @pytest.mark.parametrize(
@@ -513,6 +808,33 @@ def test_bad_options_and_missing_file(project: Path) -> None:
     assert runner.invoke(app, ["apply", "plan.json", "--max-age", "soon"]).exit_code == 1
     assert runner.invoke(app, ["apply", "plan.json", "--allow-drift-pct", "150"]).exit_code == 1
     assert runner.invoke(app, ["apply", "plan.json", "--output", "yaml"]).exit_code == 1
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--canary", "1,,10", "comma-separated list"),
+        ("--canary", "one,ten", "only numbers"),
+        ("--canary-soak", "eventually", "use a number and a unit"),
+    ],
+)
+def test_bad_canary_cli_options_are_clean_errors(
+    project: Path, option: str, value: str, message: str
+) -> None:
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", option, value])
+
+    assert result.exit_code == 1
+    assert "--canary:" in result.output and message in result.output
+
+
+def test_malformed_plan_still_reaches_normal_preflight(project: Path, world: _World) -> None:
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    with pytest.raises(ApplyRefused, match="Cannot apply the plan"):
+        apply_plan("not JSON", project_dir=project, approved=True)
+    assert _writes(world) == []
 
 
 def test_invalid_created_at_is_rejected(project: Path, world: _World) -> None:
@@ -754,6 +1076,35 @@ def test_a_claim_finalization_failure_does_not_mask_the_write(
     assert (project / "target" / "drt" / "run_results.json").exists()
     claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
     assert claim["state"] == "pending"  # still protects against a second apply
+
+
+def test_claim_finalization_survives_bookkeeping_and_logging_interrupts(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import logging
+
+    from drt.cli import _apply_flow
+
+    class _BrokenLogger:
+        def warning(self, *_args: Any, **_kwargs: Any) -> None:
+            raise KeyboardInterrupt
+
+    def interrupted_read(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit(143)
+
+    real_get_logger = logging.getLogger
+    monkeypatch.setattr(_apply_flow, "_read_claim", interrupted_read)
+    monkeypatch.setattr(
+        logging,
+        "getLogger",
+        lambda name=None: (
+            _BrokenLogger() if name == _apply_flow.__name__ else real_get_logger(name)
+        ),
+    )
+
+    # A terminal bookkeeping failure must not replace the destination outcome,
+    # even if signal delivery also interrupts the best-effort warning.
+    _apply_flow._finish_claim(project, "a" * 64, "halted", reason="interrupted")
 
 
 def test_finalized_claim_stays_private(project: Path, world: _World) -> None:
