@@ -1020,11 +1020,16 @@ class SyncConfig(BaseModel):
                 "sync.rollout requires destination.upsert_key so wave membership is stable "
                 "and a new plan after a halt can identify remaining rows."
             )
-        if self.sync.metadata_columns is not None:
+        metadata_targets = (
+            set(self.sync.metadata_columns.model_dump(exclude_none=True).values())
+            if self.sync.metadata_columns is not None
+            else set()
+        )
+        metadata_keys = set(upsert_key) & metadata_targets
+        if metadata_keys:
             raise ValueError(
-                "sync.rollout cannot be combined with sync.metadata_columns: run_id and "
-                "synced_at values vary between waves, so a new plan cannot identify only "
-                "what remains. Remove metadata_columns or the rollout."
+                "sync.rollout cannot use an upsert_key produced by sync.metadata_columns: "
+                f"{sorted(metadata_keys)}. Choose stable source/computed key columns."
             )
         if self.sync.match_policy != "upsert":
             raise ValueError(
@@ -1042,9 +1047,15 @@ class SyncConfig(BaseModel):
                 "sync.rollout requires injective key handling; upsert_key columns cannot use "
                 f"redact/truncate masking: {sorted(masked_keys)}. Use hash or no key mask."
             )
-        keyed_upsert = destination_type in {"postgres", "mysql"} or (
-            destination_type in {"snowflake", "databricks", "bigquery"}
-            and getattr(self.destination, "mode", None) == "merge"
+        from drt.connectors.registry import destination_implementation_class
+
+        destination_class = (
+            destination_implementation_class(destination_type)
+            if destination_type is not None
+            else None
+        )
+        keyed_upsert = destination_class is not None and callable(
+            getattr(destination_class, "supports_keyed_upsert", None)
         )
         if not keyed_upsert:
             mode_hint = (

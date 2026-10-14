@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+import struct
 from collections.abc import Callable, Iterator
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -25,7 +27,7 @@ def _encode(value: Any) -> dict[str, Any]:
     if isinstance(value, int):
         return {"t": "int", "v": str(value)}
     if isinstance(value, float):
-        return {"t": "float", "v": value.hex()}
+        return {"t": "float", "v": struct.pack(">d", value).hex()}
     if isinstance(value, Decimal):
         parts = value.as_tuple()
         return {
@@ -35,7 +37,15 @@ def _encode(value: Any) -> dict[str, Any]:
             "e": parts.exponent,
         }
     if isinstance(value, datetime):
-        return {"t": "datetime", "v": value.isoformat(), "f": value.fold}
+        offset = value.utcoffset()
+        if offset is None:
+            return {"t": "datetime", "v": value.isoformat(), "o": None, "f": value.fold}
+        return {
+            "t": "datetime",
+            "v": value.astimezone(timezone.utc).isoformat(),
+            "o": int(offset.total_seconds()),
+            "f": value.fold,
+        }
     if isinstance(value, date):
         return {"t": "date", "v": value.isoformat()}
     if isinstance(value, time):
@@ -73,11 +83,19 @@ def _decode(value: Any) -> Any:
     if tag == "int":
         return int(value["v"])
     if tag == "float":
-        return float.fromhex(value["v"])
+        raw = bytes.fromhex(value["v"])
+        if len(raw) != 8:
+            raise SpoolError("Canary snapshot contains an invalid IEEE-754 float.")
+        return struct.unpack(">d", raw)[0]
     if tag == "decimal":
         return Decimal((int(value["s"]), tuple(value["d"]), value["e"]))
     if tag == "datetime":
-        return datetime.fromisoformat(value["v"]).replace(fold=int(value.get("f", 0)))
+        parsed = datetime.fromisoformat(value["v"])
+        offset = value.get("o")
+        if offset is None:
+            return parsed.replace(fold=int(value.get("f", 0)))
+        fixed = timezone(timedelta(seconds=int(offset)))
+        return parsed.astimezone(fixed).replace(fold=int(value.get("f", 0)))
     if tag == "date":
         return date.fromisoformat(value["v"])
     if tag == "time":
@@ -97,7 +115,7 @@ def _decode(value: Any) -> Any:
 
 
 class SnapshotSpoolWriter:
-    """A row-filter callback that snapshots every raw extracted record."""
+    """A record-sink callback that snapshots every transformed record."""
 
     def __init__(
         self,
@@ -107,10 +125,23 @@ class SnapshotSpoolWriter:
         max_bytes: int,
         bucket_of: Callable[[dict[str, Any]], int],
     ) -> None:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_RDWR
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
         self._fd = os.open(path, flags, 0o600)
-        os.fchmod(self._fd, 0o600)
-        self._handle = os.fdopen(self._fd, "wb")
+        try:
+            os.fchmod(self._fd, 0o600)
+            _validate_spool_fd(self._fd)
+        except BaseException:
+            os.close(self._fd)
+            self._fd = -1
+            path.unlink(missing_ok=True)
+            raise
+        self._handle = os.fdopen(os.dup(self._fd), "wb")
         self.path = path
         self.max_rows = max_rows
         self.max_bytes = max_bytes
@@ -152,6 +183,14 @@ class SnapshotSpoolWriter:
             os.fsync(self._handle.fileno())
             self._handle.close()
             self.closed = True
+            replay_fd = open_spool(self.path)
+            created = os.fstat(self._fd)
+            reopened = os.fstat(replay_fd)
+            if (created.st_dev, created.st_ino) != (reopened.st_dev, reopened.st_ino):
+                os.close(replay_fd)
+                raise SpoolError("Canary snapshot path changed while it was being sealed.")
+            os.close(self._fd)
+            self._fd = replay_fd
         return self.rows, self.bytes, self._digest.hexdigest()
 
     def abort(self) -> None:
@@ -159,11 +198,64 @@ class SnapshotSpoolWriter:
             self._handle.close()
             self.closed = True
 
+    @property
+    def fd(self) -> int:
+        return self._fd
 
-def verify_spool(path: Path, expected_sha256: str) -> None:
+    def dispose(self) -> None:
+        self.abort()
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+    def unlink_owned(self) -> bool:
+        """Unlink only when the pathname still names this open file."""
+        if self._fd < 0:
+            return False
+        try:
+            opened = os.fstat(self._fd)
+            named = self.path.lstat()
+        except FileNotFoundError:
+            return True
+        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+            return False
+        self.path.unlink()
+        return True
+
+
+def _validate_spool_fd(fd: int) -> None:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise SpoolError("Canary snapshot must be a regular file.")
+    if info.st_uid != os.getuid():
+        raise SpoolError("Canary snapshot must be owned by the current user.")
+    if info.st_mode & 0o077:
+        raise SpoolError("Canary snapshot permissions must not allow group or other access.")
+    if info.st_nlink != 1:
+        raise SpoolError("Canary snapshot must have exactly one hard link.")
+
+
+def open_spool(path: Path) -> int:
+    """Open and validate an existing spool without following a symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise SpoolError("Canary snapshot is unavailable or unsafe.") from exc
+    try:
+        _validate_spool_fd(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def verify_spool(fd: int, expected_sha256: str) -> None:
     digest = hashlib.sha256()
     try:
-        with path.open("rb") as handle:
+        _validate_spool_fd(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(fd), "rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError as exc:
@@ -175,14 +267,20 @@ def verify_spool(path: Path, expected_sha256: str) -> None:
 class SnapshotSpoolSource:
     """Source adapter that replays only the immutable local snapshot."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+
+    def test_connection(self, config: Any) -> bool:
+        del config
+        return True
 
     def extract(
         self, query: str, config: Any, *, query_tags: dict[str, str] | None = None
     ) -> Iterator[dict[str, Any]]:
         del query, config, query_tags
-        with self.path.open("r", encoding="utf-8") as handle:
+        _validate_spool_fd(self.fd)
+        os.lseek(self.fd, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(self.fd), "r", encoding="utf-8") as handle:
             for line in handle:
                 decoded = _decode(json.loads(line))
                 if not isinstance(decoded, dict):

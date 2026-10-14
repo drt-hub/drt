@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from itertools import chain, islice
 from pathlib import Path
@@ -339,6 +339,8 @@ def run_sync(
     audit_fields: list[str] | None = None,
     audit_retain_days: int = 30,
     row_filter: Callable[[dict[str, Any]], bool] | None = None,
+    record_sink: Callable[[dict[str, Any]], Any] | None = None,
+    replay_records: Iterable[dict[str, Any]] | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -404,6 +406,13 @@ def run_sync(
             is ``None``.
         row_filter: Optional predicate applied to extracted rows before
             batching. Used by canary apply to select one stable hash range.
+        record_sink: Optional callback invoked exactly once for every record
+            after lookups and all payload transforms, immediately before the
+            record enters the dry-run diff or destination path.
+        replay_records: Optional iterable of records that are already fully
+            transformed. When supplied, source extraction, lookups, and payload
+            transforms are skipped; batching, loading, row accounting, error
+            handling, history, and alerts retain their normal behaviour.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -471,6 +480,8 @@ def run_sync(
                     audit_trail=audit_trail,
                     audit_fields=audit_fields,
                     row_filter=row_filter,
+                    record_sink=record_sink,
+                    replay_records=replay_records,
                 )
             except BaseException as exc:
                 raised = exc
@@ -633,6 +644,8 @@ def _run_sync_body(
     audit_trail: ComplianceAuditTrail | None = None,
     audit_fields: list[str] | None = None,
     row_filter: Callable[[dict[str, Any]], bool] | None = None,
+    record_sink: Callable[[dict[str, Any]], Any] | None = None,
+    replay_records: Iterable[dict[str, Any]] | None = None,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -733,9 +746,11 @@ def _run_sync_body(
             watermark_lag_applied = str(wm_cfg.lag)
             observer.on_watermark_resolved(sync.name, "storage_lag", effective_cursor_value)
 
-    query = resolve_model_ref(
-        sync.model, project_dir, profile, cursor_field, effective_cursor_value, vars=vars
-    )
+    query = ""
+    if replay_records is None:
+        query = resolve_model_ref(
+            sync.model, project_dir, profile, cursor_field, effective_cursor_value, vars=vars
+        )
 
     # Query tagging (#768): cost attribution needs *some* way to tell one
     # sync's queries apart from another's in the warehouse's own query
@@ -753,7 +768,7 @@ def _run_sync_body(
     # the ``Destination`` Protocol only receives ``sync_options``, not this
     # local variable.
     query_tags: dict[str, str] | None = None
-    if query_tagging is None or query_tagging.enabled:
+    if replay_records is None and (query_tagging is None or query_tagging.enabled):
         extra = query_tagging.extra if query_tagging else {}
         query_tags = build_query_tags(sync.name, new_run_id(), extra)
         query = f"{render_comment_header(query_tags)}\n{query}"
@@ -773,7 +788,9 @@ def _run_sync_body(
     # SnapshotDiffResult) for SyncResult.diff_removed_keys and
     # mirror.strategy: diff's destination-side finalize pass.
     diff_removed_keys: list[dict[str, Any]] | None = None
-    if sync.sync.incremental_strategy == "diff":
+    if replay_records is not None:
+        records_iter = iter(replay_records)
+    elif sync.sync.incremental_strategy == "diff":
         if not isinstance(source, SnapshotDiffSource):
             raise NotImplementedError(
                 f"sync.incremental_strategy: diff is not supported by "
@@ -881,7 +898,7 @@ def _run_sync_body(
         "lookups",
         None,
     )
-    if lookups:
+    if lookups and replay_records is None:
         for warning in detect_ambiguous_lookup_ordering(lookups):
             observer.on_warning(sync.name, warning)
         for col_name, lk_config in lookups.items():
@@ -917,7 +934,7 @@ def _run_sync_body(
             # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
             # Sampled runs (#774) never advance the watermark — the rows a
             # --limit run skipped would otherwise fall behind the cursor.
-            if cursor_field and extract_limit is None:
+            if replay_records is None and cursor_field and extract_limit is None:
                 for row in record_batch:
                     val = row.get(cursor_field)
                     if val is not None:
@@ -927,7 +944,7 @@ def _run_sync_body(
 
             # Apply destination lookups (FK resolution)
             lookup_fatal = False
-            if lookup_maps:
+            if replay_records is None and lookup_maps:
                 batch_len_before = len(record_batch)
                 record_batch, lookup_errors, lookup_fatal = apply_lookups(
                     record_batch,
@@ -965,7 +982,7 @@ def _run_sync_body(
             # value lookups just resolved), and the rename + mask below then
             # apply to what it produced. Pure transform; no observer side
             # effects.
-            if sync.sync.computed_fields:
+            if replay_records is None and sync.sync.computed_fields:
                 batch_len_before = len(record_batch)
                 record_batch, computed_errors = apply_computed_fields(
                     record_batch,
@@ -981,25 +998,32 @@ def _run_sync_body(
             # tracking and lookups (both source-side) — so the mapped names
             # are what the destination, upsert_key, and the diff engine see.
             # Pure transform; no observer side effects.
-            record_batch = apply_field_mappings(record_batch, sync.sync.field_mappings)
+            if replay_records is None:
+                record_batch = apply_field_mappings(record_batch, sync.sync.field_mappings)
 
             # PII masking (#427). Applied after field_mappings, so mask keys
             # reference the destination-facing (post-rename) field names.
             # Pure transform; no observer side effects.
-            record_batch = apply_mask(record_batch, sync.sync.mask)
+            if replay_records is None:
+                record_batch = apply_mask(record_batch, sync.sync.mask)
 
             # Opt-in engine metadata columns (#762). Applied last — after
             # field_mappings and mask — since column names are already
             # destination-facing (chosen directly in metadata_columns
             # config) and values are engine bookkeeping, not source data
             # that a rename or masking rule should ever touch.
-            record_batch = apply_metadata_columns(
-                record_batch,
-                sync.sync.metadata_columns,
-                synced_at=started_at,
-                run_id=total_result.run_id,
-                sync_name=sync.name,
-            )
+            if replay_records is None:
+                record_batch = apply_metadata_columns(
+                    record_batch,
+                    sync.sync.metadata_columns,
+                    synced_at=started_at,
+                    run_id=total_result.run_id,
+                    sync_name=sync.name,
+                )
+
+            if record_sink is not None:
+                for record in record_batch:
+                    record_sink(record)
 
             if dry_run:
                 total_result.success += len(record_batch)

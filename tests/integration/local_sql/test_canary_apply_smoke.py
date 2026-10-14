@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -13,13 +14,16 @@ from typer.testing import CliRunner
 
 from drt.cli.main import app
 from drt.config.credentials import PostgresProfile
+from drt.engine.canary import canary_bucket
 
 from .conftest import require_docker
 
 pytestmark = pytest.mark.local_sql_smoke
 
 psycopg2 = pytest.importorskip("psycopg2")
+pymysql = pytest.importorskip("pymysql")
 testcontainers_postgres = pytest.importorskip("testcontainers.postgres")
+testcontainers_mysql = pytest.importorskip("testcontainers.mysql")
 
 runner = CliRunner()
 
@@ -75,11 +79,16 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
 
     source_table = "src_canary_apply"
     destination_table = "dst_canary_apply"
+    rejected_id = next(
+        value for value in range(1, 401) if 100 <= canary_bucket({"id": value}, ["id"]) < 1000
+    )
     _sql(
         pg,
         f"DROP TABLE IF EXISTS {source_table}; DROP TABLE IF EXISTS {destination_table}",
         f"CREATE TABLE {source_table} (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
-        f"CREATE TABLE {destination_table} (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        f"CREATE TABLE {destination_table} ("
+        "id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+        f"CONSTRAINT reject_middle_wave CHECK (id <> {rejected_id}))",
         f"INSERT INTO {source_table} "
         "SELECT value, 'row-' || value::text FROM generate_series(1, 400) AS value",
     )
@@ -114,11 +123,9 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
     real_run_one = run_command._run_one
     wave_calls = 0
 
-    def fail_second_health_check(*args: Any, **kwargs: Any) -> tuple[str, dict[str, object], bool]:
+    def mutate_after_first_wave(*args: Any, **kwargs: Any) -> tuple[str, dict[str, object], bool]:
         nonlocal wave_calls
         name, entry, had_error = real_run_one(*args, **kwargs)
-        if args[1].dry_run:
-            return name, entry, had_error
         wave_calls += 1
         if wave_calls == 1:
             # The spool already exists. Later waves must not see this live
@@ -128,12 +135,9 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
                 f"UPDATE {source_table} SET name = 'live-source-changed' WHERE id > 1",
                 f"INSERT INTO {source_table} VALUES (401, 'late-row')",
             )
-        if wave_calls == 2:
-            entry = dict(entry)
-            entry["_row_error_count"] = int(entry.get("rows_extracted", 0)) or 1
         return name, entry, had_error
 
-    monkeypatch.setattr(run_command, "_run_one", fail_second_health_check)
+    monkeypatch.setattr(run_command, "_run_one", mutate_after_first_wave)
     halted = runner.invoke(
         app,
         ["apply", "plan.json", "--auto-approve", "--canary", "1,10,100"],
@@ -156,6 +160,7 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
 
     _sql(
         pg,
+        f"ALTER TABLE {destination_table} DROP CONSTRAINT reject_middle_wave",
         f"DELETE FROM {source_table} WHERE id = 401",
         f"UPDATE {source_table} SET name = 'row-' || id::text",
     )
@@ -173,37 +178,33 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
     assert actual == expected
     assert len({row[0] for row in actual}) == 400
 
-    # A kill-style interruption is attributable before the wave starts,
-    # terminal, and leaves no value-bearing spool behind.
-    from drt.cli._apply_flow import apply_plan
-
+    # Simulate a SIGKILL residue: a pending same-host lease with a dead PID.
+    # The next canary apply must halt the orphaned claim and remove its values.
     _sql(pg, f"INSERT INTO {source_table} VALUES (401, 'row-401')")
-    interrupted_plan = runner.invoke(app, ["plan", "canary", "--out", "interrupt.json"])
-    assert interrupted_plan.exit_code == 0, interrupted_plan.output
-
-    def interrupt_wave(*args: Any, **kwargs: Any) -> Any:
-        if not args[1].dry_run:
-            raise SystemExit(143)
-        return real_run_one(*args, **kwargs)
-
-    monkeypatch.setattr(run_command, "_run_one", interrupt_wave)
-    with pytest.raises(SystemExit):
-        apply_plan(
-            (tmp_path / "interrupt.json").read_text(),
-            project_dir=tmp_path,
-            approved=True,
-            canary_waves=[100],
-        )
-    interrupted_id = json.loads((tmp_path / "interrupt.json").read_text())["plan_id"]
-    interrupted_claim = json.loads(
-        (tmp_path / ".drt" / "applied_plans" / f"{interrupted_id}.json").read_text()
-    )
-    assert interrupted_claim["state"] == "halted"
-    assert interrupted_claim["reason"] == "interrupted"
-    assert interrupted_claim["current_run_id"] == interrupted_claim["run_ids"][0]
-    assert not list((tmp_path / ".drt" / "applied_plans").glob("*.spool.jsonl"))
-    assert int(_sql(pg, f"SELECT COUNT(*) FROM {destination_table}")[0][0]) == 400
     monkeypatch.setattr(run_command, "_run_one", real_run_one)
+    orphan_dir = tmp_path / ".drt" / "applied_plans"
+    orphan_spool = orphan_dir / "orphan.spool.jsonl"
+    orphan_spool.write_text("value-bearing residue")
+    orphan_claim = orphan_dir / "orphan.json"
+    orphan_claim.write_text(
+        json.dumps(
+            {
+                "plan_id": "orphan",
+                "state": "pending",
+                "hostname": socket.gethostname(),
+                "pid": 999_999_999,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "spool_path": str(orphan_spool),
+            }
+        )
+    )
+    swept_plan = runner.invoke(app, ["plan", "canary", "--out", "swept.json"])
+    assert swept_plan.exit_code == 0, swept_plan.output
+    swept = runner.invoke(app, ["apply", "swept.json", "--auto-approve", "--canary", "100"])
+    assert swept.exit_code == 0, swept.output
+    assert not orphan_spool.exists()
+    assert json.loads(orphan_claim.read_text())["reason"] == "orphaned"
+    assert int(_sql(pg, f"SELECT COUNT(*) FROM {destination_table}")[0][0]) == 401
     _sql(pg, f"DELETE FROM {source_table} WHERE id = 401")
 
     # The live destination declares the required capability; ClickHouse's
@@ -216,6 +217,31 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
     assert PostgresDestination().supports_keyed_upsert(
         SyncConfig.model_validate(sync_document).destination
     )
+    assert (
+        PostgresDestination().verify_keyed_upsert(
+            SyncConfig.model_validate(sync_document).destination
+        )
+        is None
+    )
+    no_unique_table = "dst_canary_no_unique"
+    _sql(
+        pg,
+        f"DROP TABLE IF EXISTS {no_unique_table}",
+        f"CREATE TABLE {no_unique_table} (id INTEGER NOT NULL, name TEXT NOT NULL)",
+    )
+    original_destination = dict(sync_document["destination"])
+    sync_document["destination"] = {**original_destination, "table": no_unique_table}
+    sync_document["sync"] = {"mode": "upsert"}
+    sync_path.write_text(yaml.dump(sync_document))
+    no_unique_plan = runner.invoke(app, ["plan", "canary", "--out", "no-unique.json"])
+    assert no_unique_plan.exit_code == 0, no_unique_plan.output
+    no_unique_apply = runner.invoke(
+        app, ["apply", "no-unique.json", "--auto-approve", "--canary", "100"]
+    )
+    assert no_unique_apply.exit_code == 1
+    assert "UNIQUE or PRIMARY KEY" in no_unique_apply.output
+    assert int(_sql(pg, f"SELECT COUNT(*) FROM {no_unique_table}")[0][0]) == 0
+    sync_document["destination"] = original_destination
     clickhouse = {
         **sync_document,
         "destination": {
@@ -244,3 +270,47 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
         refused = runner.invoke(app, ["apply", plan_file, "--auto-approve", "--canary", "1,10,100"])
         assert refused.exit_code == 1
         assert message in refused.output
+
+
+def test_mysql_canary_key_constraint_is_proved_live() -> None:
+    from drt.config.models import MySQLDestinationConfig
+    from drt.destinations.mysql import MySQLDestination
+
+    require_docker()
+    with testcontainers_mysql.MySqlContainer("mysql:8.0") as mysql:
+        connection = pymysql.connect(
+            host=mysql.get_container_host_ip(),
+            port=int(mysql.get_exposed_port(3306)),
+            user=mysql.username,
+            password=mysql.password,
+            database=mysql.dbname,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "CREATE TABLE canary_unique (tenant_id INTEGER, id INTEGER, "
+                    "name TEXT, UNIQUE KEY canary_key (tenant_id, id))"
+                )
+                cursor.execute(
+                    "CREATE TABLE canary_no_unique (tenant_id INTEGER, id INTEGER, name TEXT)"
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+        common = {
+            "type": "mysql",
+            "host": mysql.get_container_host_ip(),
+            "port": int(mysql.get_exposed_port(3306)),
+            "dbname": mysql.dbname,
+            "user": mysql.username,
+            "password": mysql.password,
+            "upsert_key": ["tenant_id", "id"],
+        }
+        destination = MySQLDestination()
+        unique = MySQLDestinationConfig(**common, table="canary_unique")
+        no_unique = MySQLDestinationConfig(**common, table="canary_no_unique")
+
+        assert destination.supports_keyed_upsert(unique)
+        assert destination.verify_keyed_upsert(unique) is None
+        assert "UNIQUE or PRIMARY KEY" in str(destination.verify_keyed_upsert(no_unique))

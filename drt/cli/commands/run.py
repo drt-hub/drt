@@ -35,7 +35,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -157,6 +157,8 @@ class _RunContext:
     project_dir: Path = Path(".")
     # Apply-only canary selection. The default preserves the ordinary run call shape.
     row_filter: Callable[[dict[str, Any]], bool] | None = None
+    record_sink: Callable[[dict[str, Any]], Any] | None = None
+    replay_records: Iterable[dict[str, Any]] | None = None
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -233,6 +235,10 @@ def _run_one(
             apply_controls: dict[str, Any] = {}
             if ctx.row_filter is not None:
                 apply_controls["row_filter"] = ctx.row_filter
+            if ctx.record_sink is not None:
+                apply_controls["record_sink"] = ctx.record_sink
+            if ctx.replay_records is not None:
+                apply_controls["replay_records"] = ctx.replay_records
 
             result = run_sync(
                 sync,

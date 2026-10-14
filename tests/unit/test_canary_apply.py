@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, getcontext, localcontext
@@ -15,23 +16,28 @@ from pydantic import ValidationError
 
 from drt.cli._apply_flow import (
     ApplyRefused,
-    _canary_health,
     _validate_canary_compatibility,
-    canary_bucket,
-    canary_filter,
-    normalize_canary_waves,
-    parse_canary_waves,
 )
 from drt.cli._canary_spool import (
     SnapshotSpoolSource,
     SnapshotSpoolWriter,
     SpoolError,
     _decode,
+    open_spool,
     verify_spool,
 )
 from drt.config.credentials import DuckDBProfile
 from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.base import SyncResult
+from drt.engine.canary import (
+    canary_bucket,
+    canary_filter,
+    normalize_canary_waves,
+    parse_canary_waves,
+)
+from drt.engine.canary import (
+    canary_health as _canary_health,
+)
 from drt.engine.sync import run_sync
 
 
@@ -225,7 +231,7 @@ def test_real_computed_field_skip_counts_as_wave_error(tmp_path: Path) -> None:
         _Destination(),
         DuckDBProfile(type="duckdb"),
         tmp_path,
-        row_filter=canary_filter(0, 10000, ["id"], computed_fields=sync.sync.computed_fields),
+        row_filter=canary_filter(0, 10000, ["id"]),
     )
     assert result.rows_extracted == 1
     assert result.skipped == 1
@@ -258,18 +264,10 @@ def test_on_error_skip_destination_failures_use_only_the_threshold() -> None:
     assert not _canary_health(dict(entry), had_error=True, on_error="skip", max_error_pct=9.99)[-1]
 
 
-def test_hash_uses_transformed_destination_key_without_mutating_source() -> None:
-    source = {"raw_id": 7}
-    transformed = canary_filter(
-        0,
-        10000,
-        ["customer_id"],
-        {"derived": "customer_id"},
-        {"derived": "{{ row.raw_id + 1 }}"},
-        {"customer_id": "hash"},
-    )
-    assert transformed(source)
-    assert source == {"raw_id": 7}
+def test_hash_filter_consumes_an_already_transformed_destination_key() -> None:
+    transformed = {"customer_id": "hashed-value"}
+    assert canary_filter(0, 10000, ["customer_id"])(transformed)
+    assert transformed == {"customer_id": "hashed-value"}
 
 
 def test_filter_without_a_key_fails_closed_when_evaluated() -> None:
@@ -299,18 +297,19 @@ def test_snapshot_spool_round_trips_tagged_values_and_verifies_hash(tmp_path: Pa
     writer.abort()
 
     assert rows == 1 and size == path.stat().st_size and writer.buckets[7] == 1
-    verify_spool(path, digest)
-    assert list(SnapshotSpoolSource(path).extract("ignored", object())) == [row]
+    verify_spool(writer.fd, digest)
+    assert list(SnapshotSpoolSource(writer.fd).extract("ignored", object())) == [row]
     with localcontext() as context:
         context.prec = 2
-        replayed = list(SnapshotSpoolSource(path).extract("ignored", object()))
+        replayed = list(SnapshotSpoolSource(writer.fd).extract("ignored", object()))
         assert replayed[0]["decimal"] == Decimal("1.2300")
 
     path.write_bytes(path.read_bytes() + b" ")
     with pytest.raises(SpoolError, match="hash changed"):
-        verify_spool(path, digest)
+        verify_spool(writer.fd, digest)
+    writer.dispose()
     with pytest.raises(SpoolError, match="unavailable"):
-        verify_spool(tmp_path / "missing.jsonl", digest)
+        verify_spool(-1, digest)
 
 
 def test_snapshot_spool_rejects_unrepresentable_and_malformed_values(tmp_path: Path) -> None:
@@ -322,7 +321,7 @@ def test_snapshot_spool_rejects_unrepresentable_and_malformed_values(tmp_path: P
         writer.append({"id": 1, "nested": non_string_keys})
     with pytest.raises(SpoolError, match="cannot preserve values of type set"):
         writer.append({"id": 1, "unsupported": {1, 2}})
-    writer.abort()
+    writer.dispose()
 
     with pytest.raises(SpoolError, match="invalid type-tagged"):
         _decode([])
@@ -332,8 +331,11 @@ def test_snapshot_spool_rejects_unrepresentable_and_malformed_values(tmp_path: P
 
     scalar_path = tmp_path / "scalar.jsonl"
     scalar_path.write_text('{"t":"int","v":"1"}\n')
+    scalar_path.chmod(0o600)
+    scalar_fd = open_spool(scalar_path)
     with pytest.raises(SpoolError, match="row is not an object"):
-        list(SnapshotSpoolSource(scalar_path).extract("", object()))
+        list(SnapshotSpoolSource(scalar_fd).extract("", object()))
+    os.close(scalar_fd)
 
 
 @pytest.mark.parametrize(
@@ -459,7 +461,6 @@ def test_rollout_config_rejects_unsupported_combinations(
 @pytest.mark.parametrize(
     ("sync_overrides", "message"),
     [
-        ({"metadata_columns": {"sync_name": "_sync"}}, "metadata_columns"),
         ({"match_policy": "update_only"}, "match_policy: upsert"),
         ({"match_policy": "create_only"}, "match_policy: upsert"),
         ({"mask": {"id": "redact"}}, "injective"),
@@ -488,6 +489,13 @@ def test_rollout_config_allows_hashed_key_and_validates_spool_caps() -> None:
             SyncConfig.model_validate(_config(rollout={"waves": [1], field: 0}))
 
 
+def test_rollout_allows_snapshotted_non_key_metadata_columns() -> None:
+    configured = SyncConfig.model_validate(
+        _config(metadata_columns={"run_id": "_run_id", "synced_at": "_synced_at"})
+    )
+    assert configured.sync.rollout is not None
+
+
 def test_rollout_config_rejects_destinations_without_keyed_upsert() -> None:
     config = _config()
     config["destination"] = {
@@ -501,7 +509,7 @@ def test_rollout_config_rejects_destinations_without_keyed_upsert() -> None:
         SyncConfig.model_validate(config)
 
 
-def test_warehouse_rollout_requires_merge_mode() -> None:
+def test_warehouse_rollout_defers_mode_specific_capability_to_apply() -> None:
     config = _config()
     config["destination"] = {
         "type": "bigquery",
@@ -510,8 +518,11 @@ def test_warehouse_rollout_requires_merge_mode() -> None:
         "table": "t",
         "upsert_key": ["id"],
     }
-    with pytest.raises(ValidationError, match="destination.mode: merge"):
-        SyncConfig.model_validate(config)
+    parsed = SyncConfig.model_validate(config)
+    from drt.destinations.bigquery import BigQueryDestination
+
+    with pytest.raises(ApplyRefused, match="keyed-upsert"):
+        _validate_canary_compatibility(parsed, BigQueryDestination())
     config["destination"]["mode"] = "merge"
     assert SyncConfig.model_validate(config).sync.rollout is not None
 
@@ -587,9 +598,9 @@ def test_rollout_rejects_lookup_and_run_metadata_derived_keys() -> None:
     with pytest.raises(ValidationError, match="destination lookup"):
         SyncConfig.model_validate(lookup)
 
-    metadata = _config(metadata_columns={"run_id": "id"})
+    metadata_key = _config(metadata_columns={"run_id": "id"})
     with pytest.raises(ValidationError, match="metadata_columns"):
-        SyncConfig.model_validate(metadata)
+        SyncConfig.model_validate(metadata_key)
 
 
 def test_apply_override_rejects_missing_and_derived_keys() -> None:

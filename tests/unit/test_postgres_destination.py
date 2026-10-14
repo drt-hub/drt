@@ -1214,3 +1214,25 @@ def test_pg_dialect_connect_delegates_to_connect(monkeypatch: Any) -> None:
 def test_pg_qualify_ident_delegates_to_module_fn() -> None:
     d = PostgresDestination()
     assert d._qualify_ident("public.scores") == _qualified_ident("public.scores")
+
+
+@pytest.mark.parametrize(
+    ("indexes", "problem"),
+    [([(["id"],)], False), ([(["other"],)], True), ([], True)],
+)
+def test_postgres_verifies_exact_unique_upsert_key(
+    indexes: list[tuple[list[str]]], problem: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _fake_connection()
+    conn.cursor.return_value.fetchall.return_value = indexes
+    monkeypatch.setattr(PostgresDestination, "_connect", lambda *_args: conn)
+
+    result = PostgresDestination().verify_keyed_upsert(_config())
+
+    assert (result is not None) is problem
+    if result:
+        assert "UNIQUE or PRIMARY KEY" in result and "id" in result
+    query = conn.cursor.return_value.execute.call_args.args[0]
+    assert "i.indimmediate" in query and "i.indexprs IS NULL" in query
+    assert "ordinality <= i.indnkeyatts" in query
+    conn.close.assert_called_once()

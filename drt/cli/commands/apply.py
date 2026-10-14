@@ -90,10 +90,10 @@ def apply(
         ApplyRefused,
         apply_plan,
         load_plan_directory,
-        parse_canary_waves,
         parse_duration,
     )
     from drt.cli._plan_runner import PlanCliError, parse_vars_option
+    from drt.engine.canary import parse_canary_waves
 
     if output not in ("text", "json"):
         print_error("--output must be 'text' or 'json'.")

@@ -491,12 +491,25 @@ UTC datetimes, dates and bytes are distinct encodings; `True`, `1`, `1.0`, and
 `Decimal('1')` hash together, while `'1'` hashes separately. Missing key
 columns, null key components and unsupported types are errors.
 
-After verify-by-replan, apply extracts one raw source snapshot to a private
-0600 type-tagged JSONL spool beside the claim. The claim stores only its row and
-byte counts and SHA-256; the hash is checked before each wave. Waves replay that
-spool through normal `run_sync` transforms. The spool contains row values
-(plans do not) and is deleted best-effort on every terminal outcome. The
-configurable row/byte caps fail before any destination write.
+The verify-by-replan extraction itself tees each post-lookup, post-transform
+record into a private 0600 type-tagged JSONL spool beside the claim. There is no
+second source pass. The claim stores lease/path metadata plus row/byte counts
+and SHA-256, never row values. Apply
+opens the finished spool once read-only with `O_NOFOLLOW`, validates
+regular-file ownership, permissions, link count, and inode identity, re-hashes
+that descriptor before each wave, and
+replays records as already transformed (no source/lookup access). IEEE-754
+float bits round-trip exactly; aware datetimes preserve their instant and fixed
+offset, not named-tzinfo identity. Unsupported types and row/byte caps fail
+before destination writes.
+
+`.drt/applied_plans` is owner-controlled (0700; no symlink or group/other
+write). Claims carry PID/hostname/start/spool lease data. Every canary apply
+first sweeps terminal spools, same-host dead-PID orphans (`halted: orphaned`),
+and unclaimed spools older than 24 hours; live PIDs, remote-host leases, and
+recent unclaimed files are preserved with a notice. PID reuse is deliberately
+conservative. Reasons distinguish `interrupted`, `snapshot_failed`,
+`spool_tampered`, `claim_write_failed`, `orphaned`, and `error:<Class>`.
 
 A wave halts when `(failed + error-skipped rows) / rows selected` is strictly
 above the threshold. Computed-field/transform errors under `on_error: skip`
@@ -508,11 +521,16 @@ Each wave is an ordinary run.
 is no resume operation and the halted plan remains single-use. Canary v2 only
 supports non-incremental `mode: full | upsert` with an `upsert_key`. It rejects
 incremental/cursor and snapshot-diff syncs, mirror/replace/tracked state,
-staged destinations, any `metadata_columns`, non-default `match_policy`,
+staged destinations, metadata-derived upsert keys, non-default `match_policy`,
 lookup-derived keys, non-injective key masks, and destinations without the
-`KeyedUpsertCapable` guarantee. PostgreSQL/MySQL qualify; Snowflake,
+`KeyedUpsertCapable` guarantee. PostgreSQL/MySQL additionally prove through
+their catalogs, before wave 1, that the exact `upsert_key` has a UNIQUE or
+PRIMARY KEY constraint. Snowflake,
 Databricks and BigQuery qualify only in `destination.mode: merge`; ClickHouse
-and all other destinations/plugins are false by default. Configured
+and all other built-ins are false by default. A plugin class may qualify
+structurally without credential-bearing instantiation; the authoritative
+static/live checks still run at apply time. Non-key `metadata_columns` are
+allowed because the verification-pass values are replayed unchanged. Configured
 rollouts fail validation; CLI/MCP overrides fail during apply before writes.
 
 ### Snapshot-diff incremental and diff mirror (#755/#1110)

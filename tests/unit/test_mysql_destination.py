@@ -1307,3 +1307,27 @@ def test_mysql_declares_match_policy_capability() -> None:
     assert destination.supported_match_policies() == frozenset(
         {"upsert", "update_only", "create_only"}
     )
+
+
+@pytest.mark.parametrize(
+    ("rows", "problem"),
+    [
+        ([("uniq_key", "user_id"), ("uniq_key", "company_id")], False),
+        ([("uniq_key", "company_id"), ("uniq_key", "user_id")], True),
+        ([], True),
+    ],
+)
+def test_mysql_verifies_exact_unique_upsert_key(
+    rows: list[tuple[str, str]], problem: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _fake_connection()
+    conn.cursor.return_value.fetchall.return_value = rows
+    monkeypatch.setattr(MySQLDestination, "_connect", lambda *_args: conn)
+
+    result = MySQLDestination().verify_keyed_upsert(_config())
+
+    assert (result is not None) is problem
+    if result:
+        assert "UNIQUE or PRIMARY KEY" in result and "user_id, company_id" in result
+    assert "sub_part IS NULL" in conn.cursor.return_value.execute.call_args.args[0]
+    conn.close.assert_called_once()

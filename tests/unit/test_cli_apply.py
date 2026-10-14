@@ -64,6 +64,14 @@ class _FakeDestination:
     def supports_keyed_upsert(self, config: Any) -> bool:
         return True
 
+    def verify_keyed_upsert(self, config: Any) -> None:
+        return None
+
+
+class _StaticKeyedDestination:
+    def supports_keyed_upsert(self, config: Any) -> bool:
+        return True
+
 
 class _Result:
     skipped = 0
@@ -83,6 +91,8 @@ class _Result:
         self.rows_extracted = world.rows_extracted
         self.row_errors = list(world.row_errors)
         self.diff = world.diff()
+        if dry_run and world.snapshot_rows_override is not None:
+            self.diff.total_source_rows = world.snapshot_rows_override
         self.cursor_value_used = world.cursor
 
 
@@ -113,12 +123,14 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _World) -> P
     def fake_run_sync(*args: Any, **kwargs: Any) -> _Result:
         world.calls.append({"dry_run": args[5], **kwargs})
         predicate = kwargs.get("row_filter")
-        selected = world.added
+        replay_records = kwargs.get("replay_records")
+        selected = list(replay_records) if replay_records is not None else list(world.added)
         if predicate is not None:
-            records = (
-                world.added if args[5] else list(args[1].extract("", args[3], query_tags=None))
-            )
-            selected = [row for row in records if predicate(row)]
+            selected = [row for row in selected if predicate(row)]
+        record_sink = kwargs.get("record_sink")
+        if record_sink is not None:
+            for row in selected:
+                record_sink(row)
         if world.raise_write is not None and not args[5]:
             raise world.raise_write
         if not args[5]:
@@ -144,6 +156,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _World) -> P
             module, "get_destination", lambda *_a, **_k: _FakeDestination(), raising=False
         )
     monkeypatch.setattr(_helpers, "get_source", lambda *_a, **_k: object())
+    monkeypatch.setattr(_helpers, "get_destination", lambda *_a, **_k: _FakeDestination())
     return tmp_path
 
 
@@ -374,7 +387,7 @@ def test_canary_exception_halt_records_only_the_exception_class(
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
 
     assert result.exit_code == 1
-    assert "wave raised an exception" in result.output
+    assert "error:RuntimeError" in result.output
     assert "connector rejected the canary" not in result.output
 
 
@@ -413,7 +426,8 @@ def test_canary_null_key_and_spool_limit_fail_before_any_write(
     _plan(project)
     null_result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "100"])
     assert null_result.exit_code == 1
-    assert "Canary key components" in null_result.output and "null." in null_result.output
+    assert "snapshot stage (ValueError)" in null_result.output
+    assert "bad" not in null_result.output
     assert _writes(world) == []
     assert not list((project / ".drt" / "applied_plans").glob("*.spool.jsonl"))
 
@@ -432,7 +446,7 @@ def test_canary_spool_row_limit_is_configurable_and_fails_closed(
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
 
     assert result.exit_code == 1
-    assert "max_spool_rows" in result.output
+    assert "snapshot stage (SpoolError)" in result.output
     assert _writes(world) == []
     assert not list((project / ".drt" / "applied_plans").glob("*.spool.jsonl"))
 
@@ -457,7 +471,7 @@ def test_canary_detects_spool_tampering_before_the_next_wave(project: Path, worl
         )
 
     claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
-    assert claim["state"] == "halted" and claim["reason"] == "interrupted"
+    assert claim["state"] == "halted" and claim["reason"] == "spool_tampered"
     assert not list((project / ".drt" / "applied_plans").glob("*.spool.jsonl"))
 
 
@@ -527,23 +541,23 @@ def test_canary_interruption_during_wave_is_attributed_and_audited(
 def test_canary_claim_update_failure_aborts_before_next_wave(
     project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from drt.cli import _apply_flow
+    from drt.cli import _apply_claims
 
     plan = _plan(project)
-    real_finish = _apply_flow._finish_claim
+    real_finish = _apply_claims.finish_claim
 
     def fail_between_waves(project_dir: Path, plan_id: str, state: str, **updates: Any) -> bool:
         if state == "running" and updates.get("wave_results"):
             return False
         return real_finish(project_dir, plan_id, state, **updates)
 
-    monkeypatch.setattr(_apply_flow, "_finish_claim", fail_between_waves)
+    monkeypatch.setattr(_apply_claims, "finish_claim", fail_between_waves)
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
 
     assert result.exit_code == 1
     assert "aborting before the next wave" in result.output
     claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
-    assert claim["state"] == "halted" and claim["reason"] == "interrupted"
+    assert claim["state"] == "halted" and claim["reason"] == "claim_write_failed"
     assert len(_writes(world)) == 1
 
 
@@ -551,7 +565,7 @@ def test_canary_claim_update_failure_aborts_before_next_wave(
     ("failure_point", "message"),
     [
         ("initialize", "initialize the canary claim"),
-        ("snapshot", "Could not create the canary snapshot"),
+        ("snapshot", "record the canary snapshot"),
         ("before_wave", "record the current canary wave"),
         ("finalize", "claim could not be finalized"),
     ],
@@ -563,10 +577,10 @@ def test_canary_claim_write_failures_are_fail_closed(
     failure_point: str,
     message: str,
 ) -> None:
-    from drt.cli import _apply_flow
+    from drt.cli import _apply_claims
 
     _plan(project)
-    real_finish = _apply_flow._finish_claim
+    real_finish = _apply_claims.finish_claim
 
     def fail_selected(project_dir: Path, plan_id: str, state: str, **updates: Any) -> bool:
         selected = (
@@ -584,7 +598,7 @@ def test_canary_claim_write_failures_are_fail_closed(
         )
         return False if selected else real_finish(project_dir, plan_id, state, **updates)
 
-    monkeypatch.setattr(_apply_flow, "_finish_claim", fail_selected)
+    monkeypatch.setattr(_apply_claims, "finish_claim", fail_selected)
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "100"])
 
     assert result.exit_code == 1 and message in result.output
@@ -618,25 +632,26 @@ def test_canary_spool_open_failure_has_no_partial_writer(
     monkeypatch.setattr(_canary_spool.SnapshotSpoolWriter, "__init__", fail_open)
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "100"])
     assert result.exit_code == 1
-    assert "spool directory is read-only" in result.output
+    assert "snapshot stage (OSError)" in result.output
+    assert "read-only" not in result.output
     assert _writes(world) == []
 
 
 def test_canary_error_outcome_claim_failure_is_still_terminal(
     project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from drt.cli import _apply_flow
+    from drt.cli import _apply_claims
 
     plan = _plan(project)
     world.raise_write = RuntimeError("private destination value")
-    real_finish = _apply_flow._finish_claim
+    real_finish = _apply_claims.finish_claim
 
     def fail_error_outcome(project_dir: Path, plan_id: str, state: str, **updates: Any) -> bool:
-        if state == "halted" and updates.get("reason") == "wave raised an exception":
+        if state == "halted" and updates.get("reason") == "error:RuntimeError":
             return False
         return real_finish(project_dir, plan_id, state, **updates)
 
-    monkeypatch.setattr(_apply_flow, "_finish_claim", fail_error_outcome)
+    monkeypatch.setattr(_apply_claims, "finish_claim", fail_error_outcome)
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "100"])
 
     assert result.exit_code == 1 and "terminal canary outcome" in result.output
@@ -788,13 +803,181 @@ def test_canary_turns_plan_recomputation_errors_into_refusals(
 
     monkeypatch.setattr(_plan_runner, "compute_plan", unavailable)
 
-    with pytest.raises(ApplyRefused, match="source could not be verified"):
+    with pytest.raises(ApplyRefused, match=r"snapshot stage \(PlanCliError\)"):
         apply_plan(
             (project / "plan.json").read_text(),
             project_dir=project,
             approved=True,
             canary_waves=[1, 10],
         )
+
+
+def test_canary_refuses_an_unsafe_artifact_directory(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _apply_claims
+    from drt.cli._apply_claims import UnsafeApplyArtifacts
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+    monkeypatch.setattr(
+        _apply_claims,
+        "sweep_canary_spools",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(UnsafeApplyArtifacts("unsafe dir")),
+    )
+    with pytest.raises(ApplyRefused, match="unsafe dir"):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_waves=[100],
+        )
+
+
+def test_canary_refuses_when_configured_sync_cannot_be_resolved(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _canary
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+    monkeypatch.setattr(
+        _canary,
+        "_configured_sync",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(StopIteration()),
+    )
+    with pytest.raises(ApplyRefused, match="resolve the canary sync"):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_waves=[100],
+        )
+
+
+def test_canary_refuses_when_compatibility_changes_during_verification(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _canary
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+    calls = 0
+
+    def changing_compatibility(*_args: Any) -> tuple[list[str] | None, str | None]:
+        nonlocal calls
+        calls += 1
+        return (["id"], None) if calls == 1 else (None, "capability changed")
+
+    monkeypatch.setattr(_canary, "compatibility_problem", changing_compatibility)
+    with pytest.raises(ApplyRefused, match="capability changed"):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_waves=[100],
+        )
+
+
+def test_canary_no_change_claim_failure_is_terminal(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _apply_claims
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    world.added.clear()
+    _plan(project)
+    real_finish = _apply_claims.finish_claim
+
+    def fail_no_change(project_dir: Path, plan_id: str, state: str, **updates: Any) -> bool:
+        if state == "success" and updates.get("reason") == "no_changes":
+            return False
+        return real_finish(project_dir, plan_id, state, **updates)
+
+    monkeypatch.setattr(_apply_claims, "finish_claim", fail_no_change)
+    with pytest.raises(ApplyRefused, match="no-change canary claim"):
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_waves=[100],
+        )
+
+
+@pytest.mark.parametrize("mode", ["raise", "problem"])
+def test_canary_live_key_verification_fails_closed_without_raw_errors(
+    project: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+    if mode == "raise":
+
+        def verify(_self: Any, _config: Any) -> None:
+            raise RuntimeError("secret catalog value")
+    else:
+
+        def verify(_self: Any, _config: Any) -> str:
+            return "missing exact unique constraint"
+
+    monkeypatch.setattr(_FakeDestination, "verify_keyed_upsert", verify)
+    expected = "RuntimeError" if mode == "raise" else "missing exact unique constraint"
+    with pytest.raises(ApplyRefused, match=expected) as captured:
+        apply_plan(
+            (project / "plan.json").read_text(),
+            project_dir=project,
+            approved=True,
+            canary_waves=[100],
+        )
+    assert "secret catalog value" not in str(captured.value)
+
+
+def test_canary_static_keyed_destination_needs_no_live_verifier(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _helpers
+    from drt.cli._apply_flow import apply_plan
+
+    _plan(project)
+    monkeypatch.setattr(_helpers, "get_destination", lambda *_args: _StaticKeyedDestination())
+    outcome = apply_plan(
+        (project / "plan.json").read_text(),
+        project_dir=project,
+        approved=True,
+        canary_waves=[100],
+    )
+    assert outcome.applied
+
+
+def test_canary_path_replacement_is_not_unlinked(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli._apply_flow import apply_plan
+
+    _plan(project)
+    notices: list[str] = []
+    replaced = False
+
+    def replace_path(_seconds: float) -> None:
+        nonlocal replaced
+        if replaced:
+            return
+        replaced = True
+        spool = next((project / ".drt" / "applied_plans").glob("*.spool.jsonl"))
+        spool.rename(spool.with_suffix(".original"))
+        spool.write_text("replacement")
+
+    outcome = apply_plan(
+        (project / "plan.json").read_text(),
+        project_dir=project,
+        approved=True,
+        canary_waves=[1, 10],
+        canary_soak=timedelta(seconds=1),
+        sleep=replace_path,
+        notify=notices.append,
+    )
+    assert outcome.applied
+    assert any("path changed" in notice for notice in notices)
 
 
 def test_canary_refuses_an_unavailable_recomputed_plan(
@@ -829,6 +1012,9 @@ def test_canary_drift_is_refused_or_explicitly_allowed(project: Path, world: _Wo
     world.added.append({"id": 3, "name": "c"})
 
     refused = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+    world.added.pop()
+    _plan(project)
+    world.added.append({"id": 3, "name": "c"})
     allowed = runner.invoke(
         app,
         [
@@ -863,6 +1049,7 @@ def test_canary_guards_are_refused_or_forced_and_recorded(project: Path, world: 
     _plan(project)
 
     refused = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
+    _plan(project)
     forced = runner.invoke(
         app,
         ["apply", "plan.json", "--auto-approve", "--canary", "1,10", "--force-guards"],
@@ -910,14 +1097,14 @@ def test_canary_library_confirmation_paths(
 def test_canary_losing_the_claim_race_writes_nothing(
     project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from drt.cli import _apply_flow
+    from drt.cli import _apply_claims
 
     _plan(project)
 
     def lost(*_args: Any, **_kwargs: Any) -> None:
         raise FileExistsError
 
-    monkeypatch.setattr(_apply_flow, "_claim", lost)
+    monkeypatch.setattr(_apply_claims, "claim", lost)
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--canary", "1,10"])
 
     assert result.exit_code == 1
@@ -929,7 +1116,7 @@ def test_canary_losing_the_claim_race_writes_nothing(
     ("sync_options", "message"),
     [
         ({"mode": "incremental", "cursor_field": "id"}, "non-incremental"),
-        ({"mode": "upsert", "incremental_strategy": "diff"}, "snapshot baseline"),
+        ({"mode": "upsert", "incremental_strategy": "diff"}, "incremental_strategy: diff"),
         ({"mode": "mirror"}, "non-incremental"),
         ({"mode": "replace"}, "non-incremental"),
     ],
@@ -995,7 +1182,7 @@ def test_apply_time_canary_guard_requires_keyed_upsert_capability() -> None:
         def supports_keyed_upsert(self, config: Any) -> bool:
             return False
 
-    with pytest.raises(ApplyRefused, match="keyed-upsert destination.*PostgreSQL/MySQL"):
+    with pytest.raises(ApplyRefused, match="keyed-upsert destination"):
         _validate_canary_compatibility(sync, _AppendOnly())
 
 
@@ -1420,7 +1607,7 @@ def test_claim_finalization_does_not_swallow_base_exceptions(
 ) -> None:
     import logging
 
-    from drt.cli import _apply_flow
+    from drt.cli import _apply_claims
 
     class _BrokenLogger:
         def warning(self, *_args: Any, **_kwargs: Any) -> None:
@@ -1430,17 +1617,17 @@ def test_claim_finalization_does_not_swallow_base_exceptions(
         raise SystemExit(143)
 
     real_get_logger = logging.getLogger
-    monkeypatch.setattr(_apply_flow, "_read_claim", interrupted_read)
+    monkeypatch.setattr(_apply_claims, "read_claim", interrupted_read)
     monkeypatch.setattr(
         logging,
         "getLogger",
         lambda name=None: (
-            _BrokenLogger() if name == _apply_flow.__name__ else real_get_logger(name)
+            _BrokenLogger() if name == _apply_claims.__name__ else real_get_logger(name)
         ),
     )
 
     with pytest.raises(SystemExit, match="143"):
-        _apply_flow._finish_claim(project, "a" * 64, "halted", reason="interrupted")
+        _apply_claims.finish_claim(project, "a" * 64, "halted", reason="interrupted")
 
 
 def test_claim_finalization_swallows_ordinary_logging_failure(
@@ -1448,7 +1635,7 @@ def test_claim_finalization_swallows_ordinary_logging_failure(
 ) -> None:
     import logging
 
-    from drt.cli import _apply_flow
+    from drt.cli import _apply_claims
 
     class _BrokenLogger:
         def warning(self, *_args: Any, **_kwargs: Any) -> None:
@@ -1458,15 +1645,15 @@ def test_claim_finalization_swallows_ordinary_logging_failure(
         raise OSError("claim unavailable")
 
     real_get_logger = logging.getLogger
-    monkeypatch.setattr(_apply_flow, "_read_claim", broken_read)
+    monkeypatch.setattr(_apply_claims, "read_claim", broken_read)
     monkeypatch.setattr(
         logging,
         "getLogger",
         lambda name=None: (
-            _BrokenLogger() if name == _apply_flow.__name__ else real_get_logger(name)
+            _BrokenLogger() if name == _apply_claims.__name__ else real_get_logger(name)
         ),
     )
-    assert not _apply_flow._finish_claim(project, "a" * 64, "halted")
+    assert not _apply_claims.finish_claim(project, "a" * 64, "halted")
 
 
 def test_finalized_claim_stays_private(project: Path, world: _World) -> None:

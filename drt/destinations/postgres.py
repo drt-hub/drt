@@ -139,6 +139,45 @@ class PostgresDestination(BaseSqlDestination):
         assert isinstance(config, PostgresDestinationConfig)
         return True
 
+    def verify_keyed_upsert(self, config: DestinationConfig) -> str | None:
+        """Prove ON CONFLICT's key has an exact non-partial unique index."""
+        assert isinstance(config, PostgresDestinationConfig)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT array_agg(a.attname ORDER BY key_position.ordinality)
+                FROM pg_index AS i
+                JOIN pg_class AS table_class ON table_class.oid = i.indrelid
+                JOIN pg_namespace AS namespace ON namespace.oid = table_class.relnamespace
+                CROSS JOIN LATERAL unnest(i.indkey)
+                    WITH ORDINALITY AS key_position(attnum, ordinality)
+                JOIN pg_attribute AS a
+                    ON a.attrelid = table_class.oid AND a.attnum = key_position.attnum
+                WHERE i.indisunique
+                  AND i.indimmediate
+                  AND i.indisvalid
+                  AND i.indisready
+                  AND i.indpred IS NULL
+                  AND i.indexprs IS NULL
+                  AND key_position.ordinality <= i.indnkeyatts
+                  AND table_class.relname = %s
+                  AND namespace.nspname = COALESCE(%s, current_schema())
+                GROUP BY i.indexrelid
+                """,
+                (_relation_name(config.table), _split_qualified(config.table)[0]),
+            )
+            indexes = [list(row[0]) for row in cur.fetchall() if row and row[0]]
+        finally:
+            conn.close()
+        if any(columns == config.upsert_key for columns in indexes):
+            return None
+        return (
+            f"PostgreSQL table {config.table!r} needs a UNIQUE or PRIMARY KEY constraint "
+            f"on exactly ({', '.join(config.upsert_key)}) before canary apply."
+        )
+
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
 

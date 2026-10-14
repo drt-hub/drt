@@ -201,6 +201,15 @@ class KeyedUpsertCapable(Protocol):
 
 
 @runtime_checkable
+class KeyedUpsertVerifiable(Protocol):
+    """Optional live proof that the configured key is uniquely constrained."""
+
+    def verify_keyed_upsert(self, config: DestinationConfig) -> str | None:
+        """Return an actionable problem, or ``None`` when the key is proven unique."""
+        ...
+
+
+@runtime_checkable
 class ModeCapable(Protocol):
     """Destination that honours advanced ``sync.mode`` values (#1042).
 

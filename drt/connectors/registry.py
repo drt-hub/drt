@@ -122,6 +122,13 @@ def destination_config_class(type_name: str) -> type[Any] | None:
     return entry[0] if entry else None
 
 
+def destination_implementation_class(type_name: str) -> type[Any] | None:
+    """The registered destination class, without constructing it."""
+    _ensure_plugins_loaded()
+    entry = _destination_registry.get(type_name)
+    return entry[1] if entry else None
+
+
 def registered_destination_types() -> tuple[str, ...]:
     """Every destination type the registry can resolve, sorted (#997).
 

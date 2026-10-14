@@ -321,21 +321,39 @@ sync:
     max_spool_bytes: 1073741824   # default: 1 GiB
 ```
 
-After verification and before wave 1, drt extracts the source once into
-`.drt/applied_plans/<plan_id>.spool.jsonl`. Every wave replays its bucket range
-from that immutable snapshot through the normal engine path, so field mappings,
-computed fields, masking and transforms still run normally while live-source
-changes between waves cannot change the approved row set. The SHA-256 recorded
-in the claim is checked before every wave. Row and byte caps fail closed before
-the first write. Null or missing key components also fail during this snapshot
-step, before wave 1.
+The verify-by-replan extraction itself writes
+`.drt/applied_plans/<plan_id>.spool.jsonl`: there is no second source read.
+Records enter the spool after lookups, computed fields, field mappings, masks,
+and metadata columns, at the same point used by plan diffing. Every wave treats
+those rows as already transformed, so it performs no live source or lookup
+access and cannot recompute a value differently. The SHA-256 recorded in the
+claim is checked over the retained file descriptor before every wave. Row and
+byte caps, unsupported values, and null or missing key components fail closed
+before the first destination write.
 
 Unlike plan files, the spool contains **row values on local disk**. It is a
-private, exclusive 0600 file with type-tagged JSONL encoding (including exact
-date/time, Decimal, bytes and UUID round trips). drt deletes it best-effort when
-apply succeeds, halts, fails, or is interrupted. Spool values never appear in
-claims, command/MCP output, or logs; claims retain only row/byte counts and the
-file hash.
+private, exclusive 0600 regular file in an owner-controlled apply directory.
+after writing, drt opens it once read-only with no symlink following, validates
+owner/mode/link count and inode identity, then reuses that descriptor for
+hashing and replay; replacing the pathname does not change the rows read.
+Type-tagged JSONL preserves IEEE-754 float bits
+(including `-0.0` and NaN payload/sign), Decimal, bytes, UUID, and temporal
+values. An aware datetime preserves the UTC instant and its fixed offset; a
+named timezone such as `ZoneInfo` intentionally replays as that fixed offset,
+not the original tzinfo identity. Unsupported types are rejected before their
+record is written. Spool values never appear in claims, command/MCP output, or
+logs; claims retain only row/byte counts and the file hash.
+
+The `.drt/applied_plans` directory is created as 0700 and refused if it is a
+symlink, has another owner, or is group/other writable. Claims carry the local
+PID, hostname, start time, and spool path. At the start of every canary apply,
+drt removes spools for terminal claims and marks/removes a same-host pending or
+running lease whose PID is dead as `halted: orphaned`. It preserves a live PID,
+a lease from another host, and a recent unclaimed spool, printing a notice;
+unclaimed spools older than 24 hours are removed. PID reuse is handled
+conservatively: if `kill(pid, 0)` says a process exists (including
+`PermissionError`), drt leaves the spool for manual review. This sweep recovers
+value-bearing files left by SIGKILL, which cannot run process cleanup.
 
 After each wave, drt computes `(failed + error-skipped rows) / rows selected`.
 Error-skipped rows include lookup, computed-field, and transform failures under
@@ -354,30 +372,42 @@ normal run with ordinary finalization and persistence.
 > normally.
 
 A claim records each wave's run ID before that wave starts, plus per-wave counts
-for audit. An interruption during a wave or soak records terminal `halted` with
-reason `interrupted` and is re-raised. Canary apply is not transactional: rows
-from earlier waves remain written after a halt.
+for audit. `KeyboardInterrupt`, `SystemExit`, and other non-`Exception`
+terminations record `interrupted`; ordinary failures use `error:<Class>`, with
+dedicated `snapshot_failed`, `spool_tampered`, `claim_write_failed`, and
+`orphaned` reasons. Snapshot-stage CLI/MCP errors expose only stage and exception
+class, never raw connector text. Canary apply is not transactional: rows from
+earlier waves remain written after a halt.
 
 Canary v2 supports only the plain, non-incremental per-row write path:
 `sync.mode: full` or `upsert`, with `destination.upsert_key`. It rejects
 incremental syncs (a per-wave cursor/watermark can skip rows),
 `incremental_strategy: diff` (waves would mutate the snapshot baseline),
 mirror/replace and tracked mirror state (per-run finalization is unsafe), staged
-destinations, any `metadata_columns`, `match_policy: update_only | create_only`,
-keys produced by destination lookups, and key columns masked with non-injective
-`redact` or `truncate` (key hashing is allowed). These rules are enforced both
+destinations, `metadata_columns` that produce an upsert-key column,
+`match_policy: update_only | create_only`, keys produced by destination lookups,
+and key columns masked with non-injective `redact` or `truncate` (key hashing is
+allowed). Other metadata columns are supported: their verification-pass values
+are snapshotted and replayed unchanged. These rules are enforced both
 for `sync.rollout` validation and CLI/MCP canary overrides. Plain `drt run`
 ignores `sync.rollout`.
 
 | Destination | Canary keyed-upsert support |
 |---|---|
-| PostgreSQL | yes |
-| MySQL | yes |
+| PostgreSQL | yes, after proving the exact `upsert_key` has a UNIQUE/PRIMARY constraint |
+| MySQL | yes, after proving the exact `upsert_key` has a UNIQUE/PRIMARY constraint |
 | Snowflake | only with `destination.mode: merge` |
 | Databricks | only with `destination.mode: merge` |
 | BigQuery | only with `destination.mode: merge` |
 | ClickHouse | no — `upsert_key` is informational |
-| all other built-ins and plugins | no by default; must implement `KeyedUpsertCapable` |
+| all other built-ins and plugins | no by default; plugins may implement `KeyedUpsertCapable` |
+
+Immediately before wave 1, PostgreSQL and MySQL query their catalogs and refuse
+with an actionable message unless the configured key columns exactly match a
+non-partial unique or primary-key index. `supports_keyed_upsert()` remains the
+static capability; this live proof is a separate optional capability. Plugin
+destinations are admitted by structural capability at config time and checked
+authoritatively at apply time.
 
 A halt is an apply failure and exits 1, using the existing error exit code. In
 JSON mode, `result.canary` contains the wave documents, status, halt reason and
