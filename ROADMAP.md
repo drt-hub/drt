@@ -252,14 +252,15 @@ drt apply plan.json                 # execute only if the world still matches
 
 | Order | Issue | Scope |
 |---|---|---|
-| 1 | [#1216](https://github.com/drt-hub/drt/issues/1216) | `drt plan` — full key-level change set, `plan.json` schema, `--detailed-exitcode` |
-| 2 | [#1217](https://github.com/drt-hub/drt/issues/1217) | `drt apply` — verify-by-replan, single-use plans, drift report |
-| 3 | [#1218](https://github.com/drt-hub/drt/issues/1218) | Change guards — `max_deletes` / percentage thresholds at plan, apply and run |
-| 4 | [#1219](https://github.com/drt-hub/drt/issues/1219) | PR review workflow — plan comment on the pull request, apply on merge |
-| 5 | [#1220](https://github.com/drt-hub/drt/issues/1220) | MCP `drt_plan` / `drt_apply` with an approval record |
-| — | [#472](https://github.com/drt-hub/drt/issues/472), [#471](https://github.com/drt-hub/drt/issues/471) | API-based diff for SaaS destinations (widens plan coverage), `--diff-fields` |
-| — | [#761](https://github.com/drt-hub/drt/issues/761), [#896](https://github.com/drt-hub/drt/issues/896) | Schema-management cluster (detect/report first; `on_schema_change` itself is v1.3) |
-| — | [#1224](https://github.com/drt-hub/drt/issues/1224) | Sync-level freshness — `alerts.on_stale` + `drt status --check` (catches the sync that silently stopped running) |
+| 1 ✅ | [#1216](https://github.com/drt-hub/drt/issues/1216) | `drt plan` — full key-level change set, `plan.json` schema, `--detailed-exitcode` |
+| 2 ✅ | [#1217](https://github.com/drt-hub/drt/issues/1217) | `drt apply` — verify-by-replan, single-use plans, drift report |
+| 3 | [#1218](https://github.com/drt-hub/drt/issues/1218) | Change guards — `max_deletes` / percentage thresholds at plan, apply and run. **Plan/apply half shipped; run-time enforcement before the destructive step is the remaining v1.2 item** |
+| 4 ✅ | [#1219](https://github.com/drt-hub/drt/issues/1219) | PR review workflow — plan comment on the pull request, apply on merge |
+| 5 ✅ | [#1220](https://github.com/drt-hub/drt/issues/1220) | MCP `drt_plan` / `drt_apply` with an approval record |
+| ✅ | [#1238](https://github.com/drt-hub/drt/issues/1238) | `write_policy: fill_empty` — write a column only when the destination value is empty (PostgreSQL, MySQL, Snowflake, Databricks, BigQuery, HubSpot) |
+| ✅ | [#1254](https://github.com/drt-hub/drt/issues/1254) | `drt init --from-ossie` — scaffold syncs from an Apache Ossie semantic model (stage A spike; B/C/D follow the spec) |
+
+**Parked to v1.3 (2026-10-14):** #472 / #471 (API-based diff, `--diff-fields`), #761 / #896 (column contracts), #1224 (sync-level freshness) and #1237 (HubSpot: preserve human edits; needs a live HubSpot account to verify) are off the "reviewable syncs" theme or need live verification, so v1.2 ships the review loop first.
 
 **Sequencing:** #1216 → #1217 → #1218 is the foundation and ships in that order; #1219/#1220 build on it. Scope is allowed to slip to v1.3 by design — a thinner, correct foundation beats a wide, unverified one (every leg lands only after a live smoke, as in v1.1).
 
@@ -281,6 +282,10 @@ drt apply plan.json                 # execute only if the world still matches
 | schema | [#760](https://github.com/drt-hub/drt/issues/760) | `manage_table` / `on_schema_change` (not implemented anywhere yet) |
 | orchestration | [#1225](https://github.com/drt-hub/drt/issues/1225) | Scheduler scaffolds — `drt deploy cloud-run-job`, `drt deploy k8s-cronjob`, plus a scheduling decision guide (replaces #428) |
 | ecosystem | [#1226](https://github.com/drt-hub/drt/issues/1226) | Exposures carry owner/freshness; docs site shows last-applied plan and staleness |
+| plan/apply | [#472](https://github.com/drt-hub/drt/issues/472), [#471](https://github.com/drt-hub/drt/issues/471) | Parked from v1.2: API-based diff for SaaS destinations (widens plan coverage), `--diff-fields` |
+| schema | [#761](https://github.com/drt-hub/drt/issues/761), [#896](https://github.com/drt-hub/drt/issues/896) | Parked from v1.2: column contracts (detect/report first; `on_schema_change` itself stays with #760) |
+| alerts | [#1224](https://github.com/drt-hub/drt/issues/1224) | Parked from v1.2: sync-level freshness — `alerts.on_stale` + `drt status --check` |
+| destinations | [#1237](https://github.com/drt-hub/drt/issues/1237) | Parked from v1.2: HubSpot — preserve human edits (`propertiesWithHistory`), builds on the `fill_empty` batch read |
 | backlog | [#758](https://github.com/drt-hub/drt/issues/758), [#764](https://github.com/drt-hub/drt/issues/764), [#425](https://github.com/drt-hub/drt/issues/425), [#426](https://github.com/drt-hub/drt/issues/426) | Windowed backfill, pre/post-sync SQL hooks, multi-destination fan-out, sync dependency graph — scoped when picked up |
 
 **Out of scope:** a drt-owned scheduler or watcher (ADR 0004).
