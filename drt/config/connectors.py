@@ -59,6 +59,7 @@ DESTINATIONS = [
     ("sendgrid", "SendGrid"),
     ("slack", "Slack"),
     ("snowflake", "Snowflake"),
+    ("sqs", "Amazon SQS"),
     ("staged_upload", "Staged Upload"),
     ("teams", "Microsoft Teams"),
     ("twilio", "Twilio"),
@@ -81,6 +82,7 @@ _EXTRAS: dict[str, str] = {
     "deltalake": "deltalake",
     "iceberg": "iceberg",
     "s3": "s3",
+    "sqs": "sqs",
     "gcs": "gcs",
     "azure_blob": "azure",  # extra name differs from the type
     "parquet": "parquet",

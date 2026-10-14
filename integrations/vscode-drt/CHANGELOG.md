@@ -6,6 +6,9 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.14] - Unreleased
 
+- Bundled JSON Schemas regenerated from the drt-core checkout: `sqs` gains destination
+  `retry` and `rate_limit` overrides (drt-hub/drt#1182).
+
 - Bundled JSON Schemas regenerated from drt-core: `sync.write_policy`
   (`overwrite` | `fill_empty`) and `sync.write_policy_overrides` write a column only
   when the destination's value is empty (drt-hub/drt#1238).

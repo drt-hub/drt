@@ -66,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Amazon SQS destination** ([#1182](https://github.com/drt-hub/drt/issues/1182)): append JSON records to standard and FIFO queues using the optional `drt-core[sqs]` extra and boto3's standard credential chain. Includes runtime FIFO validation, local ASCII ID validation, bounded per-entry retries, destination-level retry/rate-limit overrides, queue-specific request pacing, and RowError reporting. FIFO requests contain at most one pending message per group, preserving extracted order within a run during retries; a failed group blocks its later records while independent groups can continue. Delivery is at least once: a hard failure can leave earlier batches delivered, so consumers should be idempotent.
+
 - **Zero-credential review-before-you-write demo**: `examples/review-demo` pairs a deterministic DuckDB warehouse with a local Postgres 16 CRM to show `drt plan`, fill-only enrichment, guard-refused mirror deletes, and verify-by-replan `drt apply`, with a VHS recording script, agent prompts, and unit/Testcontainers coverage.
 
 - **Apache Ossie activation scaffold spike** ([#1254](https://github.com/drt-hub/drt/issues/1254)): `drt init --from-ossie <model.yaml|json>` generates validating keyed-upsert sync YAMLs from semantic-model datasets, with dataset selection, dialect fallback, PostgreSQL/HubSpot destination stubs, provenance/TODO comments, strict interpolation guards, and a dependency-free, 5 MB-bounded reader isolated for a future official-package swap. Generic REST scaffolding is deliberately excluded because an API-specific keyed/idempotent write contract cannot be inferred safely.

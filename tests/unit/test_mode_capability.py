@@ -21,6 +21,7 @@ from drt.destinations.postgres import PostgresDestination
 from drt.destinations.s3 import S3Destination
 from drt.destinations.snowflake import SnowflakeDestination
 from drt.destinations.sql_base import BaseSqlDestination
+from drt.destinations.sqs import SQSDestination
 from drt.engine.sync import _check_mode_supported, run_sync
 
 
@@ -93,6 +94,22 @@ def test_run_sync_rejects_advanced_mode_before_any_io(mode: str, tmp_path: Path)
 @pytest.mark.parametrize("mode", ["full", "incremental", "upsert"])
 def test_always_safe_modes_need_no_capability(mode: str) -> None:
     _check_mode_supported(mode, _IncapableDestination())
+
+
+@pytest.mark.parametrize("mode", ["replace", "mirror"])
+def test_sqs_rejects_advanced_modes_before_extracting(mode: str, tmp_path: Path) -> None:
+    source = _CountingSource()
+    sync = SyncConfig.model_validate(
+        {
+            "name": "work_items",
+            "model": "SELECT 1 AS id",
+            "destination": {"type": "sqs", "queue_url_env": "SQS_QUEUE_URL"},
+            "sync": {"mode": mode},
+        }
+    )
+    with pytest.raises(ValueError, match=rf"sync\.mode: {mode} is not supported by SQSDestination"):
+        run_sync(sync, source, SQSDestination(), _profile(), tmp_path)
+    assert source.extract_called is False
 
 
 def test_capable_destination_rejects_an_undeclared_advanced_mode() -> None:

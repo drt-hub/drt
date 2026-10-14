@@ -1264,6 +1264,44 @@ host. Configs with the same explicit key share one limiter bucket.
 
 ---
 
+### `type: sqs`
+
+Requires `pip install 'drt-core[sqs]'`; boto3 is optional and lazily imported.
+
+```yaml
+destination:
+  type: sqs
+  queue_url_env: SQS_QUEUE_URL            # required: environment/secret reference to queue URL
+  region: us-east-1                      # optional: boto3's default when omitted
+  message_group_id_field: customer_id    # required for FIFO; omit for standard queues
+  deduplication_id_field: event_id       # FIFO only; optional with content-based deduplication
+  retry:                                # optional: overrides sync.retry as a whole
+    max_attempts: 3
+    initial_backoff: 1.0
+  rate_limit:                           # optional: overrides sync.rate_limit as a whole
+    requests_per_second: 20
+    burst: 5
+sync:
+  mode: full                            # full/incremental/upsert append; replace/mirror rejected
+```
+
+FIFO is inferred from the **resolved queue URL** ending in `.fifo`.
+Standard queues reject both FIFO ID fields. ID values must render as
+1–128 ASCII letters, digits, or punctuation; missing, Unicode, whitespace,
+and control-character IDs fail locally with a RowError.
+The resolved URL keys request pacing by queue, account, and regional endpoint;
+environment aliases for the same queue share one limiter.
+
+HTTP 200 responses are checked per entry. Successful entries are never included
+in partial-failure retries; sender faults fail immediately, while transient
+failed entries alone retry with destination > sync > default settings.
+Within a run, FIFO sends at most one pending entry per group and blocks later
+entries after a permanent failure. Use SQL `ORDER BY` for extraction order.
+Delivery is at least once: earlier batches remain delivered after a hard
+failure, so consumers should be idempotent. See [SQS connector docs](../connectors/sqs.md).
+
+---
+
 ## Auth Configs
 
 Auth configs are used inside destination configs under the `auth:` key.

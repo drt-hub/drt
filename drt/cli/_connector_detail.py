@@ -79,6 +79,7 @@ DESTINATION_CONFIG_CLASSES: dict[str, type[BaseModel]] = {
     "sendgrid": _models.SendGridDestinationConfig,
     "slack": _models.SlackDestinationConfig,
     "snowflake": _models.SnowflakeDestinationConfig,
+    "sqs": _models.SQSDestinationConfig,
     "staged_upload": _models.StagedUploadDestinationConfig,
     "teams": _models.TeamsDestinationConfig,
     "twilio": _models.TwilioDestinationConfig,

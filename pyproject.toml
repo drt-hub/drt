@@ -82,6 +82,7 @@ sheets = ["google-api-python-client>=2.0", "google-auth>=2.0"]
 mysql = ["pymysql>=1.1"]
 parquet = ["pandas>=2.0", "pyarrow>=12.0"]
 s3 = ["boto3>=1.35.69"]
+sqs = ["boto3>=1.35.69"]
 aws-secrets = ["boto3>=1.34"]  # aws-sm:// secret provider URIs (#782) — same SDK as [s3], separate extra since the two are unrelated capabilities
 gcp-secrets = ["google-cloud-secret-manager>=2.0"]  # gcp-sm:// secret provider URIs (#782)
 vault = ["hvac>=2.0"]  # vault:// secret provider URIs (#782)

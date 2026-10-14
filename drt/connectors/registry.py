@@ -256,6 +256,7 @@ def _register_all_connectors() -> None:
         SendGridDestinationConfig,
         SlackDestinationConfig,
         SnowflakeDestinationConfig,
+        SQSDestinationConfig,
         StagedUploadDestinationConfig,
         TeamsDestinationConfig,
         TwilioDestinationConfig,
@@ -294,6 +295,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
     from drt.destinations.snowflake import SnowflakeDestination
+    from drt.destinations.sqs import SQSDestination
     from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
     from drt.destinations.twilio import TwilioDestination
@@ -317,6 +319,7 @@ def _register_all_connectors() -> None:
     # Register all destinations
     register_destination("rest_api", RestApiDestinationConfig, RestApiDestination)
     register_destination("slack", SlackDestinationConfig, SlackDestination)
+    register_destination("sqs", SQSDestinationConfig, SQSDestination)
     register_destination("twilio", TwilioDestinationConfig, TwilioDestination)
     register_destination("discord", DiscordDestinationConfig, DiscordDestination)
     register_destination("github_actions", GitHubActionsDestinationConfig, GitHubActionsDestination)

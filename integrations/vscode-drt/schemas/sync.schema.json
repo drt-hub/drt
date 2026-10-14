@@ -4023,6 +4023,84 @@
       "title": "S3DestinationConfig",
       "type": "object"
     },
+    "SQSDestinationConfig": {
+      "description": "Amazon SQS destination using the standard boto3 credential chain.",
+      "properties": {
+        "type": {
+          "const": "sqs",
+          "title": "Type",
+          "type": "string"
+        },
+        "queue_url_env": {
+          "title": "Queue Url Env",
+          "type": "string"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "message_group_id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Group Id Field"
+        },
+        "deduplication_id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Deduplication Id Field"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "queue_url_env"
+      ],
+      "title": "SQSDestinationConfig",
+      "type": "object"
+    },
     "SalesforceBulkDestinationConfig": {
       "properties": {
         "type": {
@@ -5705,6 +5783,9 @@
         },
         {
           "$ref": "#/$defs/SlackDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/SQSDestinationConfig"
         },
         {
           "$ref": "#/$defs/DiscordDestinationConfig"
