@@ -449,7 +449,7 @@ sync:
 Limits on how much one run may change. They are evaluated against the change set
 `drt plan` computes: `drt plan` reports a trip (exit code unchanged) and
 `drt apply` refuses to write (`--force-guards` overrides and is recorded in
-`run_results.json`). PostgreSQL/MySQL run mirror DELETEs in a transaction, judge
+`run_results.json`). PostgreSQL/MySQL/Snowflake run mirror DELETEs in a transaction (Snowflake opens an explicit `BEGIN`; it autocommits otherwise), judge
 the actual affected-row count and roll back on a trip; guarded swaps count
 missing keys under a table lock. A refusal is a failed run (exit 1), commits no
 delete/swap, and does not advance the watermark. `drt run --force-guards`

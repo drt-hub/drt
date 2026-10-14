@@ -316,6 +316,7 @@ class BaseSqlDestination:
                             )
                             logging.getLogger(__name__).warning(detail)
                             _attach_exception_detail(guard_error, detail)
+                        self._reset_swap_state()
                         raise
                 self._complete_swap(conn, cur, table, shadow)
         except GuardTripped as guard_error:
@@ -408,6 +409,8 @@ class BaseSqlDestination:
                 )
                 cur.execute(baseline_stmt, baseline_params)
                 baseline = int(cur.fetchone()[0])
+            if self._delete_guards_enabled(sync_options):
+                self._begin_guarded_delete(cur)
             cur.execute(stmt, params)
             if self._delete_guards_enabled(sync_options):
                 try:
@@ -455,6 +458,8 @@ class BaseSqlDestination:
             stmt, params = self._build_mirror_delete(
                 self._mirror_table_ident(config), upsert_cols, keys, negate=False
             )
+            if self._delete_guards_enabled(sync_options):
+                self._begin_guarded_delete(cur)
             cur.execute(stmt, params)
             if self._delete_guards_enabled(sync_options):
                 try:
@@ -1024,11 +1029,28 @@ class BaseSqlDestination:
         """Build the cleanup DROP used when a replace-swap guard refuses."""
         raise NotImplementedError
 
+    def _begin_guarded_delete(self, cur: Any) -> None:
+        """Open an explicit transaction around a guarded DELETE.
+
+        Dialects whose connection is not already inside an implicit transaction
+        (autocommit warehouses) override this so ``rollback()`` really undoes
+        the refused DELETE. Transactional-by-default dialects need nothing.
+        """
+
     @staticmethod
     def _affected_rows(cur: Any) -> int:
-        """Normalize DB-API rowcount after a DELETE."""
-        rowcount = getattr(cur, "rowcount", 0)
-        return int(rowcount) if rowcount is not None and rowcount > 0 else 0
+        """Normalize DB-API rowcount after a DELETE.
+
+        An unknown count must refuse, never read as zero: zero passes every
+        guard.
+        """
+        rowcount = getattr(cur, "rowcount", None)
+        if rowcount is None or isinstance(rowcount, bool) or int(rowcount) < 0:
+            raise RuntimeError(
+                "Run-time change guards could not determine how many rows the DELETE "
+                "affected; refusing to proceed."
+            )
+        return int(rowcount)
 
     def _mirror_table_ident(self, config: Any) -> str:
         """Target-table identifier handed to ``_build_mirror_delete``.
@@ -1472,6 +1494,8 @@ class BaseSqlDestination:
                     None,
                     negate=False,
                 )
+                if self._delete_guards_enabled(sync_options):
+                    self._begin_guarded_delete(cur)
                 cur.execute(stmt, params)
                 if self._delete_guards_enabled(sync_options):
                     try:

@@ -182,6 +182,9 @@ class SnowflakeDestination(BaseSqlDestination):
         # Snowflake-only first-run fall-through: target table doesn't exist
         # yet, so replace-swap writes straight to it and skips the swap.
         self._swap_direct_write: bool = False
+        # Run-time guards (#1218): True between an explicit BEGIN and its
+        # COMMIT/ROLLBACK, so ``_commit_mirror`` knows to issue a real COMMIT.
+        self._guard_txn_open: bool = False
 
     def _resolve_schema(self, config: SnowflakeDestinationConfig) -> dict[str, str] | None:
         """Column → type-category map for the target table, cached per sync.
@@ -550,6 +553,70 @@ class SnowflakeDestination(BaseSqlDestination):
     def _reset_swap_state_after_noop(self) -> None:
         self._swap_direct_write = False
 
+    @staticmethod
+    def _scope_clause(
+        scope_cols: list[str] | None, scopes: list[tuple[Any, ...]] | None
+    ) -> tuple[str, list[Any]]:
+        """``scope IN (observed) AND `` prefix shared by the DELETE and its COUNT."""
+        if not (scope_cols and scopes):
+            return "", []
+        if len(scope_cols) == 1:
+            placeholders = ", ".join(["%s"] * len(scopes))
+            return f"{scope_cols[0]} IN ({placeholders}) AND ", [s[0] for s in scopes]
+        col_tuple = "(" + ", ".join(scope_cols) + ")"
+        row_placeholder = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
+        placeholders = ", ".join([row_placeholder] * len(scopes))
+        return f"{col_tuple} IN ({placeholders}) AND ", [v for s in scopes for v in s]
+
+    # --- run-time delete guards (#1218 part 2) ----------------------------
+    def _supports_runtime_delete_guards(self) -> bool:
+        return True
+
+    def _begin_guarded_delete(self, cur: Any) -> None:
+        """Snowflake autocommits: only an explicit BEGIN makes a refusal roll back.
+
+        Everything between this BEGIN and the judgment must be DML — DDL would
+        commit the open transaction and the DELETE with it.
+        """
+        cur.execute("BEGIN")
+        self._guard_txn_open = True
+
+    def _build_mirror_count(
+        self,
+        table: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None = None,
+        scopes: list[tuple[Any, ...]] | None = None,
+        negate: bool = True,
+        *,
+        baseline: bool = False,
+    ) -> tuple[str, list[Any]]:
+        """Count the exact rows the mirror DELETE would remove (or the scoped baseline)."""
+        if baseline:
+            clause, params = self._scope_clause(scope_cols, scopes)
+            where = f" WHERE {clause[: -len(' AND ')]}" if clause else ""
+            return f"SELECT COUNT(*) FROM {table}{where}", params
+        stmt, params = self._build_mirror_delete(
+            table, upsert_cols, keys, scope_cols, scopes, negate=negate
+        )
+        prefix = "DELETE FROM "
+        assert stmt.startswith(prefix)
+        return "SELECT COUNT(*) FROM " + stmt[len(prefix) :], params
+
+    def _build_table_count(self, table: str) -> str:
+        return f"SELECT COUNT(*) FROM {table}"
+
+    def _build_swap_delete_count(self, table: str, shadow: str, upsert_cols: list[str]) -> str:
+        equality = " AND ".join(f"l.{c} IS NOT DISTINCT FROM s.{c}" for c in upsert_cols)
+        return (
+            f"SELECT COUNT(*) FROM {table} AS l "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {shadow} AS s WHERE {equality})"
+        )
+
+    def _build_drop_table(self, table: str) -> str:
+        return f"DROP TABLE IF EXISTS {table}"
+
     def _build_mirror_delete(
         self,
         table_fq: str,
@@ -579,19 +646,7 @@ class SnowflakeDestination(BaseSqlDestination):
         keys).
         """
         op = "NOT IN" if negate else "IN"
-        scope_clause = ""
-        scope_params: list[Any] = []
-        if scope_cols and scopes:
-            if len(scope_cols) == 1:
-                scope_placeholders = ", ".join(["%s"] * len(scopes))
-                scope_clause = f"{scope_cols[0]} IN ({scope_placeholders}) AND "
-                scope_params = [s[0] for s in scopes]
-            else:
-                scope_col_tuple = "(" + ", ".join(scope_cols) + ")"
-                scope_row_placeholder = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
-                scope_placeholders = ", ".join([scope_row_placeholder] * len(scopes))
-                scope_clause = f"{scope_col_tuple} IN ({scope_placeholders}) AND "
-                scope_params = [v for s in scopes for v in s]
+        scope_clause, scope_params = self._scope_clause(scope_cols, scopes)
 
         if len(upsert_cols) == 1:
             placeholders = ", ".join(["%s"] * len(keys))
@@ -613,8 +668,11 @@ class SnowflakeDestination(BaseSqlDestination):
         return f"{config.database}.{config.schema_}.{config.table}"
 
     def _commit_mirror(self, conn: Any) -> None:
-        # Snowflake's existing mirror path relies on connection autocommit.
-        del conn
+        # Snowflake's existing mirror path relies on connection autocommit,
+        # except for a guarded DELETE, which ran inside an explicit BEGIN.
+        if self._guard_txn_open:
+            self._guard_txn_open = False
+            conn.cursor().execute("COMMIT")
 
     def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
         from drt.destinations._mirror_state import STATE_TABLE

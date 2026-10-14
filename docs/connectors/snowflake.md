@@ -136,6 +136,7 @@ Safety guards:
 - **Failed rows excluded from the key set** — only successfully merged keys count as "observed source state"; a row that failed to merge won't cause its destination counterpart to be deleted.
 - **`upsert_key` required at load time** — `load()` raises `ValueError` before any INSERT touches Snowflake when mirror mode is requested without a populated `upsert_key`. Fail-fast.
 - **Composite keys supported** — `upsert_key: [tenant_id, user_id]` produces `WHERE (tenant_id, user_id) NOT IN (...)`.
+- **Run-time change guards** — with `sync.guards.max_deletes` / `max_delete_pct` set, the final mirror DELETE runs inside an explicit `BEGIN` (Snowflake otherwise autocommits), drt judges the driver's actual affected-row count, and `ROLLBACK`s if a guard trips; otherwise it `COMMIT`s. An unknown row count refuses instead of reading as zero. The tracked-state rewrite starts only after the guard passes. Replace-swap compares live keys absent from the shadow table before `SWAP WITH`; Snowflake has no table lock, so a concurrent writer to the shadow between the count and the swap is a documented residual. `drt run --force-guards` proceeds and records the override. No delete guards means no extra SQL.
 
 Memory constraint: the in-process key set is memory-bound to source key cardinality. Mirror as shipped today is appropriate for small/medium reference tables.
 
