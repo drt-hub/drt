@@ -823,3 +823,38 @@ class MySQLDestination(BaseSqlDestination):
             kwargs_individual["ssl"] = ssl_dict
 
         return pymysql.connect(**kwargs_individual)
+
+    def supports_keyed_upsert(self, config: DestinationConfig) -> bool:
+        assert isinstance(config, MySQLDestinationConfig)
+        return True
+
+    def verify_keyed_upsert(self, config: DestinationConfig) -> str | None:
+        """Prove ON DUPLICATE KEY targets the configured key columns."""
+        assert isinstance(config, MySQLDestinationConfig)
+        schema, table = config.table.split(".", 1) if "." in config.table else (None, config.table)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT index_name, column_name
+                FROM information_schema.statistics
+                WHERE table_schema = COALESCE(%s, DATABASE())
+                  AND table_name = %s
+                  AND non_unique = 0
+                  AND sub_part IS NULL
+                ORDER BY index_name, seq_in_index
+                """,
+                (schema, table),
+            )
+            indexes: dict[str, list[str]] = {}
+            for index_name, column_name in cur.fetchall():
+                indexes.setdefault(str(index_name), []).append(str(column_name))
+        finally:
+            conn.close()
+        if any(columns == config.upsert_key for columns in indexes.values()):
+            return None
+        return (
+            f"MySQL table {config.table!r} needs a UNIQUE or PRIMARY KEY constraint "
+            f"on exactly ({', '.join(config.upsert_key)}) before canary apply."
+        )

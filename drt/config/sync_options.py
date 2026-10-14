@@ -6,7 +6,9 @@ the three ``destinations_*`` modules and consumed by :class:`SyncConfig`.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
+from decimal import Decimal
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
@@ -17,6 +19,7 @@ from pydantic import (
     PrivateAttr,
     SerializeAsAny,
     Tag,
+    field_validator,
     model_validator,
 )
 
@@ -330,6 +333,52 @@ class MetadataColumnsConfig(BaseModel):
         return self
 
 
+class RolloutConfig(BaseModel):
+    """Apply-only canary rollout policy (#1255).
+
+    ``drt run`` deliberately ignores this block.  Percentages are cumulative;
+    the final 100% wave is supplied automatically when omitted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    waves: list[float]
+    max_error_pct: float = Field(default=2.0, ge=0, le=100, allow_inf_nan=False, strict=True)
+    soak: str | None = None
+    max_spool_rows: int = Field(default=1_000_000, gt=0, strict=True)
+    max_spool_bytes: int = Field(default=1_073_741_824, gt=0, strict=True)
+
+    @field_validator("waves", mode="before")
+    @classmethod
+    def _validate_waves(cls, value: Any) -> list[float]:
+        if not isinstance(value, list) or any(
+            isinstance(wave, bool) or not isinstance(wave, int | float) for wave in value
+        ):
+            raise ValueError("rollout.waves must be a list of numbers (not booleans or strings).")
+        if not value:
+            raise ValueError("rollout.waves must contain at least one cumulative percentage.")
+        waves = [Decimal(str(wave)) for wave in value]
+        if any(not wave.is_finite() or not 0 < wave <= 100 for wave in waves):
+            raise ValueError("rollout.waves entries must be greater than 0 and at most 100.")
+        if any((Decimal(str(wave)) * 100) % 1 for wave in waves):
+            raise ValueError(
+                "rollout.waves entries must be multiples of 0.01 (the bucket resolution)."
+            )
+        if any(left >= right for left, right in zip(waves, waves[1:], strict=False)):
+            raise ValueError("rollout.waves must be strictly increasing without duplicates.")
+        if waves[-1] != 100:
+            waves.append(Decimal(100))
+        return [float(wave) for wave in waves]
+
+    @field_validator("soak")
+    @classmethod
+    def _validate_soak(cls, value: str | None) -> str | None:
+        if value is not None:
+            if not re.fullmatch(r"[1-9]\d*[smhd]", value.strip()):
+                parse_duration(value, field_name="sync.rollout.soak")
+        return value
+
+
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
@@ -408,6 +457,8 @@ class SyncOptions(BaseModel):
     # Mirror-mode delete behaviour (#686). None = destination strategy (#340).
     mirror: MirrorConfig | None = None
     guards: GuardsConfig | None = None
+    # Apply-only progressive rollout (#1255). Plain ``drt run`` ignores it.
+    rollout: RolloutConfig | None = None
     # Per-record dedup key for the warehouse-backed idempotency ledger
     # (#1099), Jinja template read against the record as it reaches the
     # destination (after field_mappings/mask, same seam as metadata_columns
@@ -942,6 +993,94 @@ class SyncConfig(BaseModel):
     # queries the real destination after a sync has run.
     unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_canary_rollout_safety(self) -> SyncConfig:
+        if self.sync.rollout is None:
+            return self
+        if self.sync.mode not in {"full", "upsert"}:
+            raise ValueError(
+                "sync.rollout supports only non-incremental mode: full or upsert; "
+                "incremental, mirror, and replace have unsafe per-wave state/finalization."
+            )
+        if self.sync.incremental_strategy == "diff":
+            raise ValueError(
+                "sync.rollout does not support incremental_strategy: diff because waves "
+                "would mutate the snapshot baseline."
+            )
+        destination_type = destination_type_of(self.destination)
+        if destination_type in {"staged_upload", "salesforce_bulk"}:
+            raise ValueError(
+                "sync.rollout supports only non-staged per-row destinations; "
+                f"destination type {destination_type!r} is staged."
+            )
+        upsert_key = getattr(self.destination, "upsert_key", None)
+        if not upsert_key:
+            raise ValueError(
+                "sync.rollout requires destination.upsert_key so wave membership is stable "
+                "and a new plan after a halt can identify remaining rows."
+            )
+        metadata_targets = (
+            set(self.sync.metadata_columns.model_dump(exclude_none=True).values())
+            if self.sync.metadata_columns is not None
+            else set()
+        )
+        metadata_keys = set(upsert_key) & metadata_targets
+        if metadata_keys:
+            raise ValueError(
+                "sync.rollout cannot use an upsert_key produced by sync.metadata_columns: "
+                f"{sorted(metadata_keys)}. Choose stable source/computed key columns."
+            )
+        if self.sync.match_policy != "upsert":
+            raise ValueError(
+                "sync.rollout requires sync.match_policy: upsert; update_only/create_only "
+                "cannot guarantee that a new plan lists only what remains."
+            )
+        masked_keys = []
+        for key in upsert_key:
+            rule = (self.sync.mask or {}).get(key)
+            strategy = rule if isinstance(rule, str) else getattr(rule, "strategy", None)
+            if strategy not in {None, "hash"}:
+                masked_keys.append(key)
+        if masked_keys:
+            raise ValueError(
+                "sync.rollout requires injective key handling; upsert_key columns cannot use "
+                f"redact/truncate masking: {sorted(masked_keys)}. Use hash or no key mask."
+            )
+        from drt.connectors.registry import destination_implementation_class
+
+        destination_class = (
+            destination_implementation_class(destination_type)
+            if destination_type is not None
+            else None
+        )
+        keyed_upsert = destination_class is not None and callable(
+            getattr(destination_class, "supports_keyed_upsert", None)
+        )
+        if not keyed_upsert:
+            mode_hint = (
+                " Set destination.mode: merge."
+                if destination_type in {"snowflake", "databricks", "bigquery"}
+                else (
+                    " Use PostgreSQL/MySQL or a merge-mode "
+                    "Snowflake/Databricks/BigQuery destination."
+                )
+            )
+            raise ValueError(
+                f"sync.rollout requires a keyed-upsert destination; {destination_type!r} does "
+                f"not provably overwrite the same upsert_key row.{mode_hint}"
+            )
+        lookup_outputs = {
+            (self.sync.field_mappings or {}).get(name, name)
+            for name in (getattr(self.destination, "lookups", None) or {})
+        }
+        unstable_keys = set(upsert_key) & lookup_outputs
+        if unstable_keys:
+            raise ValueError(
+                "sync.rollout cannot use an upsert_key produced by a destination lookup: "
+                f"{sorted(unstable_keys)}. Choose source/computed key columns."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_write_policy_destination_mode(self) -> SyncConfig:

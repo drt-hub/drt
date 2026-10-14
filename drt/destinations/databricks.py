@@ -1433,3 +1433,7 @@ class DatabricksDestination(BaseSqlDestination):
             connect_args["query_tags"] = query_tags
 
         return sql.connect(**connect_args)
+
+    def supports_keyed_upsert(self, config: DestinationConfig) -> bool:
+        assert isinstance(config, DatabricksDestinationConfig)
+        return config.mode == "merge"

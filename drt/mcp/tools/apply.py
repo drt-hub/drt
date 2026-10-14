@@ -29,6 +29,8 @@ def apply(
     cursor_value: str | None = None,
     profile_name: str | None = None,
     vars: dict[str, Any] | None = None,
+    canary: list[float] | None = None,
+    canary_max_error_pct: float | None = None,
 ) -> dict[str, Any]:
     from drt.cli._apply_flow import PLAN_ID_PATTERN, ApplyRefused, apply_plan, parse_duration
     from drt.cli._plan_runner import load_plan_key
@@ -74,6 +76,8 @@ def apply(
             json_output=True,
             notify=notes.append,
             expect_plan_id=plan_id,
+            canary_waves=canary,
+            canary_max_error_pct=canary_max_error_pct,
         )
     except ApplyRefused as e:
         plan_key = load_plan_key(ctx.project_dir)
@@ -94,6 +98,8 @@ def apply(
         "sync": outcome.sync,
         "approved_by": who,
         "failed": outcome.had_error,
+        "halted": outcome.halted,
+        "canary": outcome.canary,
         "result": _result(outcome.entry, load_plan_key(ctx.project_dir)),
         "guards_forced": [t["guard"] for t in outcome.guards_forced],
         "notes": [message(n, load_plan_key(ctx.project_dir), 400) for n in notes],

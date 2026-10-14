@@ -35,6 +35,7 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -154,6 +155,10 @@ class _RunContext:
     # Where the project lives. ``drt run`` is always invoked from it; the MCP
     # server may not be, so ``drt apply`` passes it explicitly.
     project_dir: Path = Path(".")
+    # Apply-only canary selection. The default preserves the ordinary run call shape.
+    row_filter: Callable[[dict[str, Any]], bool] | None = None
+    record_sink: Callable[[dict[str, Any]], Any] | None = None
+    replay_records: Iterable[dict[str, Any]] | None = None
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -227,6 +232,14 @@ def _run_one(
             if ctx.log_json:
                 logging.info("sync_started", extra={"sync": sync.name})
 
+            apply_controls: dict[str, Any] = {}
+            if ctx.row_filter is not None:
+                apply_controls["row_filter"] = ctx.row_filter
+            if ctx.record_sink is not None:
+                apply_controls["record_sink"] = ctx.record_sink
+            if ctx.replay_records is not None:
+                apply_controls["replay_records"] = ctx.replay_records
+
             result = run_sync(
                 sync,
                 ctx.source,
@@ -253,6 +266,7 @@ def _run_one(
                 audit_trail=ctx.audit_trail,
                 audit_fields=ctx.audit_fields,
                 audit_retain_days=ctx.audit_retain_days,
+                **apply_controls,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -326,6 +340,10 @@ def _run_one(
         # emitted when present so healthy runs keep a lean entry.
         if result.skipped_no_match:
             entry["rows_skipped_no_match"] = result.skipped_no_match
+        if ctx.row_filter is not None:
+            # Internal canary health input. The apply flow removes this before
+            # exposing/persisting the wave result, so ordinary run output is unchanged.
+            entry["_row_error_count"] = len(result.row_errors)
         if getattr(result, "kept_values", 0):
             entry["kept_values"] = result.kept_values
         if result.watermark_source:

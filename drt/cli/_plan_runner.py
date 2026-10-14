@@ -131,6 +131,7 @@ def compute_plan(
     profile_name: str | None = None,
     project_dir: Path = Path("."),
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
+    record_sink: Callable[[dict[str, Any]], Any] | None = None,
 ) -> PlanContext:
     """Plan one sync, read-only. Raises :class:`PlanCliError` when it cannot run at all.
 
@@ -196,6 +197,7 @@ def compute_plan(
             diff_limit=sys.maxsize,
             vars=project_vars,
             query_tagging=project.query_tagging,
+            record_sink=record_sink,
         )
     except Exception as e:
         raise PlanCliError(f"Could not compute a plan for '{sync_name}': {e}") from e

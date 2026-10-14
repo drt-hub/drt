@@ -95,6 +95,31 @@ def test_run_one_success_emits_status_success(
     assert call["sync_mode"] == "full"
 
 
+def test_run_one_forwards_record_sink_for_internal_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+) -> None:
+    def sink(_record: dict[str, Any]) -> None:
+        return None
+
+    seen: dict[str, Any] = {}
+
+    def fake_run_sync(*_args: Any, **kwargs: Any) -> SyncResult:
+        seen.update(kwargs)
+        return SyncResult(rows_extracted=1, success=1)
+
+    ctx = _fake_ctx()
+    ctx.record_sink = sink
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.commands.run.get_destination", lambda _sync: MagicMock())
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _sync, _dir: None)
+
+    _run_one(_fake_sync(), ctx, _fake_profile())
+
+    assert seen["record_sink"] is sink
+    assert len(captured_calls) == 1
+
+
 def test_run_one_failed_emits_status_failed(
     monkeypatch: pytest.MonkeyPatch,
     captured_calls: list[dict[str, Any]],

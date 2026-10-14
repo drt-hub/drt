@@ -952,3 +952,7 @@ class BigQueryDestination:
             )
 
         return bigquery.Client(project=config.project, location=config.location)
+
+    def supports_keyed_upsert(self, config: DestinationConfig) -> bool:
+        assert isinstance(config, BigQueryDestinationConfig)
+        return config.mode == "merge"

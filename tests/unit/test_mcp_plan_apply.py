@@ -42,6 +42,7 @@ class _World:
         self.baseline: int | None = None
         self.calls: list[dict[str, Any]] = []
         self.unsupported = False
+        self.fail_writes = False
 
     def diff(self) -> DiffResult:
         if self.unsupported:
@@ -54,6 +55,14 @@ class _World:
             total_source_rows=len(self.added),
             total_destination_rows=0,
         )
+
+
+class _FakeDestination:
+    def supports_keyed_upsert(self, config: Any) -> bool:
+        return True
+
+    def verify_keyed_upsert(self, config: Any) -> None:
+        return None
 
 
 class _Result:
@@ -70,11 +79,11 @@ class _Result:
     interrupted = False
     run_id: str | None = None
     sync_run_id: str | None = "s"
-    failed = 0
     cursor_value_used: str | None = None
 
-    def __init__(self, world: _World) -> None:
+    def __init__(self, world: _World, dry_run: bool) -> None:
         self.diff = world.diff()
+        self.failed = 1 if world.fail_writes and not dry_run else 0
 
 
 @pytest.fixture
@@ -103,7 +112,21 @@ def project_dir(
 
     def fake_run_sync(*args: Any, **kwargs: Any) -> _Result:
         world.calls.append({"dry_run": args[5], "project_dir": args[4], **kwargs})
-        return _Result(world)
+        predicate = kwargs.get("row_filter")
+        replay_records = kwargs.get("replay_records")
+        selected = list(replay_records) if replay_records is not None else list(world.added)
+        if predicate is not None:
+            selected = [row for row in selected if predicate(row)]
+        sink = kwargs.get("record_sink")
+        if sink is not None:
+            for row in selected:
+                sink(row)
+        result = _Result(world, bool(args[5]))
+        if predicate is not None:
+            result.rows_extracted = len(selected)
+            result.success = len(selected)
+            result.failed = int(bool(world.fail_writes and not args[5] and selected))
+        return result
 
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync)
     monkeypatch.setattr(
@@ -111,8 +134,11 @@ def project_dir(
     )
     for module in (plan_runner, run_cmd):
         monkeypatch.setattr(module, "get_source", lambda *_a, **_k: object(), raising=False)
-        monkeypatch.setattr(module, "get_destination", lambda *_a, **_k: object(), raising=False)
+        monkeypatch.setattr(
+            module, "get_destination", lambda *_a, **_k: _FakeDestination(), raising=False
+        )
     monkeypatch.setattr(_helpers, "get_source", lambda *_a, **_k: object())
+    monkeypatch.setattr(_helpers, "get_destination", lambda *_a, **_k: _FakeDestination())
     return project
 
 
@@ -133,6 +159,9 @@ async def test_tools_are_registered_with_a_mandatory_approver(project_dir: Path)
     assert {"drt_plan", "drt_apply"} <= set(tools)
     required = tools["drt_apply"].parameters["required"]
     assert set(required) == {"plan_id", "approved_by"}
+    properties = tools["drt_apply"].parameters["properties"]
+    assert {"canary", "canary_max_error_pct"} <= set(properties)
+    assert "resume" not in properties
     assert tools["drt_plan"].parameters["required"] == ["sync_name"]
 
 
@@ -162,6 +191,74 @@ async def test_plan_then_apply_end_to_end(project_dir: Path, world: _World) -> N
     results = json.loads((project_dir / "target" / "drt" / "run_results.json").read_text())
     assert results["results"][0]["approved_by"] == "masukai (reviewed in PR 12)"
     assert not (Path.cwd() / ".drt").exists()  # nothing leaked into the working directory
+
+
+@pytest.mark.asyncio
+async def test_mcp_apply_returns_canary_waves_as_data(project_dir: Path) -> None:
+    server = create_server(project_dir)
+    planned = await call(server, "drt_plan", sync_name="orders_to_pg")
+
+    applied = await call(
+        server,
+        "drt_apply",
+        plan_id=planned["plan_id"],
+        approved_by="reviewer",
+        canary=[1, 10],
+        canary_max_error_pct=2,
+    )
+
+    assert applied["applied"] is True
+    assert applied["halted"] is False
+    assert applied["canary"]["waves"] == [1.0, 10.0, 100.0]
+    assert len(applied["canary"]["results"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_mcp_canary_halt_is_structured_and_terminal(project_dir: Path, world: _World) -> None:
+    server = create_server(project_dir)
+    planned = await call(server, "drt_plan", sync_name="orders_to_pg")
+    world.fail_writes = True
+
+    halted = await call(
+        server,
+        "drt_apply",
+        plan_id=planned["plan_id"],
+        approved_by="reviewer",
+        canary=[1, 10],
+        canary_max_error_pct=100,
+    )
+
+    assert halted["applied"] is True
+    assert halted["halted"] is True
+    assert halted["failed"] is True
+    assert halted["canary"]["status"] == "halted"
+    assert "run `drt plan` again" in halted["notes"][-1]
+
+
+@pytest.mark.asyncio
+async def test_mcp_snapshot_failure_never_returns_raw_exception_text(
+    project_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _plan_runner
+
+    server = create_server(project_dir)
+    planned = await call(server, "drt_plan", sync_name="orders_to_pg")
+
+    def fail_snapshot(*_args: Any, **_kwargs: Any) -> None:
+        raise _plan_runner.PlanCliError("customer-secret-value")
+
+    monkeypatch.setattr(_plan_runner, "compute_plan", fail_snapshot)
+    refused = await call(
+        server,
+        "drt_apply",
+        plan_id=planned["plan_id"],
+        approved_by="reviewer",
+        canary=[100],
+    )
+
+    assert refused["applied"] is False
+    assert "snapshot stage (PlanCliError)" in refused["error"]
+    assert "customer-secret-value" not in json.dumps(refused)
 
 
 @pytest.mark.asyncio

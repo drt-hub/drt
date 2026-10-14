@@ -3853,6 +3853,55 @@
       "title": "RetryConfig",
       "type": "object"
     },
+    "RolloutConfig": {
+      "additionalProperties": false,
+      "description": "Apply-only canary rollout policy (#1255).\n\n``drt run`` deliberately ignores this block.  Percentages are cumulative;\nthe final 100% wave is supplied automatically when omitted.",
+      "properties": {
+        "waves": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Waves",
+          "type": "array"
+        },
+        "max_error_pct": {
+          "default": 2.0,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Max Error Pct",
+          "type": "number"
+        },
+        "soak": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Soak"
+        },
+        "max_spool_rows": {
+          "default": 1000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Spool Rows",
+          "type": "integer"
+        },
+        "max_spool_bytes": {
+          "default": 1073741824,
+          "exclusiveMinimum": 0,
+          "title": "Max Spool Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "waves"
+      ],
+      "title": "RolloutConfig",
+      "type": "object"
+    },
     "RowCountTest": {
       "properties": {
         "min": {
@@ -5015,6 +5064,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/GuardsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rollout": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutConfig"
             },
             {
               "type": "null"

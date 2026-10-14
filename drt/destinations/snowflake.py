@@ -848,3 +848,7 @@ class SnowflakeDestination(BaseSqlDestination):
             schema=config.schema_,
             **auth,
         )
+
+    def supports_keyed_upsert(self, config: DestinationConfig) -> bool:
+        assert isinstance(config, SnowflakeDestinationConfig)
+        return config.mode == "merge"

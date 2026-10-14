@@ -207,6 +207,7 @@ drt build                   # run each sync and its tests in one pass
 drt validate                # validate sync YAML configs
 drt plan <sync> --out plan.json   # save a reviewable change set (read-only)
 drt apply plan.json         # apply it only if the world still matches
+drt apply plan.json --canary 1,10,100  # progressive upsert waves; halt means re-plan
 drt deploy github-actions --with-plan   # PR comment with the plan; apply on merge
 drt status                  # show recent sync status
 drt status --output json    # JSON output for status

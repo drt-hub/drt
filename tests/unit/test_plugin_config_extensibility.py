@@ -605,6 +605,27 @@ def test_plugin_config_class_enforces_its_own_required_fields(clean_registry) ->
         _sync({"type": PLUGIN_DESTINATION})
 
 
+def test_plugin_keyed_upsert_capability_allows_rollout_config(clean_registry) -> None:
+    class AcmeConfig(GenericDestinationConfig):
+        upsert_key: list[str]
+
+    class AcmeKeyedDestination(_PluginDestination):
+        def supports_keyed_upsert(self, config: Any) -> bool:
+            return True
+
+    clean_registry.register_destination(PLUGIN_DESTINATION, AcmeConfig, AcmeKeyedDestination)
+    sync = SyncConfig.model_validate(
+        {
+            "name": "plugin-canary",
+            "model": "select 1",
+            "destination": {"type": PLUGIN_DESTINATION, "upsert_key": ["id"]},
+            "sync": {"mode": "upsert", "rollout": {"waves": [10]}},
+        }
+    )
+
+    assert sync.sync.rollout is not None
+
+
 def test_distinct_plugin_destinations_stay_distinct_in_docs(clean_registry) -> None:
     """drt/docs/builder.py keys nodes on f"{type}|{describe()}".
 

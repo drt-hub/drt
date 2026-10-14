@@ -222,6 +222,8 @@ def create_server(project_dir: Path | None = None) -> Any:
         cursor_value: str | None = None,
         profile_name: str | None = None,
         vars: dict[str, Any] | None = None,
+        canary: list[float] | None = None,
+        canary_max_error_pct: float | None = None,
     ) -> dict[str, Any]:
         """Apply a plan from ``drt_plan``, only if the world still matches.
 
@@ -246,6 +248,8 @@ def create_server(project_dir: Path | None = None) -> Any:
             cursor_value: The cursor override the plan was made with, if any.
             profile_name: Override the profile (mirrors ``drt apply --profile``).
             vars: Override project vars, already parsed (mirrors ``--vars``).
+            canary: Cumulative rollout percentages; 100 is appended when absent.
+            canary_max_error_pct: Halt above this per-wave failed-row percentage.
 
         Returns:
             ``applied`` plus, when written, ``run_id`` and a ``result``; when
@@ -261,6 +265,8 @@ def create_server(project_dir: Path | None = None) -> Any:
             cursor_value=cursor_value,
             profile_name=profile_name,
             vars=vars,
+            canary=canary,
+            canary_max_error_pct=canary_max_error_pct,
         )
 
     # -----------------------------------------------------------------------

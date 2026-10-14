@@ -16,19 +16,30 @@ applies across machines needs a shared claim store (not built yet).
 from __future__ import annotations
 
 import json
-import logging
 import math
-import os
 import re
-import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from drt import __version__
+from drt.cli._apply_claims import (
+    claim as _claim,
+)
+from drt.cli._apply_claims import (
+    claim_path as _claim_path,
+)
+from drt.cli._apply_claims import (
+    finish_claim as _finish_claim,
+)
+from drt.cli._apply_claims import (
+    read_claim as _read_claim,
+)
+from drt.engine.canary import compatibility_problem
 
 _DURATION = re.compile(r"^(\d+)([smhd])$")
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -57,6 +68,9 @@ class ApplyOutcome:
     had_error: bool = False
     guards_forced: list[dict[str, Any]] = field(default_factory=list)
     drifted: int = 0
+    run_ids: list[str] = field(default_factory=list)
+    canary: dict[str, Any] | None = None
+    halted: bool = False
 
 
 def parse_duration(text: str) -> timedelta:
@@ -64,6 +78,14 @@ def parse_duration(text: str) -> timedelta:
     if not match:
         raise ValueError("use a number and a unit: 30m, 24h, 7d")
     return timedelta(seconds=int(match.group(1)) * _UNITS[match.group(2)])
+
+
+def _validate_canary_compatibility(sync: Any, destination: Any) -> list[str]:
+    """Compatibility wrapper retained for library callers."""
+    upsert_key, problem = compatibility_problem(sync, destination)
+    if problem is not None or upsert_key is None:
+        raise ApplyRefused(problem or "Canary apply is incompatible with this sync.")
+    return upsert_key
 
 
 def describe_drift(report: dict[str, Any]) -> str:
@@ -86,22 +108,6 @@ def describe_drift(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def claims_dir(project_dir: Path) -> Path:
-    return project_dir / ".drt" / "applied_plans"
-
-
-def _claim_path(project_dir: Path, plan_id: str) -> Path:
-    return claims_dir(project_dir) / f"{plan_id}.json"
-
-
-def _read_claim(project_dir: Path, plan_id: str) -> dict[str, Any] | None:
-    try:
-        text = _claim_path(project_dir, plan_id).read_text(encoding="utf-8")
-        return json.loads(text)  # type: ignore[no-any-return]
-    except (OSError, ValueError):
-        return None
-
-
 def _refuse_if_claimed(project_dir: Path, plan_id: str) -> None:
     from drt.cli._plan_runner import PlanCliError
 
@@ -112,7 +118,7 @@ def _refuse_if_claimed(project_dir: Path, plan_id: str) -> None:
     when = (claim or {}).get("claimed_at", "?")
     if state == "success":
         message = f"Plan {plan_id} was already applied ({when})."
-    elif state == "pending":
+    elif state in {"pending", "running"}:
         message = (
             f"Plan {plan_id} is being applied, or an earlier apply stopped part-way "
             f"(claimed {when}). Check the destination before doing anything else; "
@@ -123,65 +129,11 @@ def _refuse_if_claimed(project_dir: Path, plan_id: str) -> None:
     raise PlanCliError(f"{message} A plan is single-use; run `drt plan` again.")
 
 
-def _claim(
-    project_dir: Path,
-    plan_id: str,
-    sync_name: str,
-    run_id: str,
-    forced: list[str] | None = None,
-    approved_by: str | None = None,
-) -> None:
-    """Atomically take the plan. Raises ``FileExistsError`` if someone already did."""
-    claims_dir(project_dir).mkdir(parents=True, exist_ok=True)
-    fd = os.open(_claim_path(project_dir, plan_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "plan_id": plan_id,
-                "sync": sync_name,
-                "run_id": run_id,
-                "state": "pending",
-                "claimed_at": datetime.now(timezone.utc).isoformat(),
-                **({"guards_forced": forced} if forced else {}),
-                **({"approved_by": approved_by} if approved_by else {}),
-            },
-            handle,
-        )
-
-
-def _finish_claim(project_dir: Path, plan_id: str, state: str) -> None:
-    """Record the outcome. Never raises: by now the destination may already have
-    been written, and a bookkeeping failure must not hide that (or an earlier error)."""
-    log = logging.getLogger(__name__)
-    try:
-        claim = _read_claim(project_dir, plan_id) or {"plan_id": plan_id}
-        claim.update(state=state, finished_at=datetime.now(timezone.utc).isoformat())
-        # Private, exclusive temp file in the same directory (mkstemp is 0600 and
-        # does not follow a pre-existing symlink), then an atomic rename.
-        fd, tmp_name = tempfile.mkstemp(
-            dir=claims_dir(project_dir), prefix=f".{plan_id}.", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(claim, handle)
-            os.replace(tmp_name, _claim_path(project_dir, plan_id))
-        except BaseException:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
-    except Exception as e:  # noqa: BLE001 - see docstring
-        log.warning(
-            "Could not record the outcome of plan %s (%s); %s still says 'pending'.",
-            plan_id,
-            e,
-            _claim_path(project_dir, plan_id),
-        )
-
-
 def preflight_document(
-    plan_text: str, *, project_dir: Path = Path("."), max_age: timedelta = timedelta(hours=24)
+    plan_text: str,
+    *,
+    project_dir: Path = Path("."),
+    max_age: timedelta = timedelta(hours=24),
 ) -> dict[str, Any]:
     """Every check on a plan that needs no source or destination access.
 
@@ -300,7 +252,7 @@ def load_plan_directory(
     return plans
 
 
-def apply_plan(
+def _apply_plan_once(
     plan_text: str,
     *,
     project_dir: Path = Path("."),
@@ -500,4 +452,77 @@ def apply_plan(
         had_error=had_error,
         guards_forced=tripped,
         drifted=drifted,
+    )
+
+
+def apply_plan(
+    plan_text: str,
+    *,
+    project_dir: Path = Path("."),
+    approved: bool = False,
+    approved_by: str | None = None,
+    confirm: Callable[[str], bool] | None = None,
+    max_age: timedelta = timedelta(hours=24),
+    allow_drift_pct: float = 0.0,
+    force_guards: bool = False,
+    cursor_value: str | None = None,
+    cli_vars: dict[str, Any] | None = None,
+    profile_name: str | None = None,
+    json_output: bool = False,
+    notify: Callable[[str], None] | None = None,
+    expect_plan_id: str | None = None,
+    canary_waves: Sequence[Decimal | float | int] | None = None,
+    canary_max_error_pct: float | None = None,
+    canary_soak: timedelta | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> ApplyOutcome:
+    """Apply once, or progressively when CLI/config selects a canary rollout."""
+    from drt.cli._canary import rollout_from_config
+
+    rollout = rollout_from_config(plan_text, project_dir, cli_vars)
+    if (
+        canary_waves is None
+        and rollout is None
+        and (canary_max_error_pct is not None or canary_soak is not None)
+    ):
+        raise ApplyRefused("--canary-max-error-pct/--canary-soak require --canary or sync.rollout.")
+    if canary_waves is None and rollout is None:
+        return _apply_plan_once(
+            plan_text,
+            project_dir=project_dir,
+            approved=approved,
+            approved_by=approved_by,
+            confirm=confirm,
+            max_age=max_age,
+            allow_drift_pct=allow_drift_pct,
+            force_guards=force_guards,
+            cursor_value=cursor_value,
+            cli_vars=cli_vars,
+            profile_name=profile_name,
+            json_output=json_output,
+            notify=notify,
+            expect_plan_id=expect_plan_id,
+        )
+    from drt.cli._canary import apply_plan_canary
+
+    return apply_plan_canary(
+        plan_text,
+        project_dir=project_dir,
+        approved=approved,
+        approved_by=approved_by,
+        confirm=confirm,
+        max_age=max_age,
+        allow_drift_pct=allow_drift_pct,
+        force_guards=force_guards,
+        cursor_value=cursor_value,
+        cli_vars=cli_vars,
+        profile_name=profile_name,
+        json_output=json_output,
+        notify=notify,
+        expect_plan_id=expect_plan_id,
+        canary_waves=canary_waves,
+        canary_max_error_pct=canary_max_error_pct,
+        canary_soak=canary_soak,
+        sleep=sleep,
+        configured_rollout=rollout,
     )
