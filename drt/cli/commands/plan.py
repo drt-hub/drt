@@ -20,6 +20,23 @@ if TYPE_CHECKING:
     from drt.engine.plan import Plan
 
 
+# Lines whose value is an identifier or a hash. Rich's automatic highlighter would colour
+# a fragment of them (e.g. part of a ``sha256:`` digest), which reads as noise and can
+# mislead; everything else keeps the highlighter (numbers stand out in the summary).
+_IDENTIFIER_LINE_PREFIXES = ("  plan_id:", "  digest:")
+
+
+def _print_plan_text(text: str) -> None:
+    """Print a text plan; no auto-highlighting on the plan id / digest lines."""
+    for line in text.splitlines(keepends=True):
+        console.print(
+            line,
+            end="",
+            markup=False,
+            highlight=not line.startswith(_IDENTIFIER_LINE_PREFIXES),
+        )
+
+
 @app.command()
 def plan(
     sync_name: str = typer.Argument(None, help="Name of the sync to plan (or use --all)."),
@@ -106,7 +123,7 @@ def plan(
         if output == "markdown":
             print(render_markdown(plan_obj), end="")
         else:
-            console.print(render_text(plan_obj), end="", markup=False)
+            _print_plan_text(render_text(plan_obj))
         raise typer.Exit(1)
 
     if out is not None:
@@ -117,7 +134,7 @@ def plan(
     elif output == "markdown":
         print(render_markdown(plan_obj), end="")
     else:
-        console.print(render_text(plan_obj), end="", markup=False)
+        _print_plan_text(render_text(plan_obj))
         if out is not None:
             console.print(f"  Wrote {out}", markup=False)
 
@@ -266,7 +283,7 @@ def _plan_all(
     else:
         for name, planned, _status, reason in results:
             if planned is not None:
-                console.print(render_text(planned), end="", markup=False)
+                _print_plan_text(render_text(planned))
             else:
                 console.print(
                     f"Plan for sync '{name}'\n  Plan unavailable: {reason}\n", markup=False

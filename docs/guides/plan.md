@@ -16,6 +16,11 @@ drt plan orders_to_pg --out plan.json --output markdown     # markdown on stdout
 never persists run state. Applying a plan is a separate step, `drt apply`
 (see below).
 
+**Try it locally:** the [review-before-you-write demo](../../examples/review-demo/)
+uses DuckDB plus one Postgres 16 container to show a safe fill-only CRM change,
+a 1,487-row mirror deletion caught by a guard, and an approved apply. It needs
+no cloud account or cloud credential.
+
 ## What is in `plan.json`
 
 | Field | Meaning |

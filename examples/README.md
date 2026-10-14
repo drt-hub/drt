@@ -4,6 +4,7 @@ Ready-to-run drt configurations. Each directory is a self-contained project.
 
 | Example | Source | Destination | Notes |
 |---|---|---|---|
+| [review-demo](./review-demo/) | DuckDB | PostgreSQL | **Plan/apply showcase** — local CRM, guards, no cloud credentials |
 | [quickstart](./quickstart/) | DuckDB | httpbin.org/post | **Start here** — zero external credentials |
 | [duckdb_to_slack](./duckdb_to_slack/) | DuckDB | Slack | Requires `SLACK_WEBHOOK_URL` |
 | [notify_slack](./notify_slack/) | DuckDB | Slack | Alert-style notification pattern |

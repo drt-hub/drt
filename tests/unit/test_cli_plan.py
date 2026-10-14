@@ -338,3 +338,29 @@ def test_markdown_honours_redact_keys(project: Path, monkeypatch: pytest.MonkeyP
 
     assert "sha256:" in result.output
     assert "id=1" not in result.output
+
+
+def test_plan_text_does_not_highlight_the_plan_id_or_digest_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fragment of the digest (e.g. 'a256:f777') must not be coloured on its own."""
+    import io
+
+    from rich.console import Console
+
+    from drt.cli.commands import plan as plan_command
+
+    stream = io.StringIO()
+    forced = Console(file=stream, force_terminal=True, color_system="truecolor", width=200)
+    monkeypatch.setattr(plan_command, "console", forced)
+
+    plan_command._print_plan_text(
+        "Plan for sync 'x' -> postgres (t)\n"
+        "  450 to update\n"
+        "  plan_id: plan-d8cc67abba2d345b\n"
+        "  digest:  sha256:f7773e25977523165da61d252e7a5a606f703e8bfbb34f8ef25b231b9ddacb26\n"
+    )
+    lines = stream.getvalue().splitlines()
+
+    assert "\x1b[" in lines[1], "numbers in the summary keep their highlight"
+    assert all("\x1b[" not in line for line in lines[2:4]), lines[2:4]

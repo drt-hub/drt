@@ -1,0 +1,29 @@
+name: fill_industry
+description: |
+  Fill CRM industry only when a company already has NULL, empty, or spaces-only
+  text. Never replace a value a rep entered, never delete, and refuse a reviewed
+  apply if it would create a company.
+
+model: |
+  SELECT company_id, inferred_industry AS industry
+  FROM enriched_companies
+
+destination:
+  type: postgres
+  connection_string_env: REVIEW_DEMO_PG_DSN
+  table: companies
+  upsert_key: [company_id]
+
+sync:
+  mode: upsert
+  # The intended policy is update_only, but drt plan currently refuses every
+  # non-default match_policy before reading data. max_creates: 0 gives this
+  # plan/apply demo the same fail-closed review gate without changing drt/.
+  # Replace this with `match_policy: update_only` when plan supports it.
+  match_policy: upsert
+  write_policy: fill_empty
+  batch_size: 500
+  on_error: fail
+  guards:
+    max_creates: 0
+    max_deletes: 0

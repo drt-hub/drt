@@ -1,0 +1,28 @@
+name: dangerous_mirror
+description: |
+  Deliberate mistake for the demo: mirror a 25-company sample into the whole CRM
+  table. The plan exposes the mass delete and max_delete_pct prevents apply.
+
+model: |
+  SELECT company_id, inferred_industry AS industry
+  FROM enriched_companies
+  WHERE company_id <= 25
+
+destination:
+  type: postgres
+  connection_string_env: REVIEW_DEMO_PG_DSN
+  table: companies
+  upsert_key: [company_id]
+
+sync:
+  # This is intentionally unsafe against a rep-owned table. It exists only to
+  # make the review guard catch a plausible "mirror the warehouse" mistake.
+  mode: mirror
+  mirror:
+    strategy: destination
+  write_policy: fill_empty
+  batch_size: 500
+  on_error: fail
+  guards:
+    max_creates: 0
+    max_delete_pct: 5
