@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from drt.config.sync_options import GuardsConfig, SyncOptions
 from drt.engine.diff import DiffResult
-from drt.engine.guards import evaluate_guards
+from drt.engine.guards import GuardTripped, enforce_delete_guards, evaluate_guards
 from drt.engine.plan import build_plan, render_markdown, render_text
 
 _COUNTS: dict[str, Any] = {
@@ -137,3 +137,35 @@ def test_percentage_limits_are_compared_without_rounding() -> None:
     # Exactly at the limit is within it.
     assert _eval(GuardsConfig(max_delete_pct=25), deletes=1, delete_baseline=4) == []
     assert _eval(GuardsConfig(max_delete_pct=0), deletes=0) == []
+
+
+def test_runtime_enforcement_only_judges_delete_guards() -> None:
+    guards = GuardsConfig(
+        max_creates=0,
+        max_deletes=1,
+        max_delete_pct=50,
+        max_updates_pct=0,
+    )
+
+    assert enforce_delete_guards(guards, deletes=1, baseline=2, force=False) == []
+    with pytest.raises(GuardTripped) as raised:
+        enforce_delete_guards(guards, deletes=2, baseline=2, force=False)
+
+    assert [trip.guard for trip in raised.value.trips] == [
+        "max_deletes",
+        "max_delete_pct",
+    ]
+    assert "observed" not in str(raised.value)  # messages carry the concrete values instead
+    assert "2 rows (limit 1)" in str(raised.value)
+
+
+def test_runtime_force_returns_trips_and_diff_pct_fails_closed() -> None:
+    guards = GuardsConfig(max_delete_pct=10)
+
+    trips = enforce_delete_guards(guards, deletes=1, baseline=None, force=True)
+
+    assert len(trips) == 1
+    assert trips[0].guard == "max_delete_pct"
+    assert trips[0].observed is None
+    assert "cannot be evaluated" in trips[0].message
+    assert enforce_delete_guards(None, deletes=10, baseline=None, force=False) == []

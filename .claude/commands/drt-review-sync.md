@@ -45,6 +45,11 @@ Nothing was written. Read the reason and tell the human; do not retry blindly.
 ## Things to know
 
 - A plan is a **guard in front of a normal run**, not a transaction: apply recomputes the plan and refuses on any difference, then runs the sync, which writes every extracted row. The source can still change in the short window after verification.
+- PostgreSQL/MySQL re-check delete-side guards immediately before the run-time
+  DELETE/swap. A second "Change guards tripped" refusal means the source changed
+  after verification; nothing was deleted/swapped. Re-plan and show the human
+  the new result. Pass `force_guards` again only if that exact run-time trip is
+  explicitly accepted; the override is recorded.
 - Plans never contain row values; keys can be hashed with `redact_keys` (or `--redact-keys`).
 - Apply is not for backfills or one-off fixes you have not planned; use `drt run --dry-run --diff` for exploration.
 - Recommended client setup: allow `drt_plan` freely and put `drt_apply` behind an approval prompt.

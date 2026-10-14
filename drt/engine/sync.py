@@ -338,6 +338,7 @@ def run_sync(
     audit_trail: ComplianceAuditTrail | None = None,
     audit_fields: list[str] | None = None,
     audit_retain_days: int = 30,
+    force_guards: bool = False,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -401,6 +402,8 @@ def run_sync(
         audit_retain_days: Purge window for the audit log (#1100), from
             ``state.audit_trail.retain_days``. Ignored when ``audit_trail``
             is ``None``.
+        force_guards: Continue past tripped run-time delete guards and record
+            the override. False by default for existing callers.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -415,6 +418,8 @@ def run_sync(
     total_result.run_id = run_id
     total_result.sync_run_id = sync_run_id
     total_result.dry_run = dry_run
+    sync.sync._force_guards = force_guards
+    sync.sync._forced_guard_trips = []
     raised: BaseException | None = None
     tracer = get_tracer()
 
@@ -512,6 +517,16 @@ def run_sync(
                 if raised is not None and not error_strs:
                     error_strs = [f"{type(raised).__name__}: {raised}"]
 
+                guards_outcome = total_result.guards
+                if raised is not None:
+                    from drt.engine.guards import GuardTripped
+
+                    if isinstance(raised, GuardTripped):
+                        guards_outcome = {
+                            "tripped": [trip.to_dict() for trip in raised.trips],
+                            "forced": False,
+                        }
+
                 history_manager.append(
                     HistoryEntry(
                         sync_name=sync.name,
@@ -525,6 +540,7 @@ def run_sync(
                         cursor_value_used=getattr(total_result, "cursor_value_used", None),
                         run_id=run_id,
                         sync_run_id=sync_run_id,
+                        guards=guards_outcome,
                     )
                 )
                 history_manager.prune(sync.name, history_retention_days)
@@ -1223,6 +1239,12 @@ def _run_sync_body(
                 total_result.failed += finalize_result.failed
                 total_result.errors.extend(finalize_result.errors)
                 total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
+
+    if sync.sync._forced_guard_trips:
+        total_result.guards = {
+            "tripped": [trip.to_dict() for trip in sync.sync._forced_guard_trips],
+            "forced": True,
+        }
 
     total_result.diff_removed_keys = diff_removed_keys
 

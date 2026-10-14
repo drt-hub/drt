@@ -516,6 +516,79 @@ class PostgresDestination(BaseSqlDestination):
             params = (*scope_params, tuple(keys))
         return stmt, params
 
+    def _supports_runtime_delete_guards(self) -> bool:
+        return True
+
+    def _build_mirror_count(
+        self,
+        table: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None = None,
+        scopes: list[tuple[Any, ...]] | None = None,
+        negate: bool = True,
+        *,
+        baseline: bool = False,
+    ) -> tuple[Any, Any]:
+        """Count the exact Postgres mirror predicate (or scoped baseline)."""
+        from psycopg2 import sql as _pgsql
+
+        scope_predicate = _pgsql.SQL("")
+        scope_params: tuple[Any, ...] = ()
+        if scope_cols and scopes:
+            if len(scope_cols) == 1:
+                scope_predicate = _pgsql.SQL("{} IN %s").format(_pgsql.Identifier(scope_cols[0]))
+                scope_params = (tuple(scope[0] for scope in scopes),)
+            else:
+                scope_tuple = _pgsql.SQL("({})").format(
+                    _pgsql.SQL(", ").join(_pgsql.Identifier(col) for col in scope_cols)
+                )
+                scope_predicate = _pgsql.SQL("{} IN %s").format(scope_tuple)
+                scope_params = (tuple(tuple(scope) for scope in scopes),)
+
+        if baseline:
+            if scope_cols and scopes:
+                return (
+                    _pgsql.SQL("SELECT COUNT(*) FROM {} WHERE {}").format(
+                        _qualified_ident(table), scope_predicate
+                    ),
+                    scope_params,
+                )
+            return (
+                _pgsql.SQL("SELECT COUNT(*) FROM {}").format(_qualified_ident(table)),
+                (),
+            )
+
+        op = "NOT IN" if negate else "IN"
+        if len(upsert_cols) == 1:
+            key_predicate = _pgsql.SQL("{} " + op + " %s").format(_pgsql.Identifier(upsert_cols[0]))
+            key_params: tuple[Any, ...] = (tuple(key[0] for key in keys),)
+        else:
+            key_tuple = _pgsql.SQL("({})").format(
+                _pgsql.SQL(", ").join(_pgsql.Identifier(col) for col in upsert_cols)
+            )
+            key_predicate = _pgsql.SQL("{} " + op + " %s").format(key_tuple)
+            key_params = (tuple(keys),)
+        predicate = key_predicate
+        if scope_cols and scopes:
+            predicate = _pgsql.SQL("{} AND {}").format(scope_predicate, key_predicate)
+        return (
+            _pgsql.SQL("SELECT COUNT(*) FROM {} WHERE {}").format(
+                _qualified_ident(table), predicate
+            ),
+            (*scope_params, *key_params),
+        )
+
+    def _build_table_count(self, table: str) -> Any:
+        from psycopg2 import sql as _pgsql
+
+        return _pgsql.SQL("SELECT COUNT(*) FROM {}").format(_qualified_ident(table))
+
+    def _build_drop_table(self, table: str) -> Any:
+        from psycopg2 import sql as _pgsql
+
+        return _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(table))
+
     # --- tracked-mirror state hooks (#686 / #695, #719 phase 2b) -----------
     def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
         """State table lives in the target table's schema; ``to_regclass``

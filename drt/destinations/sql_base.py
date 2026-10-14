@@ -233,11 +233,13 @@ class BaseSqlDestination:
         that do not use it.
         """
         if sync_options.mode == "mirror":
-            result = self._finalize_mirror(config, sync_options)
-            # Reset mirror state regardless of result so a re-run starts fresh.
-            self._mirror_keys = None
-            self._mirror_scopes = None
-            return result
+            try:
+                return self._finalize_mirror(config, sync_options)
+            finally:
+                # A guard refusal is a finalize failure too. Never carry this
+                # run's observed keys into a reused destination instance.
+                self._mirror_keys = None
+                self._mirror_scopes = None
 
         if not self._swap_shadow_created or self._swap_table is None:
             self._reset_swap_state_after_noop()
@@ -249,6 +251,25 @@ class BaseSqlDestination:
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         try:
             with self._swap_cursor_context(conn, sync_options) as cur:
+                if self._delete_guards_enabled(sync_options):
+                    from drt.engine.guards import GuardTripped
+
+                    cur.execute(self._build_table_count(table))
+                    live_rows = int(cur.fetchone()[0])
+                    cur.execute(self._build_table_count(shadow))
+                    shadow_rows = int(cur.fetchone()[0])
+                    try:
+                        self._enforce_delete_guards(
+                            sync_options,
+                            deletes=max(live_rows - shadow_rows, 0),
+                            baseline=live_rows,
+                        )
+                    except GuardTripped:
+                        # A refused replace must not leave a stale shadow for a
+                        # later run to mistake for reviewed data.
+                        cur.execute(self._build_drop_table(shadow))
+                        conn.commit()
+                        raise
                 self._complete_swap(conn, cur, table, shadow)
         finally:
             conn.close()
@@ -318,6 +339,30 @@ class BaseSqlDestination:
                 scopes,
                 negate=True,
             )
+            if self._delete_guards_enabled(sync_options):
+                count_stmt, count_params = self._build_mirror_count(
+                    self._mirror_table_ident(config),
+                    upsert_cols,
+                    keys,
+                    scope_cols,
+                    scopes,
+                    negate=True,
+                    baseline=False,
+                )
+                cur.execute(count_stmt, count_params)
+                deletes = int(cur.fetchone()[0])
+                baseline_stmt, baseline_params = self._build_mirror_count(
+                    self._mirror_table_ident(config),
+                    upsert_cols,
+                    keys,
+                    scope_cols,
+                    scopes,
+                    negate=True,
+                    baseline=True,
+                )
+                cur.execute(baseline_stmt, baseline_params)
+                baseline = int(cur.fetchone()[0])
+                self._enforce_delete_guards(sync_options, deletes=deletes, baseline=baseline)
             cur.execute(stmt, params)
             self._commit_mirror(conn)
         finally:
@@ -349,6 +394,13 @@ class BaseSqlDestination:
             return None
         upsert_cols = config.upsert_key
         keys = [tuple(row[col] for col in upsert_cols) for row in removed_keys]
+
+        if self._delete_guards_enabled(sync_options):
+            self._enforce_delete_guards(
+                sync_options,
+                deletes=len(keys),
+                baseline=None,
+            )
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         try:
@@ -816,6 +868,58 @@ class BaseSqlDestination:
         """
         raise NotImplementedError
 
+    def _supports_runtime_delete_guards(self) -> bool:
+        """Whether this dialect implements this PR's count/drop hooks."""
+        return False
+
+    def _delete_guards_enabled(self, sync_options: SyncOptions) -> bool:
+        guards = getattr(sync_options, "guards", None)
+        return bool(
+            self._supports_runtime_delete_guards()
+            and guards is not None
+            and (guards.max_deletes is not None or guards.max_delete_pct is not None)
+        )
+
+    def _enforce_delete_guards(
+        self,
+        sync_options: SyncOptions,
+        *,
+        deletes: int,
+        baseline: int | None,
+    ) -> None:
+        from drt.engine.guards import enforce_delete_guards
+
+        trips = enforce_delete_guards(
+            sync_options.guards,
+            deletes=deletes,
+            baseline=baseline,
+            force=sync_options._force_guards,
+        )
+        if trips:
+            sync_options._forced_guard_trips.extend(trips)
+
+    def _build_mirror_count(
+        self,
+        table: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None = None,
+        scopes: list[tuple[Any, ...]] | None = None,
+        negate: bool = True,
+        *,
+        baseline: bool = False,
+    ) -> tuple[Any, Any]:
+        """Build a count over the DELETE predicate, or its scoped baseline."""
+        raise NotImplementedError
+
+    def _build_table_count(self, table: str) -> Any:
+        """Build ``SELECT COUNT(*)`` for a swap's live/shadow table."""
+        raise NotImplementedError
+
+    def _build_drop_table(self, table: str) -> Any:
+        """Build the cleanup DROP used when a replace-swap guard refuses."""
+        raise NotImplementedError
+
     def _mirror_table_ident(self, config: Any) -> str:
         """Target-table identifier handed to ``_build_mirror_delete``.
 
@@ -1114,6 +1218,9 @@ class BaseSqlDestination:
                 config,
                 [(key_hash(k), key_json(k)) for k in current],
             )
+            guard_deletes: int | None = None
+            guard_baseline: int | None = None
+            previous: list[Any] = []
 
             # #890: narrow `previous` to the observed scopes *in SQL* when the
             # columns are available. Three branches, and the first two are what
@@ -1144,6 +1251,21 @@ class BaseSqlDestination:
                         f"OR s.scope_key IN ({placeholders}))"
                     )
                     diff_params = self._state_params(sync_name, scope_spec, *observed_json)
+                if self._delete_guards_enabled(sync_options):
+                    count_sql = diff_sql.replace(f"SELECT {projection}", "SELECT COUNT(*)", 1)
+                    cur.execute(self._state_sql(count_sql, state_ident), diff_params)
+                    guard_deletes = int(cur.fetchone()[0])
+
+                    baseline_sql = "SELECT COUNT(*) FROM {} s WHERE s.sync_name = %s"
+                    baseline_params = self._state_params(sync_name)
+                    if scope_sql and observed_scopes:
+                        baseline_sql += (
+                            " AND (s.scope_key IS NULL OR s.scope_spec <> %s "
+                            f"OR s.scope_key IN ({placeholders}))"
+                        )
+                        baseline_params = self._state_params(sync_name, scope_spec, *observed_json)
+                    cur.execute(self._state_sql(baseline_sql, state_ident), baseline_params)
+                    guard_baseline = int(cur.fetchone()[0])
                 cur.execute(self._state_sql(diff_sql, state_ident), diff_params)
                 fetched = cur.fetchall()
             else:
@@ -1178,6 +1300,40 @@ class BaseSqlDestination:
                 ]
             else:
                 to_delete = [decode_key(kj) for _h, kj in raw_diff]
+
+            if self._delete_guards_enabled(sync_options):
+                # The staged path counts the state anti-join in SQL. Legacy
+                # state rows with no scope metadata still need the existing
+                # exact Python scope filter; use its smaller exact count rather
+                # than the conservative coarse SQL count in that rare case.
+                deletes = len(to_delete) if guard_deletes is None or stale_scope else guard_deletes
+                baseline = guard_baseline
+                if stale_scope and scope_positions is not None:
+                    # The SQL predicate deliberately admits legacy rows whose
+                    # stored scope is unknown. Their delete count is exact
+                    # after the Python filter above, but an exact denominator
+                    # cannot be recovered without materialising every legacy
+                    # row. Leave it unavailable so percentage guards fail
+                    # closed instead of dividing by an inflated denominator.
+                    baseline = None
+                if baseline is None:
+                    # Temporary-table privilege fallback already materialises
+                    # this sync's prior state for the existing diff path. It
+                    # can therefore compute the scoped denominator exactly.
+                    if previous:
+                        if scope_positions is not None and observed_scopes is not None:
+                            baseline = sum(
+                                tuple(decode_key(row[1])[p] for p in scope_positions)
+                                in observed_scopes
+                                for row in previous
+                            )
+                        else:
+                            baseline = len(previous)
+                self._enforce_delete_guards(
+                    sync_options,
+                    deletes=deletes,
+                    baseline=baseline,
+                )
 
             # #890 backfill. Rows tracked before the scope columns existed are
             # never rewritten by the state pass — #694 part 2 deliberately

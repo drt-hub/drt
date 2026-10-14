@@ -50,6 +50,14 @@ import importlib
 import inspect
 import pkgutil
 import sys
+from pathlib import Path
+
+# Always audit the checkout containing this script. Running ``python
+# scripts/check_cli_mcp_parity.py`` otherwise puts ``scripts/`` first on
+# sys.path and can silently introspect an unrelated editable drt-core install.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 # --- Scope -----------------------------------------------------------------
 #
@@ -207,7 +215,9 @@ OPTION_ALIASES: dict[str, dict[str, str]] = {
 # Canary: options known to exist right now. If the enumeration stops finding
 # these, introspection has broken and the run is not trustworthy.
 ENUMERATION_CANARY: dict[str, str] = {
-    "run": "--dry-run",
+    # #1218 part 2: pin the destructive-override flag on both surfaces; the
+    # generic parity pass below verifies it maps to ``force_guards``.
+    "run": "--force-guards",
     "validate": "--strict",
 }
 

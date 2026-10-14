@@ -254,6 +254,66 @@ def test_run_one_failed_entry_includes_error_fields(monkeypatch: pytest.MonkeyPa
     assert entry["error_suggestion"] is None
 
 
+def test_run_one_guard_failure_has_structured_json_and_force_reaches_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.cli.main import _run_one
+    from drt.config.sync_options import GuardsConfig
+    from drt.engine.guards import GuardTripped, evaluate_guards
+
+    captured: dict[str, object] = {}
+    trip = evaluate_guards(
+        GuardsConfig(max_deletes=1),
+        creates=0,
+        updates=0,
+        deletes=2,
+        source_rows=0,
+        delete_baseline=3,
+    )
+
+    def boom(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        raise GuardTripped(trip)
+
+    monkeypatch.setattr("drt.engine.sync.run_sync", boom)
+    monkeypatch.setattr("drt.cli.commands.run.get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _sync, _project: None)
+    from tests.unit.test_cli_run_telemetry import _ctx, _fake_profile, _fake_sync
+
+    _name, entry, had_error = _run_one(
+        _fake_sync(), _ctx(json_mode=True, force_guards=True), _fake_profile()
+    )
+
+    assert had_error is True
+    assert captured["force_guards"] is True
+    assert entry["guards"] == {
+        "tripped": [trip[0].to_dict()],
+        "forced": False,
+    }
+
+
+def test_run_one_forced_guard_result_has_structured_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.cli.main import _run_one
+    from drt.destinations.base import SyncResult
+
+    outcome = {"tripped": [{"guard": "max_deletes"}], "forced": True}
+
+    def success(*_args: object, **_kwargs: object) -> SyncResult:
+        return SyncResult(success=1, guards=outcome)
+
+    monkeypatch.setattr("drt.engine.sync.run_sync", success)
+    monkeypatch.setattr("drt.cli.commands.run.get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _sync, _project: None)
+    from tests.unit.test_cli_run_telemetry import _ctx, _fake_profile, _fake_sync
+
+    _name, entry, had_error = _run_one(_fake_sync(), _ctx(json_mode=True), _fake_profile())
+
+    assert had_error is False
+    assert entry["guards"] == outcome
+
+
 def test_render_to_console_does_not_crash() -> None:
     """Smoke test: the Rich panel renderer is callable end-to-end."""
     from drt.cli.errors import render_to_console

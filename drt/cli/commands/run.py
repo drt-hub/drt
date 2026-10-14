@@ -151,6 +151,8 @@ class _RunContext:
     audit_trail: ComplianceAuditTrail | None = None
     audit_fields: list[str] | None = None
     audit_retain_days: int = 30
+    # Explicit operator override for run-time delete guards (#1218).
+    force_guards: bool = False
     # Where the project lives. ``drt run`` is always invoked from it; the MCP
     # server may not be, so ``drt apply`` passes it explicitly.
     project_dir: Path = Path(".")
@@ -253,6 +255,7 @@ def _run_one(
                 audit_trail=ctx.audit_trail,
                 audit_fields=ctx.audit_fields,
                 audit_retain_days=ctx.audit_retain_days,
+                force_guards=ctx.force_guards,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -287,6 +290,13 @@ def _run_one(
                 # re-raising still carry the correct one.
                 "run_id": ctx.run_id,
             }
+            from drt.engine.guards import GuardTripped
+
+            if isinstance(e, GuardTripped):
+                entry["guards"] = {
+                    "tripped": [trip.to_dict() for trip in e.trips],
+                    "forced": False,
+                }
             if ctx.log_json:
                 logging.error(
                     "sync_complete",
@@ -336,6 +346,9 @@ def _run_one(
             entry["watermark_lag"] = result.watermark_lag
         if result.limit_applied is not None:
             entry["limit"] = result.limit_applied
+        guards_outcome = getattr(result, "guards", None)
+        if guards_outcome is not None:
+            entry["guards"] = guards_outcome
         if ctx.log_json:
             logging.info(
                 "sync_complete",
@@ -791,6 +804,14 @@ def run(
             "state — use `drt state reset --tracked-mirror` for that."
         ),
     ),
+    force_guards: bool = typer.Option(
+        False,
+        "--force-guards",
+        help=(
+            "Proceed when a run-time max_deletes/max_delete_pct guard trips; "
+            "record the override in run results and history."
+        ),
+    ),
     diff: bool = typer.Option(
         False,
         "--diff",
@@ -1113,6 +1134,7 @@ def run(
             audit_trail=state_bundle.audit_trail,
             audit_fields=project.state.audit_trail.fields,
             audit_retain_days=project.state.audit_trail.retain_days or 30,
+            force_guards=force_guards,
         )
 
         # Execute syncs — parallel if threads > 1, sequential otherwise

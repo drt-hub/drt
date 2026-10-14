@@ -89,6 +89,10 @@ class SyncResult:
     # observe this from their single MERGE/upsert statement; read-before-write
     # destinations such as HubSpot can report the exact count.
     kept_values: int = 0
+    # Run-time delete guards (#1218 part 2). Present only when a guard tripped
+    # and was explicitly forced; refusal raises before a SyncResult returns.
+    # Dict-shaped to keep this protocol result independent of engine types.
+    guards: dict[str, Any] | None = None
 
     @property
     def total(self) -> int:

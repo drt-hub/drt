@@ -28,6 +28,17 @@ class GuardTrip:
         }
 
 
+class GuardTripped(Exception):
+    """A run-time change guard refused destructive finalization."""
+
+    def __init__(self, trips: list[GuardTrip]) -> None:
+        self.trips = trips
+        super().__init__(
+            "Change guards tripped; nothing was deleted or swapped: "
+            + "; ".join(trip.message for trip in trips)
+        )
+
+
 def _pct(part: int, whole: int) -> float:
     """For display only: limits are compared exactly (see :func:`_exceeds`)."""
     return round(100.0 * part / whole, 2)
@@ -127,4 +138,43 @@ def evaluate_guards(
                         f"source rows (limit {limit}%)",
                     )
                 )
+    return trips
+
+
+def enforce_delete_guards(
+    guards: Any,
+    *,
+    deletes: int,
+    baseline: int | None,
+    force: bool,
+) -> list[GuardTrip]:
+    """Evaluate only run-time delete guards and refuse unless forced.
+
+    ``max_creates`` and ``max_updates_pct`` remain plan/apply-only: the SQL
+    finalize seam can count the rows a destructive DELETE/swap would remove,
+    but it cannot recover exact create/update classifications after batches
+    have already been written.
+    """
+    if guards is None:
+        return []
+
+    # Feed a delete-only view through the one canonical evaluator. A shallow
+    # proxy prevents max_creates/max_updates_pct from becoming run-time guards
+    # if their evaluation rules change later.
+    class _DeleteGuards:
+        max_creates = None
+        max_updates_pct = None
+        max_deletes = guards.max_deletes
+        max_delete_pct = guards.max_delete_pct
+
+    trips = evaluate_guards(
+        _DeleteGuards(),
+        creates=0,
+        updates=0,
+        deletes=deletes,
+        source_rows=0,
+        delete_baseline=baseline,
+    )
+    if trips and not force:
+        raise GuardTripped(trips)
     return trips

@@ -170,6 +170,13 @@ Comparison:
 Safety guards:
 
 - **Empty source short-circuit** — if no batch ever delivered records, the DELETE is skipped. A transient empty source (auth failure mid-extract, vendor outage) cannot wipe the destination.
+- **Run-time change guards** — `sync.guards.max_deletes` and
+  `max_delete_pct` are counted in the finalize connection before the DELETE.
+  The count uses the exact predicate and scope; tracked mirror counts its
+  staged state diff, while diff mirror has no percentage baseline and fails
+  closed. `drt run --force-guards` proceeds and records the override. The same
+  protection covers replace-swap (a refusal drops its shadow), but not
+  replace-truncate.
 - **Failed rows excluded from the key set** — only successfully upserted keys count as "observed source state"; a row that failed during upsert won't cause its destination counterpart to be deleted.
 - **`upsert_key` required** — load() raises `ValueError` before any write if `destination.upsert_key` is empty.
 - **Composite keys supported** — `upsert_key: [tenant_id, employee_id]` produces `WHERE (tenant_id, employee_id) NOT IN (...)`.

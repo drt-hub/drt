@@ -1591,6 +1591,95 @@ def test_finalize_sync_skipped_on_dry_run(tmp_path: Path) -> None:
     assert dest.finalize_called is False
 
 
+class _GuardingFinalizeDestination(FakeDestination):
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        from drt.engine.guards import enforce_delete_guards
+
+        trips = enforce_delete_guards(
+            sync_options.guards,
+            deletes=2,
+            baseline=3,
+            force=sync_options._force_guards,
+        )
+        sync_options._forced_guard_trips.extend(trips)
+        return SyncResult()
+
+
+def _runtime_guard_sync() -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "guarded",
+            "model": "ref('table')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "id",
+                "guards": {"max_deletes": 1},
+            },
+        }
+    )
+
+
+def test_finalize_guard_failure_is_history_failure_and_does_not_advance_state(
+    tmp_path: Path,
+) -> None:
+    from drt.engine.guards import GuardTripped
+    from drt.state.history import HistoryManager
+    from drt.state.manager import StateManager
+
+    sync = _runtime_guard_sync()
+    state = StateManager(tmp_path)
+    history = HistoryManager(tmp_path)
+
+    with pytest.raises(GuardTripped, match="max_deletes"):
+        run_sync(
+            sync,
+            FakeSource([{"id": 2}]),
+            _GuardingFinalizeDestination(),
+            _make_profile(),
+            tmp_path,
+            state_manager=state,
+            history_manager=history,
+            observer=StatePersistingObserver(state, None),
+        )
+
+    assert state.get_last_sync(sync.name) is None
+    entry = history.read(sync.name)[0]
+    assert entry.status == "failed"
+    assert entry.guards is not None
+    assert entry.guards["forced"] is False
+    assert entry.guards["tripped"][0]["guard"] == "max_deletes"
+    assert "max_deletes" in entry.errors[0]
+
+
+def test_force_guards_reaches_finalize_and_is_recorded_in_result_and_history(
+    tmp_path: Path,
+) -> None:
+    from drt.state.history import HistoryManager
+
+    sync = _runtime_guard_sync()
+    history = HistoryManager(tmp_path)
+
+    result = run_sync(
+        sync,
+        FakeSource([{"id": 2}]),
+        _GuardingFinalizeDestination(),
+        _make_profile(),
+        tmp_path,
+        history_manager=history,
+        force_guards=True,
+    )
+
+    assert result.guards is not None
+    assert result.guards["forced"] is True
+    assert result.guards["tripped"][0]["guard"] == "max_deletes"
+    assert history.read(sync.name)[0].guards == result.guards
+
+
 # ---------------------------------------------------------------------------
 # reset_write_state() — guaranteed write-state reset on every exit path (#1145)
 # ---------------------------------------------------------------------------

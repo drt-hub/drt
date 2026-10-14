@@ -467,6 +467,7 @@ def apply_plan(
         audit_trail=state_bundle.audit_trail,
         audit_fields=project.state.audit_trail.fields,
         audit_retain_days=project.state.audit_trail.retain_days or 30,
+        force_guards=force_guards,
         project_dir=project_dir,
     )
     try:

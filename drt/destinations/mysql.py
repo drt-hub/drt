@@ -448,6 +448,63 @@ class MySQLDestination(BaseSqlDestination):
             params = scope_params + [v for key in keys for v in key]
         return stmt, params
 
+    def _supports_runtime_delete_guards(self) -> bool:
+        return True
+
+    def _build_mirror_count(
+        self,
+        table: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None = None,
+        scopes: list[tuple[Any, ...]] | None = None,
+        negate: bool = True,
+        *,
+        baseline: bool = False,
+    ) -> tuple[Any, Any]:
+        """Count the exact MySQL mirror predicate (or scoped baseline)."""
+        table_q = self._quote_ident(table)
+        scope_predicate = ""
+        scope_params: list[Any] = []
+        if scope_cols and scopes:
+            if len(scope_cols) == 1:
+                placeholders = ", ".join(["%s"] * len(scopes))
+                scope_predicate = f"`{scope_cols[0]}` IN ({placeholders})"
+                scope_params = [scope[0] for scope in scopes]
+            else:
+                scope_tuple = "(" + ", ".join(f"`{col}`" for col in scope_cols) + ")"
+                row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
+                placeholders = ", ".join([row] * len(scopes))
+                scope_predicate = f"{scope_tuple} IN ({placeholders})"
+                scope_params = [value for scope in scopes for value in scope]
+
+        if baseline:
+            where = f" WHERE {scope_predicate}" if scope_predicate else ""
+            return f"SELECT COUNT(*) FROM {table_q}{where}", scope_params
+
+        op = "NOT IN" if negate else "IN"
+        if len(upsert_cols) == 1:
+            placeholders = ", ".join(["%s"] * len(keys))
+            key_predicate = f"`{upsert_cols[0]}` {op} ({placeholders})"
+            key_params = [key[0] for key in keys]
+        else:
+            key_tuple = "(" + ", ".join(f"`{col}`" for col in upsert_cols) + ")"
+            row = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
+            placeholders = ", ".join([row] * len(keys))
+            key_predicate = f"{key_tuple} {op} ({placeholders})"
+            key_params = [value for key in keys for value in key]
+        predicate = f"{scope_predicate} AND {key_predicate}" if scope_predicate else key_predicate
+        return (
+            f"SELECT COUNT(*) FROM {table_q} WHERE {predicate}",
+            scope_params + key_params,
+        )
+
+    def _build_table_count(self, table: str) -> Any:
+        return f"SELECT COUNT(*) FROM {self._quote_ident(table)}"
+
+    def _build_drop_table(self, table: str) -> Any:
+        return f"DROP TABLE IF EXISTS {self._quote_ident(table)}"
+
     # --- tracked-mirror state hooks (#686 / #695, #719 phase 2b) -----------
     def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
         """State table lives in the target's database; the existence probe

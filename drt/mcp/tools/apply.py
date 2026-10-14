@@ -16,7 +16,15 @@ if TYPE_CHECKING:
     from drt.mcp._context import McpContext
 
 _MAX_APPROVER = 200
-_RESULT_KEYS = ("status", "rows_synced", "rows_failed", "duration_seconds", "error", "run_id")
+_RESULT_KEYS = (
+    "status",
+    "rows_synced",
+    "rows_failed",
+    "duration_seconds",
+    "error",
+    "run_id",
+    "guards",
+)
 
 
 def apply(

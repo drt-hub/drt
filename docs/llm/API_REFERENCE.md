@@ -449,8 +449,12 @@ sync:
 Limits on how much one run may change. They are evaluated against the change set
 `drt plan` computes: `drt plan` reports a trip (exit code unchanged) and
 `drt apply` refuses to write (`--force-guards` overrides and is recorded in
-`run_results.json`). `drt run` does not enforce them yet. Unknown keys are
-rejected, so a typo cannot silently disable a guard.
+`run_results.json`). PostgreSQL/MySQL also re-check `max_deletes` and
+`max_delete_pct` immediately before a mirror DELETE or replace swap. A refusal
+is a failed run (exit 1), does not execute the DELETE/swap, and does not advance
+the watermark. `drt run --force-guards` (or MCP `force_guards=true`) proceeds
+and records `guards: {tripped: [...], forced: true}`. Unknown keys are rejected,
+so a typo cannot silently disable a guard.
 
 ```yaml
 sync:
@@ -464,7 +468,10 @@ sync:
 
 A percentage that cannot be evaluated (a delete strategy that does not report
 how many rows it looked at, such as `strategy: diff`) trips the guard instead of
-passing; use `max_deletes` there.
+passing; use `max_deletes` there. Destination mirror counts the exact scoped
+DELETE and baseline; tracked mirror counts its staged state diff; replace-swap
+compares live and shadow row counts and drops a refused shadow. Replace-truncate
+is unguarded at run time. `max_creates` and `max_updates_pct` remain plan/apply-only.
 
 ### Snapshot-diff incremental and diff mirror (#755/#1110)
 

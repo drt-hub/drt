@@ -26,7 +26,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from drt.state._filelock import advisory_lock
 
@@ -52,6 +52,9 @@ class HistoryEntry:
     # missing key via the dataclass default, so no migration is needed.
     run_id: str | None = None
     sync_run_id: str | None = None
+    # Structured run-time guard outcome (#1218 part 2), omitted on historical
+    # entries and ordinary runs. Shape: {"tripped": [...], "forced": bool}.
+    guards: dict[str, Any] | None = None
 
 
 @runtime_checkable

@@ -994,6 +994,7 @@ async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
     def fake_run_sync(*_args: Any, **_kwargs: Any) -> SyncResult:
         result = SyncResult()
         result.success = 1
+        result.guards = {"tripped": [{"guard": "max_deletes"}], "forced": True}
         return result
 
     monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
@@ -1007,6 +1008,7 @@ async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
     assert "diff" not in result
     assert result["dry_run"] is True
     assert result["success"] == 1
+    assert result["guards"]["forced"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1043,11 +1045,58 @@ async def test_run_sync_limit_and_vars_reach_the_engine(
         sync_name="notify",
         limit=5,
         vars={"lookback_days": 1},
+        force_guards=True,
     )
 
     assert captured["extract_limit"] == 5
     assert captured["vars"]["lookback_days"] == 1
+    assert captured["force_guards"] is True
     assert result["limit_applied"] == 5
+
+
+@pytest.mark.asyncio
+async def test_run_sync_guard_refusal_is_structured(project_dir: Path, monkeypatch: Any) -> None:
+    from drt.config.sync_options import GuardsConfig
+    from drt.engine.guards import GuardTripped, evaluate_guards
+
+    trip = evaluate_guards(
+        GuardsConfig(max_deletes=0),
+        creates=0,
+        updates=0,
+        deletes=1,
+        source_rows=0,
+        delete_baseline=2,
+    )
+
+    def guarded(*_args: Any, **_kwargs: Any) -> Any:
+        raise GuardTripped(trip)
+
+    monkeypatch.setattr("drt.engine.sync.run_sync", guarded)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+
+    result = await call(create_server(project_dir), "drt_run_sync", sync_name="notify")
+
+    assert result["failed"] == 1
+    assert result["guards"]["forced"] is False
+    assert result["guards"]["tripped"][0]["guard"] == "max_deletes"
+
+
+@pytest.mark.asyncio
+async def test_run_sync_non_guard_exception_still_propagates(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("ordinary failure")
+
+    monkeypatch.setattr("drt.engine.sync.run_sync", boom)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+
+    with pytest.raises(Exception, match="ordinary failure"):
+        await call(create_server(project_dir), "drt_run_sync", sync_name="notify")
 
 
 @pytest.mark.asyncio

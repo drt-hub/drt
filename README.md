@@ -200,6 +200,7 @@ drt run --output json       # structured JSON output for CI/scripting
 drt run --log-format json   # structured JSON logging to stderr
 drt run --profile prd       # override profile (or DRT_PROFILE env var)
 drt run --cursor-value '…'  # override watermark cursor for backfill
+drt run --force-guards      # explicitly override a tripped run-time delete guard
 drt test                    # run post-sync validation tests
 drt test --select <name>    # test a specific sync
 drt test --store-failures   # sample up to N failing rows per failed test (masked)
@@ -207,6 +208,7 @@ drt build                   # run each sync and its tests in one pass
 drt validate                # validate sync YAML configs
 drt plan <sync> --out plan.json   # save a reviewable change set (read-only)
 drt apply plan.json         # apply it only if the world still matches
+drt apply plan.json --force-guards  # explicitly override reviewed guard trips
 drt deploy github-actions --with-plan   # PR comment with the plan; apply on merge
 drt status                  # show recent sync status
 drt status --output json    # JSON output for status
@@ -298,7 +300,7 @@ drt mcp run
 | Tool                  | What it does                                                                          |
 | --------------------- | ------------------------------------------------------------------------------------- |
 | `drt_list_syncs`      | List all sync definitions                                                             |
-| `drt_run_sync`        | Run a sync (supports `dry_run` + `compute_diff` for `--diff` parity)                  |
+| `drt_run_sync`        | Run a sync (`dry_run`, `compute_diff`, and explicit `force_guards`)                   |
 | `drt_run_test`        | Run post-sync validation tests (mirrors `drt test`)                                   |
 | `drt_get_status`      | Get last run result(s)                                                                |
 | `drt_get_history`     | Get recent sync run history                                                           |
@@ -314,7 +316,7 @@ drt mcp run
 | `drt_state_show`      | Stored watermark + last-run state                                                     |
 | `drt_state_reset`     | Reset watermark / run state / tracked-mirror keys                                     |
 | `drt_plan`            | Read-only change set for a sync + a `plan_id` (mirrors `drt plan`)                    |
-| `drt_apply`           | Apply a fetched plan only if the world still matches; needs `approved_by` (`drt apply`) |
+| `drt_apply`           | Apply a fetched plan; needs `approved_by`, with optional explicit `force_guards`       |
 
 ---
 

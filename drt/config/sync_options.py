@@ -176,8 +176,9 @@ class GuardsConfig(BaseModel):
     """``sync.guards`` — limits on how much one run may change (#1218).
 
     Evaluated against the change set a plan computes: ``drt plan`` reports a
-    trip, ``drt apply`` refuses to write (``--force-guards`` overrides, loudly).
-    ``drt run`` does not enforce them yet.
+    trip and ``drt apply`` refuses to write (``--force-guards`` overrides,
+    loudly). PostgreSQL/MySQL run-time finalization also enforces the two
+    delete-side guards immediately before a mirror DELETE or replace swap.
 
     - ``max_creates`` — rows to be created (including append-only inserts).
     - ``max_deletes`` — rows to be deleted (mirror / replace).
@@ -453,6 +454,12 @@ class SyncOptions(BaseModel):
     # use it to distinguish a complete source snapshot from the processed
     # prefix without changing the frozen hook signatures.
     _interrupted: bool = PrivateAttr(default=False)
+
+    # Run-time guard controls/results, injected by the engine for one run.
+    # Kept private so neither is accepted from YAML and the frozen destination
+    # hook signature does not grow another parameter.
+    _force_guards: bool = PrivateAttr(default=False)
+    _forced_guard_trips: list[Any] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
