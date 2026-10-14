@@ -280,6 +280,7 @@ class TestSnowflakeWarehouseHistoryStore:
                     status="success",
                     records_synced=1,
                     records_failed=0,
+                    guards={"forced": True, "tripped": [{"guard": "max_deletes"}]},
                 )
             )
 
@@ -288,6 +289,8 @@ class TestSnowflakeWarehouseHistoryStore:
         assert "SELECT" in sql
         assert "PARSE_JSON(%s)" in sql
         assert "VALUES" not in sql
+        assert "guards" not in sql
+        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 12
 
     def test_read_reconstructs_history_entry_from_a_json_string_variant(self) -> None:
         """Covers the branch where the connector hands VARIANT back as a

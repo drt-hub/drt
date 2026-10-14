@@ -371,10 +371,17 @@ class TestBigQueryWarehouseHistoryStore:
             patch("drt.state.warehouse_bigquery._connect", return_value=client),
             patch.object(store, "_ensure_table"),
         ):
-            store.append(_history_entry(errors=["a", "b", "c", "d", "e", "ignored"]))
+            store.append(
+                _history_entry(
+                    errors=["a", "b", "c", "d", "e", "ignored"],
+                    guards={"forced": True, "tripped": [{"guard": "max_deletes"}]},
+                )
+            )
         params = {p.name: p.value for p in _params(client.query.call_args_list[0])}
         assert params["errors"] == '["a", "b", "c", "d", "e"]'
         assert "@errors" in _sqls(client)[0]
+        assert "guards" not in _sqls(client)[0]
+        assert "guards" not in params
 
         with patch("drt.state.warehouse_bigquery._connect", side_effect=RuntimeError("offline")):
             store.append(_history_entry())  # must not raise

@@ -300,7 +300,7 @@ drt mcp run
 | Tool                  | What it does                                                                          |
 | --------------------- | ------------------------------------------------------------------------------------- |
 | `drt_list_syncs`      | List all sync definitions                                                             |
-| `drt_run_sync`        | Run a sync (`dry_run`, `compute_diff`, and explicit `force_guards`)                   |
+| `drt_run_sync`        | Run a sync (`dry_run`, `compute_diff`; forced guards require `approved_by`)           |
 | `drt_run_test`        | Run post-sync validation tests (mirrors `drt test`)                                   |
 | `drt_get_status`      | Get last run result(s)                                                                |
 | `drt_get_history`     | Get recent sync run history                                                           |

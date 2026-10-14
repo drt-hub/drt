@@ -269,17 +269,24 @@ sync:
 `plan.json`) without changing its exit code. `drt apply` evaluates the guards on
 the **recomputed** plan, not the file, and refuses to write when one trips; it
 names the guard, the observed value and the limit. `--force-guards` applies
-anyway, prints what it overrode, and records it in `run_results.json` and the
-plan's claim file.
+only the trips and observed values in the reviewed plan, prints what it
+overrode, and records each override once in `run_results.json` and the plan's
+claim file. If a run-time value grows beyond the reviewed forced value, apply
+refuses with the new trip and requires a new plan.
 
-PostgreSQL and MySQL also enforce the delete-side limits at run time, immediately
-before the destructive finalize statement. This closes the window in which the
-source can shrink after an apply's verification extraction. A refusal is an
-ordinary failed sync: the DELETE/swap does not run, failure alerts and history
-record it, the watermark does not advance, and `drt run` exits 1. A reviewed
+PostgreSQL and MySQL also enforce the delete-side limits in the finalization
+transaction. For mirror strategies, drt reads the percentage baseline, runs the
+`DELETE`, judges the driver's actual affected-row count, and rolls back when the
+guard trips; tracked-state rewrites happen only after the guard passes and commit
+with the delete. A refusal is an ordinary failed sync: no deletion is committed,
+failure alerts and history record it, the watermark does not advance, and `drt
+run` exits 1. A reviewed
 override must be explicit (`drt run --force-guards`, or `--force-guards` on
-`drt apply`; the MCP tools have the matching `force_guards` parameter) and the
-tripped limits are recorded under `guards.tripped` with `guards.forced: true`.
+`drt apply`; the MCP tools have the matching `force_guards` parameter). MCP
+`drt_run_sync(force_guards=true)` also requires and records a non-empty
+`approved_by`. Plain run overrides are recorded under `guards.tripped` with
+`guards.forced: true`; apply records the reviewed override once as
+`guards_forced`.
 
 - A percentage that cannot be evaluated trips instead of passing. Delete
   percentages need a count of the rows the delete pass looked at: destination
@@ -287,15 +294,25 @@ tripped limits are recorded under `guards.tripped` with `guards.forced: true`.
   table (`mode: replace`). `strategy: diff` does not report one, so use
   `max_deletes` there.
 - Unknown keys under `guards` are rejected, so a typo cannot disable a guard.
+- Percentage comparisons use exact decimal arithmetic. The displayed percentage
+  is rounded to two decimals, but the decision is not: 290/100000 is exactly
+  0.29% and passes a 0.29% limit, while 291/100000 trips it.
 - **Run-time enforcement in this release is PostgreSQL/MySQL only.** For
-  `mirror.strategy: destination`, drt counts both the exact DELETE predicate
-  (including `mirror.scope`) and the same scoped baseline in the DELETE's
-  connection. Tracked mirror counts the staged tracked-key difference and its
-  prior tracked baseline. Diff mirror uses the exact removed-key count but has
-  no percentage baseline, so `max_delete_pct` fails closed. Replace with
-  `replace_strategy: swap` compares shadow and live row counts; a refused
-  shrink drops the shadow table. Other destinations are covered by later
-  connector legs.
+  `mirror.strategy: destination`, the same scoped predicate used for the
+  baseline (including `mirror.scope`) is deleted inside the transaction and the
+  actual row count is authoritative. Tracked and diff mirror do the same;
+  tracked uses its prior tracked baseline, while diff has no percentage
+  baseline, so `max_delete_pct` fails closed after rolling back the delete.
+  Replace-swap takes a PostgreSQL table lock before counting live keys absent
+  from the shadow (composite keys and NULLs compare safely) and holds it through
+  the rename commit. MySQL uses `LOCK TABLES ... WRITE` around count and atomic
+  `RENAME TABLE`, but its DDL is not transactional: this closes ordinary writer
+  races but cannot make post-rename cleanup rollbackable. A refused swap drops
+  the shadow best-effort without masking the guard trip.
+- **Keyless replace-swap is a cardinality check only.** Without
+  `destination.upsert_key`, row identity is unknowable, so deletes fall back to
+  `max(live row count - shadow row count, 0)`. Equal-sized disjoint contents
+  cannot be detected; configure an upsert key for key-accurate protection.
 - **`replace_strategy: truncate` remains unguarded at run time.** Its destructive
   statement happens before rows are loaded, so there is no complete replacement
   count to judge at the finalize seam. Use plan/apply for that strategy.
@@ -307,6 +324,11 @@ tripped limits are recorded under `guards.tripped` with `guards.forced: true`.
   write extracts again; PostgreSQL/MySQL then re-check delete-side limits at
   finalization. Create/update changes in that short window remain protected by
   review-time verification only.
+- Forced-guard details are persisted in local and GCS/S3 object-store history
+  and in `target/drt/run_results.json`. Warehouse-backed `_drt_history` keeps
+  its existing schema for compatibility with already-managed tables and does
+  not store the new `guards` field yet. A follow-up schema-evolution issue is
+  needed before that backend can retain it.
 
 ## Exit codes
 

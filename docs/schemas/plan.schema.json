@@ -171,6 +171,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "delete_baseline": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "insert": {
           "minimum": 0,
           "type": "integer"

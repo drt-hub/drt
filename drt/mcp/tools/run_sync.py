@@ -28,6 +28,7 @@ def run_sync(
     limit: int | None = None,
     vars: dict[str, Any] | None = None,
     force_guards: bool = False,
+    approved_by: str | None = None,
 ) -> dict[str, Any]:
     from drt.cli._helpers import resolve_profile_name
     from drt.cli.main import _get_destination, _get_source
@@ -35,6 +36,15 @@ def run_sync(
     from drt.config.parser import project_vars as resolve_project_vars
     from drt.engine.sync import run_sync as engine_run_sync
     from drt.state.factory import build_state_bundle
+
+    approver = (approved_by or "").strip()
+    if force_guards and (not approver or len(approver) > 200):
+        return {
+            "error": (
+                "approved_by is required when force_guards=true: name the person "
+                "who approved the override."
+            )
+        }
 
     if compute_diff and not dry_run:
         return {
@@ -144,6 +154,8 @@ def run_sync(
     guards_outcome = getattr(result, "guards", None)
     if guards_outcome is not None:
         response["guards"] = guards_outcome
+    if force_guards:
+        response["approved_by"] = approver
     diff_value = getattr(result, "diff", None)
     if compute_diff and diff_value is not None:
         from drt.cli.output import diff_to_dict

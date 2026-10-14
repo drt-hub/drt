@@ -502,6 +502,36 @@ class MySQLDestination(BaseSqlDestination):
     def _build_table_count(self, table: str) -> Any:
         return f"SELECT COUNT(*) FROM {self._quote_ident(table)}"
 
+    def _build_swap_delete_count(self, table: str, shadow: str, upsert_cols: list[str]) -> Any:
+        """Count live keys absent from the shadow using MySQL's ``<=>``."""
+        equality = " AND ".join(f"l.`{col}` <=> s.`{col}`" for col in upsert_cols)
+        return (
+            f"SELECT COUNT(*) FROM {self._quote_ident(table)} AS l WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {self._quote_ident(shadow)} AS s WHERE {equality})"
+        )
+
+    def _lock_swap_tables(self, cur: Any, table: str, shadow: str) -> None:
+        """Take MySQL's strongest table locks around guarded count + rename.
+
+        MySQL DDL is not transactional. ``LOCK TABLES`` closes the ordinary
+        writer window before the count, but metadata-lock/DDL failure behavior
+        still cannot provide PostgreSQL's rollback guarantee; the operator
+        guide documents that residual explicitly.
+        """
+        cur.execute(
+            f"LOCK TABLES {self._quote_ident(table)} WRITE, {self._quote_ident(shadow)} WRITE"
+        )
+
+    def _unlock_swap_tables(self, conn: Any) -> None:
+        try:
+            conn.cursor().execute("UNLOCK TABLES")
+        except Exception as error:  # noqa: BLE001 — preserve swap/guard outcome
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "failed to release MySQL replace-swap table locks: %s", error
+            )
+
     def _build_drop_table(self, table: str) -> Any:
         return f"DROP TABLE IF EXISTS {self._quote_ident(table)}"
 

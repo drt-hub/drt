@@ -314,6 +314,29 @@ def test_run_one_forced_guard_result_has_structured_json(
     assert entry["guards"] == outcome
 
 
+def test_run_one_preserves_forced_guard_metadata_when_cleanup_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.cli.main import _run_one
+
+    outcome = {"tripped": [{"guard": "max_deletes", "observed": 2}], "forced": True}
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        error = RuntimeError("old-table cleanup failed")
+        error._drt_guards = outcome  # type: ignore[attr-defined]
+        raise error
+
+    monkeypatch.setattr("drt.engine.sync.run_sync", boom)
+    monkeypatch.setattr("drt.cli.commands.run.get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _sync, _project: None)
+    from tests.unit.test_cli_run_telemetry import _ctx, _fake_profile, _fake_sync
+
+    _name, entry, had_error = _run_one(_fake_sync(), _ctx(json_mode=True), _fake_profile())
+
+    assert had_error is True
+    assert entry["guards"] == outcome
+
+
 def test_render_to_console_does_not_crash() -> None:
     """Smoke test: the Rich panel renderer is callable end-to-end."""
     from drt.cli.errors import render_to_console

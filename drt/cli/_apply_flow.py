@@ -405,8 +405,9 @@ def apply_plan(
             plan_id, sync_name, applied=False, message="The plan has no changes; nothing to apply."
         )
 
-    # Guards are judged on the freshly recomputed plan, not on the file: the file
-    # records what was true when it was made, this is what would be written now.
+    # Guards are judged on the freshly recomputed plan. A force can waive only
+    # a trip that was also present in the reviewed artifact, and only up to the
+    # reviewed observed value; it is approval of that plan, not of later growth.
     tripped = [t.to_dict() for t in current.guard_trips]
     if tripped and not force_guards:
         raise ApplyRefused(
@@ -414,6 +415,32 @@ def apply_plan(
             + "\n".join(f"  - {t['message']}" for t in tripped)
             + "\nFix the cause, or review and re-run with --force-guards."
         )
+    reviewed_trips = {str(t["guard"]): t for t in doc.get("guards", {}).get("tripped", [])}
+    reviewed_deletes = int(doc["summary"]["delete"])
+    reviewed_baseline_value = doc["summary"].get("delete_baseline")
+    reviewed_baseline = (
+        int(reviewed_baseline_value) if reviewed_baseline_value is not None else None
+    )
+    if tripped and force_guards:
+        for trip in current.guard_trips:
+            reviewed = reviewed_trips.get(trip.guard)
+            larger = reviewed is None
+            if not larger and trip.guard == "max_deletes":
+                larger = current.summary["delete"] > reviewed_deletes
+            elif not larger and trip.guard == "max_delete_pct":
+                if current.delete_baseline and reviewed_baseline:
+                    larger = (
+                        current.summary["delete"] * reviewed_baseline
+                        > reviewed_deletes * current.delete_baseline
+                    )
+                else:
+                    larger = current.summary["delete"] > reviewed_deletes
+            if larger:
+                raise ApplyRefused(
+                    f"{trip.message}. This trip is larger than (or was absent from) the "
+                    "reviewed plan, so --force-guards cannot waive it. Re-run `drt plan`."
+                )
+
     if tripped:
         say(
             "Applying despite tripped guards (--force-guards): "
@@ -468,6 +495,9 @@ def apply_plan(
         audit_fields=project.state.audit_trail.fields,
         audit_retain_days=project.state.audit_trail.retain_days or 30,
         force_guards=force_guards,
+        reviewed_forced_guards=set(reviewed_trips) if force_guards else None,
+        reviewed_guard_deletes=reviewed_deletes if force_guards else None,
+        reviewed_guard_baseline=reviewed_baseline if force_guards else None,
         project_dir=project_dir,
     )
     try:
@@ -480,6 +510,10 @@ def apply_plan(
     if approved_by:
         entry["approved_by"] = approved_by
     if tripped:
+        # Apply records the reviewed override under one canonical key. The
+        # engine's generic ``guards`` field is for plain run/MCP run output and
+        # would duplicate the same trip here.
+        entry.pop("guards", None)
         entry["guards_forced"] = tripped
     _write_run_results(
         project_dir / "target" / "drt",

@@ -21,6 +21,7 @@ entry.
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import nullcontext
 from typing import Any
 
@@ -35,6 +36,13 @@ from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
 # failure; verified against a real Postgres that reuse after RELEASE
 # doesn't grow the savepoint stack across a large batch.
 _ROW_SAVEPOINT = "drt_row_sp"
+
+
+def _attach_exception_detail(error: BaseException, detail: str) -> None:
+    """Attach best-effort cleanup context without depending on Python 3.11 notes."""
+    notes = list(getattr(error, "_drt_notes", []))
+    notes.append(detail)
+    error._drt_notes = notes  # type: ignore[attr-defined]
 
 
 def _union_columns(records: list[dict[str, Any]]) -> list[str]:
@@ -249,31 +257,61 @@ class BaseSqlDestination:
         shadow = self._shadow_name(table)
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
+        swap_locked = False
         try:
             with self._swap_cursor_context(conn, sync_options) as cur:
                 if self._delete_guards_enabled(sync_options):
                     from drt.engine.guards import GuardTripped
 
+                    self._lock_swap_tables(cur, table, shadow)
+                    swap_locked = True
                     cur.execute(self._build_table_count(table))
                     live_rows = int(cur.fetchone()[0])
-                    cur.execute(self._build_table_count(shadow))
-                    shadow_rows = int(cur.fetchone()[0])
+                    upsert_cols = list(getattr(config, "upsert_key", None) or [])
+                    if upsert_cols:
+                        cur.execute(self._build_swap_delete_count(table, shadow, upsert_cols))
+                        deletes = int(cur.fetchone()[0])
+                    else:
+                        # A keyless replace cannot distinguish replacement rows
+                        # from deleted rows. This deliberately remains the
+                        # documented cardinality-only fallback.
+                        cur.execute(self._build_table_count(shadow))
+                        shadow_rows = int(cur.fetchone()[0])
+                        deletes = max(live_rows - shadow_rows, 0)
                     try:
                         self._enforce_delete_guards(
                             sync_options,
-                            deletes=max(live_rows - shadow_rows, 0),
+                            deletes=deletes,
                             baseline=live_rows,
                         )
-                    except GuardTripped:
+                    except GuardTripped as guard_error:
                         # A refused replace must not leave a stale shadow for a
-                        # later run to mistake for reviewed data.
-                        cur.execute(self._build_drop_table(shadow))
-                        conn.commit()
+                        # later run to mistake for reviewed data. Cleanup is
+                        # best-effort: its failure must never mask the structured
+                        # guard refusal that caused it.
+                        try:
+                            cur.execute(self._build_drop_table(shadow))
+                            conn.commit()
+                        except Exception as cleanup_error:  # noqa: BLE001
+                            try:
+                                conn.rollback()
+                            except Exception:  # noqa: BLE001 — preserve GuardTripped
+                                pass
+                            detail = (
+                                f"replace-swap shadow cleanup failed after guard refusal: "
+                                f"{type(cleanup_error).__name__}: {cleanup_error}"
+                            )
+                            logging.getLogger(__name__).warning(detail)
+                            _attach_exception_detail(guard_error, detail)
                         raise
                 self._complete_swap(conn, cur, table, shadow)
         finally:
-            conn.close()
-            self._reset_swap_state_after_completion()
+            try:
+                if swap_locked:
+                    self._unlock_swap_tables(conn)
+            finally:
+                conn.close()
+                self._reset_swap_state_after_completion()
 
         return SyncResult()
 
@@ -339,18 +377,8 @@ class BaseSqlDestination:
                 scopes,
                 negate=True,
             )
+            baseline: int | None = None
             if self._delete_guards_enabled(sync_options):
-                count_stmt, count_params = self._build_mirror_count(
-                    self._mirror_table_ident(config),
-                    upsert_cols,
-                    keys,
-                    scope_cols,
-                    scopes,
-                    negate=True,
-                    baseline=False,
-                )
-                cur.execute(count_stmt, count_params)
-                deletes = int(cur.fetchone()[0])
                 baseline_stmt, baseline_params = self._build_mirror_count(
                     self._mirror_table_ident(config),
                     upsert_cols,
@@ -362,8 +390,25 @@ class BaseSqlDestination:
                 )
                 cur.execute(baseline_stmt, baseline_params)
                 baseline = int(cur.fetchone()[0])
-                self._enforce_delete_guards(sync_options, deletes=deletes, baseline=baseline)
             cur.execute(stmt, params)
+            if self._delete_guards_enabled(sync_options):
+                try:
+                    self._enforce_delete_guards(
+                        sync_options,
+                        deletes=self._affected_rows(cur),
+                        baseline=baseline,
+                    )
+                except Exception as guard_error:
+                    try:
+                        conn.rollback()
+                    except Exception as rollback_error:  # noqa: BLE001
+                        _attach_exception_detail(
+                            guard_error,
+                            "rollback after guard refusal failed: "
+                            f"{type(rollback_error).__name__}: "
+                            f"{rollback_error}",
+                        )
+                    raise
             self._commit_mirror(conn)
         finally:
             conn.close()
@@ -395,13 +440,6 @@ class BaseSqlDestination:
         upsert_cols = config.upsert_key
         keys = [tuple(row[col] for col in upsert_cols) for row in removed_keys]
 
-        if self._delete_guards_enabled(sync_options):
-            self._enforce_delete_guards(
-                sync_options,
-                deletes=len(keys),
-                baseline=None,
-            )
-
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
@@ -409,6 +447,24 @@ class BaseSqlDestination:
                 self._mirror_table_ident(config), upsert_cols, keys, negate=False
             )
             cur.execute(stmt, params)
+            if self._delete_guards_enabled(sync_options):
+                try:
+                    self._enforce_delete_guards(
+                        sync_options,
+                        deletes=self._affected_rows(cur),
+                        baseline=None,
+                    )
+                except Exception as guard_error:
+                    try:
+                        conn.rollback()
+                    except Exception as rollback_error:  # noqa: BLE001
+                        _attach_exception_detail(
+                            guard_error,
+                            "rollback after guard refusal failed: "
+                            f"{type(rollback_error).__name__}: "
+                            f"{rollback_error}",
+                        )
+                    raise
             self._commit_mirror(conn)
         finally:
             conn.close()
@@ -814,6 +870,12 @@ class BaseSqlDestination:
         """
         raise NotImplementedError
 
+    def _lock_swap_tables(self, cur: Any, table: str, shadow: str) -> None:
+        """Quiesce a guarded swap before counting. Unsupported dialects no-op."""
+
+    def _unlock_swap_tables(self, conn: Any) -> None:
+        """Release an explicit swap lock. Transactional locks end at commit."""
+
     def _reset_swap_state(self) -> None:
         """Clear the common shadow-table state after swap completion.
 
@@ -894,6 +956,9 @@ class BaseSqlDestination:
             deletes=deletes,
             baseline=baseline,
             force=sync_options._force_guards,
+            reviewed_deletes=sync_options._reviewed_guard_deletes,
+            reviewed_baseline=sync_options._reviewed_guard_baseline,
+            reviewed_guards=sync_options._reviewed_forced_guards,
         )
         if trips:
             sync_options._forced_guard_trips.extend(trips)
@@ -916,9 +981,19 @@ class BaseSqlDestination:
         """Build ``SELECT COUNT(*)`` for a swap's live/shadow table."""
         raise NotImplementedError
 
+    def _build_swap_delete_count(self, table: str, shadow: str, upsert_cols: list[str]) -> Any:
+        """Count live keys absent from a replace shadow, with NULL-safe equality."""
+        raise NotImplementedError
+
     def _build_drop_table(self, table: str) -> Any:
         """Build the cleanup DROP used when a replace-swap guard refuses."""
         raise NotImplementedError
+
+    @staticmethod
+    def _affected_rows(cur: Any) -> int:
+        """Normalize DB-API rowcount after a DELETE."""
+        rowcount = getattr(cur, "rowcount", 0)
+        return int(rowcount) if rowcount is not None and rowcount > 0 else 0
 
     def _mirror_table_ident(self, config: Any) -> str:
         """Target-table identifier handed to ``_build_mirror_delete``.
@@ -1218,7 +1293,6 @@ class BaseSqlDestination:
                 config,
                 [(key_hash(k), key_json(k)) for k in current],
             )
-            guard_deletes: int | None = None
             guard_baseline: int | None = None
             previous: list[Any] = []
 
@@ -1252,10 +1326,6 @@ class BaseSqlDestination:
                     )
                     diff_params = self._state_params(sync_name, scope_spec, *observed_json)
                 if self._delete_guards_enabled(sync_options):
-                    count_sql = diff_sql.replace(f"SELECT {projection}", "SELECT COUNT(*)", 1)
-                    cur.execute(self._state_sql(count_sql, state_ident), diff_params)
-                    guard_deletes = int(cur.fetchone()[0])
-
                     baseline_sql = "SELECT COUNT(*) FROM {} s WHERE s.sync_name = %s"
                     baseline_params = self._state_params(sync_name)
                     if scope_sql and observed_scopes:
@@ -1301,13 +1371,9 @@ class BaseSqlDestination:
             else:
                 to_delete = [decode_key(kj) for _h, kj in raw_diff]
 
+            guard_baseline_exact = guard_baseline
             if self._delete_guards_enabled(sync_options):
-                # The staged path counts the state anti-join in SQL. Legacy
-                # state rows with no scope metadata still need the existing
-                # exact Python scope filter; use its smaller exact count rather
-                # than the conservative coarse SQL count in that rare case.
-                deletes = len(to_delete) if guard_deletes is None or stale_scope else guard_deletes
-                baseline = guard_baseline
+                baseline = guard_baseline_exact
                 if stale_scope and scope_positions is not None:
                     # The SQL predicate deliberately admits legacy rows whose
                     # stored scope is unknown. Their delete count is exact
@@ -1329,11 +1395,7 @@ class BaseSqlDestination:
                             )
                         else:
                             baseline = len(previous)
-                self._enforce_delete_guards(
-                    sync_options,
-                    deletes=deletes,
-                    baseline=baseline,
-                )
+                guard_baseline_exact = baseline
 
             # #890 backfill. Rows tracked before the scope columns existed are
             # never rewritten by the state pass — #694 part 2 deliberately
@@ -1351,28 +1413,12 @@ class BaseSqlDestination:
             #
             # Rows about to be deleted are skipped: writing a scope onto a row
             # that goes away two statements later is pure waste.
+            heal: list[tuple[str, str]] = []
             if stale_scope and scope_positions is not None:
                 doomed = {key_hash(k) for k in to_delete}
                 heal = [(h, kj) for h, kj in stale_scope if h not in doomed][
                     :SCOPE_BACKFILL_PER_RUN
                 ]
-                if heal:
-                    cur.executemany(
-                        self._state_sql(
-                            "UPDATE {} SET scope_spec = %s, scope_key = %s "
-                            "WHERE sync_name = %s AND key_hash = %s",
-                            state_ident,
-                        ),
-                        [
-                            (
-                                scope_spec,
-                                scope_key_json(decode_key(kj), scope_positions),
-                                sync_name,
-                                h,
-                            )
-                            for h, kj in heal
-                        ],
-                    )
 
             if to_delete:
                 stmt, params = self._build_mirror_delete(
@@ -1384,6 +1430,23 @@ class BaseSqlDestination:
                     negate=False,
                 )
                 cur.execute(stmt, params)
+                if self._delete_guards_enabled(sync_options):
+                    try:
+                        self._enforce_delete_guards(
+                            sync_options,
+                            deletes=self._affected_rows(cur),
+                            baseline=guard_baseline_exact,
+                        )
+                    except Exception as guard_error:
+                        try:
+                            conn.rollback()
+                        except Exception as rollback_error:  # noqa: BLE001
+                            _attach_exception_detail(
+                                guard_error,
+                                "rollback after guard refusal failed: "
+                                f"{type(rollback_error).__name__}: {rollback_error}",
+                            )
+                        raise
             elif not previous_exists:
                 # No prior state at all for this sync (never run, or lost
                 # state) — baseline. Prior state existing for *other* scopes
@@ -1396,6 +1459,29 @@ class BaseSqlDestination:
                     sync_name,
                     STATE_TABLE,
                     len(current),
+                )
+
+            # State healing and the tracked-state rewrite deliberately begin
+            # only after the authoritative affected-row guard has passed. On
+            # PostgreSQL and InnoDB they commit atomically with the target
+            # DELETE; a refusal rolls the target DELETE back first.
+            if heal:
+                assert scope_positions is not None
+                cur.executemany(
+                    self._state_sql(
+                        "UPDATE {} SET scope_spec = %s, scope_key = %s "
+                        "WHERE sync_name = %s AND key_hash = %s",
+                        state_ident,
+                    ),
+                    [
+                        (
+                            scope_spec,
+                            scope_key_json(decode_key(kj), scope_positions),
+                            sync_name,
+                            h,
+                        )
+                        for h, kj in heal
+                    ],
                 )
 
             # Rewrite this sync's state: remove exactly the stale rows just

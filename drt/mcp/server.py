@@ -108,6 +108,7 @@ def create_server(project_dir: Path | None = None) -> Any:
         limit: int | None = None,
         vars: dict[str, Any] | None = None,
         force_guards: bool = False,
+        approved_by: str | None = None,
     ) -> dict[str, Any]:
         """Run a specific drt sync.
 
@@ -146,8 +147,10 @@ def create_server(project_dir: Path | None = None) -> Any:
                 here). Takes precedence over ``DRT_VAR_*`` and
                 ``drt_project.yml``'s ``vars:``.
             force_guards: Proceed when a run-time delete guard trips and
-                record the explicit override. Leave False unless a human has
-                accepted the named limit and observed value.
+                record the explicit override. Requires non-empty
+                ``approved_by``.
+            approved_by: Person who approved a forced guard override. Required
+                when ``force_guards=True`` and recorded in the result.
 
         Returns:
             Result summary with success count, failed count, errors, and
@@ -166,6 +169,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             limit=limit,
             vars=vars,
             force_guards=force_guards,
+            approved_by=approved_by,
         )
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})

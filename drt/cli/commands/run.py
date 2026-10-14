@@ -153,6 +153,11 @@ class _RunContext:
     audit_retain_days: int = 30
     # Explicit operator override for run-time delete guards (#1218).
     force_guards: bool = False
+    # ``drt apply`` narrows that override to the reviewed plan. Ordinary
+    # ``drt run`` leaves these unset and keeps force-all run-time semantics.
+    reviewed_forced_guards: set[str] | None = None
+    reviewed_guard_deletes: int | None = None
+    reviewed_guard_baseline: int | None = None
     # Where the project lives. ``drt run`` is always invoked from it; the MCP
     # server may not be, so ``drt apply`` passes it explicitly.
     project_dir: Path = Path(".")
@@ -256,6 +261,9 @@ def _run_one(
                 audit_fields=ctx.audit_fields,
                 audit_retain_days=ctx.audit_retain_days,
                 force_guards=ctx.force_guards,
+                reviewed_forced_guards=ctx.reviewed_forced_guards,
+                reviewed_guard_deletes=ctx.reviewed_guard_deletes,
+                reviewed_guard_baseline=ctx.reviewed_guard_baseline,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -297,6 +305,10 @@ def _run_one(
                     "tripped": [trip.to_dict() for trip in e.trips],
                     "forced": False,
                 }
+            else:
+                forced_outcome = getattr(e, "_drt_guards", None)
+                if forced_outcome is not None:
+                    entry["guards"] = forced_outcome
             if ctx.log_json:
                 logging.error(
                     "sync_complete",

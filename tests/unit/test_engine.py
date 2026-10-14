@@ -1592,6 +1592,18 @@ def test_finalize_sync_skipped_on_dry_run(tmp_path: Path) -> None:
 
 
 class _GuardingFinalizeDestination(FakeDestination):
+    def __init__(
+        self,
+        deletes: int = 2,
+        *,
+        fail_after_guard: bool = False,
+        reject_guard_metadata: bool = False,
+    ) -> None:
+        super().__init__()
+        self.deletes = deletes
+        self.fail_after_guard = fail_after_guard
+        self.reject_guard_metadata = reject_guard_metadata
+
     def finalize_sync(
         self,
         config: DestinationConfig,
@@ -1601,11 +1613,25 @@ class _GuardingFinalizeDestination(FakeDestination):
 
         trips = enforce_delete_guards(
             sync_options.guards,
-            deletes=2,
+            deletes=self.deletes,
             baseline=3,
             force=sync_options._force_guards,
+            reviewed_deletes=sync_options._reviewed_guard_deletes,
+            reviewed_baseline=sync_options._reviewed_guard_baseline,
+            reviewed_guards=sync_options._reviewed_forced_guards,
         )
         sync_options._forced_guard_trips.extend(trips)
+        if self.reject_guard_metadata:
+
+            class NoMetadataError(RuntimeError):
+                def __setattr__(self, name: str, value: object) -> None:
+                    if name == "_drt_guards":
+                        raise TypeError("metadata rejected")
+                    super().__setattr__(name, value)
+
+            raise NoMetadataError("post-commit cleanup failed")
+        if self.fail_after_guard:
+            raise RuntimeError("post-commit cleanup failed")
         return SyncResult()
 
 
@@ -1678,6 +1704,62 @@ def test_force_guards_reaches_finalize_and_is_recorded_in_result_and_history(
     assert result.guards["forced"] is True
     assert result.guards["tripped"][0]["guard"] == "max_deletes"
     assert history.read(sync.name)[0].guards == result.guards
+
+
+def test_reviewed_force_refuses_a_larger_late_runtime_trip(tmp_path: Path) -> None:
+    from drt.engine.guards import GuardTripped
+
+    sync = _runtime_guard_sync()
+    with pytest.raises(GuardTripped, match="Re-run `drt plan`") as raised:
+        run_sync(
+            sync,
+            FakeSource([{"id": 2}]),
+            _GuardingFinalizeDestination(deletes=3),
+            _make_profile(),
+            tmp_path,
+            force_guards=True,
+            reviewed_forced_guards={"max_deletes"},
+            reviewed_guard_deletes=2,
+            reviewed_guard_baseline=3,
+        )
+
+    assert raised.value.trips[0].observed == 3
+
+
+def test_forced_trip_reaches_history_and_exception_when_cleanup_fails(tmp_path: Path) -> None:
+    from drt.state.history import HistoryManager
+
+    sync = _runtime_guard_sync()
+    history = HistoryManager(tmp_path)
+    with pytest.raises(RuntimeError, match="post-commit cleanup failed") as raised:
+        run_sync(
+            sync,
+            FakeSource([{"id": 2}]),
+            _GuardingFinalizeDestination(fail_after_guard=True),
+            _make_profile(),
+            tmp_path,
+            history_manager=history,
+            force_guards=True,
+        )
+
+    outcome = getattr(raised.value, "_drt_guards")
+    assert outcome["forced"] is True
+    assert outcome["tripped"][0]["guard"] == "max_deletes"
+    assert history.read(sync.name)[0].guards == outcome
+
+
+def test_cleanup_error_that_rejects_metadata_is_not_masked(tmp_path: Path) -> None:
+    sync = _runtime_guard_sync()
+
+    with pytest.raises(RuntimeError, match="post-commit cleanup failed"):
+        run_sync(
+            sync,
+            FakeSource([{"id": 2}]),
+            _GuardingFinalizeDestination(reject_guard_metadata=True),
+            _make_profile(),
+            tmp_path,
+            force_guards=True,
+        )
 
 
 # ---------------------------------------------------------------------------

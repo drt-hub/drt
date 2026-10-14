@@ -314,6 +314,7 @@ class TestDatabricksWarehouseHistoryStore:
                     status="success",
                     records_synced=1,
                     records_failed=0,
+                    guards={"forced": True, "tripped": [{"guard": "max_deletes"}]},
                 )
             )
 
@@ -322,6 +323,8 @@ class TestDatabricksWarehouseHistoryStore:
         assert "SELECT" in sql
         assert "parse_json(?)" in sql
         assert "VALUES" not in sql
+        assert "guards" not in sql
+        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 12
 
     def test_read_reconstructs_history_entry_from_a_json_string_variant(self) -> None:
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, "[]", None, False, "run-1", "sync-run-1")

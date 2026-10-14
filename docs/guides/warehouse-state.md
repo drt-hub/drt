@@ -80,6 +80,13 @@ Three tables, created under `managed_schema`, one per persistence surface:
 These are drt-managed tables — do not write to them directly except for read-only observability
 queries. Their exact columns are not a stable public API.
 
+Compatibility note for change guards: a forced run-time guard is recorded in
+`target/drt/run_results.json` and in local or GCS/S3 object-store history, but not yet in
+warehouse-backed `_drt_history`. The four warehouse history stores deliberately ignore the
+additive in-memory `HistoryEntry.guards` field instead of adding a column that would break inserts
+into already-managed tables. Persisting it here needs a follow-up, backward-compatible warehouse
+schema-evolution design.
+
 ## Escape hatch and reversibility
 
 Same discipline as the managed-table primitive underneath this backend

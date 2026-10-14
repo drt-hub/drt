@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from drt.config.credentials import PostgresProfile
+from drt.config.credentials import MySQLProfile, PostgresProfile
 from drt.config.models import (
     MySQLDestinationConfig,
     PostgresDestinationConfig,
@@ -28,6 +28,7 @@ from drt.engine.observer import StatePersistingObserver
 from drt.engine.sync import run_sync
 from drt.state.history import HistoryManager
 from drt.state.manager import StateManager, SyncState
+from drt.state.watermark import LocalWatermarkStorage
 
 from .conftest import require_docker
 
@@ -125,6 +126,8 @@ def test_postgres_destination_guard_trip_force_and_within_limit_are_atomic(
         SyncState(sync.name, "2026-01-01T00:00:00+00:00", 3, "success", last_cursor_value="old")
     )
     history = HistoryManager(tmp_path)
+    watermarks = LocalWatermarkStorage(tmp_path)
+    watermarks.save(sync.name, "old-watermark")
 
     with pytest.raises(GuardTripped):
         run_sync(
@@ -134,11 +137,13 @@ def test_postgres_destination_guard_trip_force_and_within_limit_are_atomic(
             pg,
             tmp_path,
             state_manager=state,
+            watermark_storage=watermarks,
             history_manager=history,
-            observer=StatePersistingObserver(state, None),
+            observer=StatePersistingObserver(state, watermarks),
         )
     assert _pg_rows(pg, table) == [(1, "one"), (2, "two"), (3, "three")]
     assert state.get_last_sync(sync.name).last_cursor_value == "old"  # type: ignore[union-attr]
+    assert watermarks.get(sync.name) == "old-watermark"
     assert history.read(sync.name)[0].guards["forced"] is False  # type: ignore[index,union-attr]
 
     result = run_sync(
@@ -164,6 +169,54 @@ def test_postgres_destination_guard_trip_force_and_within_limit_are_atomic(
         tmp_path,
     )
     assert _pg_rows(pg, table) == [(1, "one")]
+
+
+def test_postgres_scoped_composite_destination_trip_is_atomic(
+    pg: PostgresProfile, tmp_path: Path
+) -> None:
+    table = "runtime_guard_scoped_composite"
+    with _pg_connect(pg) as conn, conn.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+        cur.execute(
+            f"CREATE TABLE {table} (tenant TEXT, id INTEGER, name TEXT, PRIMARY KEY (tenant, id))"
+        )
+        cur.execute(f"INSERT INTO {table} VALUES ('a', 1, 'a1'), ('a', 2, 'a2'), ('b', 1, 'b1')")
+
+    config = _pg_config(pg, table).model_copy(update={"upsert_key": ["tenant", "id"]})
+    sync = SyncConfig.model_validate(
+        {
+            "name": "runtime_scoped_composite",
+            "model": "SELECT 1",
+            "destination": config.model_dump(),
+            "sync": {
+                "mode": "mirror",
+                "mirror": {"scope": ["tenant"]},
+                "guards": {"max_deletes": 0},
+            },
+        }
+    )
+    state = StateManager(tmp_path)
+    state.save_sync(SyncState(sync.name, "old", 3, "success", last_cursor_value="old"))
+    watermarks = LocalWatermarkStorage(tmp_path)
+    watermarks.save(sync.name, "old-watermark")
+
+    with pytest.raises(GuardTripped):
+        run_sync(
+            sync,
+            _Rows([{"tenant": "a", "id": 1, "name": "a1"}]),
+            PostgresDestination(),
+            pg,
+            tmp_path,
+            state_manager=state,
+            watermark_storage=watermarks,
+            observer=StatePersistingObserver(state, watermarks),
+        )
+
+    with _pg_connect(pg) as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT tenant, id, name FROM {table} ORDER BY tenant, id")
+        assert cur.fetchall() == [("a", 1, "a1"), ("a", 2, "a2"), ("b", 1, "b1")]
+    assert state.get_last_sync(sync.name).last_cursor_value == "old"  # type: ignore[union-attr]
+    assert watermarks.get(sync.name) == "old-watermark"
 
 
 def _load_and_finalize(
@@ -219,6 +272,21 @@ def test_postgres_tracked_diff_and_replace_swap_guards(pg: PostgresProfile) -> N
     swap_table = "runtime_guard_swap"
     _reset_pg(pg, swap_table)
     swap_config = _pg_config(pg, swap_table)
+    disjoint_options = SyncOptions(
+        mode="replace",
+        replace_strategy="swap",
+        guards={"max_deletes": 0},
+    )
+    disjoint = PostgresDestination()
+    disjoint.load(
+        [{"id": value, "name": f"new-{value}"} for value in (10, 11, 12)],
+        swap_config,
+        disjoint_options,
+    )
+    with pytest.raises(GuardTripped):
+        disjoint.finalize_sync(swap_config, disjoint_options)
+    assert _pg_rows(pg, swap_table) == [(1, "one"), (2, "two"), (3, "three")]
+
     swap_options = SyncOptions(
         mode="replace",
         replace_strategy="swap",
@@ -240,7 +308,7 @@ def test_postgres_tracked_diff_and_replace_swap_guards(pg: PostgresProfile) -> N
     assert _pg_rows(pg, swap_table) == [(1, "one")]
 
 
-def test_mysql_destination_guard_refuses_then_forces() -> None:
+def test_mysql_destination_guard_refuses_then_forces_through_engine(tmp_path: Path) -> None:
     require_docker()
     with testcontainers_mysql.MySqlContainer("mysql:8.4") as mysql:
         config = MySQLDestinationConfig(
@@ -254,7 +322,19 @@ def test_mysql_destination_guard_refuses_then_forces() -> None:
             upsert_key=["id"],
         )
 
-        def connect() -> Any:
+        profile = MySQLProfile(
+            type="mysql",
+            host=config.host,
+            port=config.port,
+            dbname=config.dbname,
+            user=config.user,
+            password=config.password,
+        )
+
+        # ``_connect`` is a classmethod. Accept the bound/config arguments just
+        # like the other local_sql MySQL test doubles instead of accidentally
+        # requiring a zero-argument call.
+        def connect(*_args: Any, **_kwargs: Any) -> Any:
             return pymysql.connect(
                 host=config.host,
                 port=config.port,
@@ -268,21 +348,51 @@ def test_mysql_destination_guard_refuses_then_forces() -> None:
             cur.execute("INSERT INTO runtime_guard VALUES (1, 'one'), (2, 'two'), (3, 'three')")
             conn.commit()
 
-        options = SyncOptions(mode="mirror", guards={"max_deletes": 1})
-        destination = MySQLDestination()
+        sync = SyncConfig.model_validate(
+            {
+                "name": "runtime_mysql_engine",
+                "model": "SELECT 1",
+                "destination": config.model_dump(),
+                "sync": {"mode": "mirror", "guards": {"max_deletes": 1}},
+            }
+        )
+        state = StateManager(tmp_path)
+        state.save_sync(SyncState(sync.name, "old", 3, "success", last_cursor_value="old"))
+        watermarks = LocalWatermarkStorage(tmp_path)
+        watermarks.save(sync.name, "old-watermark")
+        history = HistoryManager(tmp_path)
+
         with patch.object(MySQLDestination, "_connect", side_effect=connect):
-            destination.load([{"id": 1, "name": "one"}], config, options)
             with pytest.raises(GuardTripped):
-                destination.finalize_sync(config, options)
+                run_sync(
+                    sync,
+                    _Rows([{"id": 1, "name": "one"}]),
+                    MySQLDestination(),
+                    profile,
+                    tmp_path,
+                    state_manager=state,
+                    watermark_storage=watermarks,
+                    history_manager=history,
+                    observer=StatePersistingObserver(state, watermarks),
+                )
         with connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM runtime_guard")
             assert cur.fetchone()[0] == 3
+        assert state.get_last_sync(sync.name).last_cursor_value == "old"  # type: ignore[union-attr]
+        assert watermarks.get(sync.name) == "old-watermark"
+        assert history.read(sync.name)[0].guards["forced"] is False  # type: ignore[index,union-attr]
 
-        options._force_guards = True
-        destination = MySQLDestination()
         with patch.object(MySQLDestination, "_connect", side_effect=connect):
-            destination.load([{"id": 1, "name": "one"}], config, options)
-            destination.finalize_sync(config, options)
+            result = run_sync(
+                sync,
+                _Rows([{"id": 1, "name": "one"}]),
+                MySQLDestination(),
+                profile,
+                tmp_path,
+                history_manager=history,
+                force_guards=True,
+            )
         with connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT id FROM runtime_guard ORDER BY id")
             assert cur.fetchall() == ((1,),)
+        assert result.guards is not None and result.guards["forced"] is True

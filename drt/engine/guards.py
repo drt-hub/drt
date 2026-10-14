@@ -9,6 +9,7 @@ reads as "within limits".
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 
@@ -31,11 +32,14 @@ class GuardTrip:
 class GuardTripped(Exception):
     """A run-time change guard refused destructive finalization."""
 
-    def __init__(self, trips: list[GuardTrip]) -> None:
+    def __init__(self, trips: list[GuardTrip], *, replan_required: bool = False) -> None:
         self.trips = trips
+        self.replan_required = replan_required
+        suffix = " Re-run `drt plan` and review the larger change." if replan_required else ""
         super().__init__(
             "Change guards tripped; nothing was deleted or swapped: "
             + "; ".join(trip.message for trip in trips)
+            + suffix
         )
 
 
@@ -50,7 +54,7 @@ def _exceeds(part: int, whole: int, limit_pct: float) -> bool:
     Cross-multiplied so a limit of 0 trips on one row in 20,001 and a limit of
     0.33 trips on 1 in 300, which a two-decimal rounding would let through.
     """
-    return part * 100 > limit_pct * whole
+    return Decimal(part) * 100 > Decimal(str(limit_pct)) * Decimal(whole)
 
 
 def evaluate_guards(
@@ -147,6 +151,9 @@ def enforce_delete_guards(
     deletes: int,
     baseline: int | None,
     force: bool,
+    reviewed_deletes: int | None = None,
+    reviewed_baseline: int | None = None,
+    reviewed_guards: set[str] | None = None,
 ) -> list[GuardTrip]:
     """Evaluate only run-time delete guards and refuse unless forced.
 
@@ -177,4 +184,26 @@ def enforce_delete_guards(
     )
     if trips and not force:
         raise GuardTripped(trips)
+    if trips and reviewed_guards is not None:
+        # ``drt apply --force-guards`` is approval of the reviewed plan, not a
+        # blank cheque for a larger change that appears between review and the
+        # destination transaction. Plain ``drt run --force-guards`` leaves
+        # reviewed_guards as None and retains its deliberate force-all behavior.
+        unreviewed: list[GuardTrip] = []
+        for trip in trips:
+            if trip.guard not in reviewed_guards or reviewed_deletes is None:
+                unreviewed.append(trip)
+                continue
+            if trip.guard == "max_deletes":
+                larger = deletes > reviewed_deletes
+            elif reviewed_baseline and baseline:
+                larger = deletes * reviewed_baseline > reviewed_deletes * baseline
+            else:
+                # An unavailable percentage was reviewed only for the concrete
+                # delete count in that plan. Do not let the force cover more.
+                larger = deletes > reviewed_deletes
+            if larger:
+                unreviewed.append(trip)
+        if unreviewed:
+            raise GuardTripped(unreviewed, replan_required=True)
     return trips

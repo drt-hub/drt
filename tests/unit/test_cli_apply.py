@@ -765,8 +765,40 @@ def test_force_guards_applies_and_records_the_override(project: Path, world: _Wo
     assert len(_writes(world)) == 1
     results = json.loads((project / "target" / "drt" / "run_results.json").read_text())
     assert results["results"][0]["guards_forced"][0]["guard"] == "max_deletes"
+    assert "guards" not in results["results"][0]
     claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
     assert claim["guards_forced"] == ["max_deletes"]
+
+
+def test_force_percentage_is_bounded_by_the_reviewed_baseline(project: Path, world: _World) -> None:
+    world.deleted = [{"id": 100}, {"id": 101}]
+    world.baseline = 10
+    _guarded_sync(project, {"max_delete_pct": 10})
+    _plan(project)
+
+    # Entries/digest are unchanged, but the percentage denominator shrank
+    # after review: 2/5 is larger than the reviewed 2/10.
+    world.baseline = 5
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--force-guards"])
+
+    assert result.exit_code == 1
+    assert "larger than" in result.output and "Re-run `drt plan`" in result.output
+    assert _writes(world) == []
+
+
+def test_force_unevaluable_percentage_is_bounded_by_delete_count(
+    project: Path, world: _World
+) -> None:
+    world.deleted = [{"id": 100}]
+    world.baseline = None
+    _guarded_sync(project, {"max_delete_pct": 10})
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--force-guards"])
+
+    assert result.exit_code == 0, result.output
+    artifact = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    assert artifact["results"][0]["guards_forced"][0]["observed"] is None
 
 
 def test_guards_judge_the_recomputed_plan_not_the_file(project: Path, world: _World) -> None:

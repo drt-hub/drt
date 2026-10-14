@@ -339,6 +339,9 @@ def run_sync(
     audit_fields: list[str] | None = None,
     audit_retain_days: int = 30,
     force_guards: bool = False,
+    reviewed_forced_guards: set[str] | None = None,
+    reviewed_guard_deletes: int | None = None,
+    reviewed_guard_baseline: int | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -404,6 +407,9 @@ def run_sync(
             is ``None``.
         force_guards: Continue past tripped run-time delete guards and record
             the override. False by default for existing callers.
+        reviewed_forced_guards: For apply only, guard names the reviewed plan
+            tripped. Together with the reviewed delete counts this bounds
+            ``force_guards`` so a larger late change still refuses.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -420,6 +426,9 @@ def run_sync(
     total_result.dry_run = dry_run
     sync.sync._force_guards = force_guards
     sync.sync._forced_guard_trips = []
+    sync.sync._reviewed_forced_guards = reviewed_forced_guards
+    sync.sync._reviewed_guard_deletes = reviewed_guard_deletes
+    sync.sync._reviewed_guard_baseline = reviewed_guard_baseline
     raised: BaseException | None = None
     tracer = get_tracer()
 
@@ -482,6 +491,21 @@ def run_sync(
             return result
     finally:
         duration_s = round(time.perf_counter() - t0, 3)
+        # A forced swap can commit successfully and then fail while dropping
+        # the old table. Preserve the already-observed override even though no
+        # SyncResult is returned: history and the CLI failure artifact still
+        # need the structured record.
+        if sync.sync._forced_guard_trips:
+            forced_guards_outcome: dict[str, Any] = {
+                "tripped": [trip.to_dict() for trip in sync.sync._forced_guard_trips],
+                "forced": True,
+            }
+            total_result.guards = forced_guards_outcome
+            if raised is not None:
+                try:
+                    raised._drt_guards = forced_guards_outcome  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001 — metadata must not mask failure
+                    pass
         if not dry_run and (raised is not None or total_result.failed > 0):
             try:
                 from drt.alerts import build_context, dispatch_alerts
@@ -517,7 +541,7 @@ def run_sync(
                 if raised is not None and not error_strs:
                     error_strs = [f"{type(raised).__name__}: {raised}"]
 
-                guards_outcome = total_result.guards
+                guards_outcome: dict[str, Any] | None = total_result.guards
                 if raised is not None:
                     from drt.engine.guards import GuardTripped
 

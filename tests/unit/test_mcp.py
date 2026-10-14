@@ -1046,12 +1046,31 @@ async def test_run_sync_limit_and_vars_reach_the_engine(
         limit=5,
         vars={"lookback_days": 1},
         force_guards=True,
+        approved_by="reviewer@example.com",
     )
 
     assert captured["extract_limit"] == 5
     assert captured["vars"]["lookback_days"] == 1
     assert captured["force_guards"] is True
+    assert result["approved_by"] == "reviewer@example.com"
     assert result["limit_applied"] == 5
+
+
+@pytest.mark.asyncio
+async def test_run_sync_force_guards_requires_named_approver(project_dir: Path) -> None:
+    srv = create_server(project_dir)
+
+    missing = await call(srv, "drt_run_sync", sync_name="notify", force_guards=True)
+    blank = await call(
+        srv,
+        "drt_run_sync",
+        sync_name="notify",
+        force_guards=True,
+        approved_by="   ",
+    )
+
+    assert "approved_by is required" in missing["error"]
+    assert "approved_by is required" in blank["error"]
 
 
 @pytest.mark.asyncio

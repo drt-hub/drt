@@ -460,6 +460,12 @@ class SyncOptions(BaseModel):
     # hook signature does not grow another parameter.
     _force_guards: bool = PrivateAttr(default=False)
     _forced_guard_trips: list[Any] = PrivateAttr(default_factory=list)
+    # Set only by ``drt apply --force-guards``. The run-time transaction may
+    # waive the reviewed trips up to these reviewed delete numbers; a plain
+    # ``drt run --force-guards`` leaves the set as None and forces any trip.
+    _reviewed_forced_guards: set[str] | None = PrivateAttr(default=None)
+    _reviewed_guard_deletes: int | None = PrivateAttr(default=None)
+    _reviewed_guard_baseline: int | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:

@@ -154,6 +154,30 @@ class TestPostgresWarehouseHistoryStore:
                 )
             )
 
+    def test_append_ignores_guards_without_changing_managed_schema(self) -> None:
+        conn = _mock_conn()
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresWarehouseHistoryStore(_profile()).append(
+                HistoryEntry(
+                    sync_name="s",
+                    started_at="t0",
+                    completed_at="t1",
+                    duration_seconds=1.0,
+                    status="success",
+                    records_synced=1,
+                    records_failed=0,
+                    guards={"forced": True, "tripped": [{"guard": "max_deletes"}]},
+                )
+            )
+
+        sql = str(conn.cursor.return_value.execute.call_args.args[0])
+        params = conn.cursor.return_value.execute.call_args.args[1]
+        assert "guards" not in sql and len(params) == 12
+
     def test_read_reconstructs_history_entry(self) -> None:
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "run-1", "sync-run-1")
         conn = _mock_conn(fetchall=[row])

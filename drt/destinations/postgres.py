@@ -584,6 +584,28 @@ class PostgresDestination(BaseSqlDestination):
 
         return _pgsql.SQL("SELECT COUNT(*) FROM {}").format(_qualified_ident(table))
 
+    def _build_swap_delete_count(self, table: str, shadow: str, upsert_cols: list[str]) -> Any:
+        """Count live keys absent from the shadow using PG's NULL-safe equality."""
+        from psycopg2 import sql as _pgsql
+
+        equality = _pgsql.SQL(" AND ").join(
+            _pgsql.SQL("l.{} IS NOT DISTINCT FROM s.{}").format(
+                _pgsql.Identifier(column), _pgsql.Identifier(column)
+            )
+            for column in upsert_cols
+        )
+        return _pgsql.SQL(
+            "SELECT COUNT(*) FROM {} AS l WHERE NOT EXISTS (SELECT 1 FROM {} AS s WHERE {})"
+        ).format(_qualified_ident(table), _qualified_ident(shadow), equality)
+
+    def _lock_swap_tables(self, cur: Any, table: str, shadow: str) -> None:
+        """Hold the live table stable from guard count through rename commit."""
+        from psycopg2 import sql as _pgsql
+
+        cur.execute(
+            _pgsql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE").format(_qualified_ident(table))
+        )
+
     def _build_drop_table(self, table: str) -> Any:
         from psycopg2 import sql as _pgsql
 

@@ -141,6 +141,7 @@ class Plan:
                 **self.summary,
                 "total_source_rows": self.total_source_rows,
                 "total_destination_rows": self.total_destination_rows,
+                "delete_baseline": self.delete_baseline,
                 "kept_values": self.kept_values,
             },
             "guards": {
@@ -576,6 +577,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
                 **{action: {"type": "integer", "minimum": 0} for action in _ACTION_ORDER},
                 "total_source_rows": {"type": "integer", "minimum": 0},
                 "total_destination_rows": {"type": ["integer", "null"], "minimum": 0},
+                "delete_baseline": {"type": ["integer", "null"], "minimum": 0},
                 "kept_values": {"type": "integer", "minimum": 0},
             },
         },
