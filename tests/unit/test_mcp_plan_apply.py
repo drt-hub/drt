@@ -57,6 +57,11 @@ class _World:
         )
 
 
+class _FakeDestination:
+    def supports_keyed_upsert(self, config: Any) -> bool:
+        return True
+
+
 class _Result:
     success = 2
     skipped = 0
@@ -104,7 +109,19 @@ def project_dir(
 
     def fake_run_sync(*args: Any, **kwargs: Any) -> _Result:
         world.calls.append({"dry_run": args[5], "project_dir": args[4], **kwargs})
-        return _Result(world, bool(args[5]))
+        predicate = kwargs.get("row_filter")
+        selected = world.added
+        if predicate is not None:
+            records = (
+                world.added if args[5] else list(args[1].extract("", args[3], query_tags=None))
+            )
+            selected = [row for row in records if predicate(row)]
+        result = _Result(world, bool(args[5]))
+        if predicate is not None:
+            result.rows_extracted = len(selected)
+            result.success = len(selected)
+            result.failed = int(bool(world.fail_writes and not args[5] and selected))
+        return result
 
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync)
     monkeypatch.setattr(
@@ -112,7 +129,9 @@ def project_dir(
     )
     for module in (plan_runner, run_cmd):
         monkeypatch.setattr(module, "get_source", lambda *_a, **_k: object(), raising=False)
-        monkeypatch.setattr(module, "get_destination", lambda *_a, **_k: object(), raising=False)
+        monkeypatch.setattr(
+            module, "get_destination", lambda *_a, **_k: _FakeDestination(), raising=False
+        )
     monkeypatch.setattr(_helpers, "get_source", lambda *_a, **_k: object())
     return project
 

@@ -184,6 +184,23 @@ class WritePolicyCapable(Protocol):
 
 
 @runtime_checkable
+class KeyedUpsertCapable(Protocol):
+    """Destination whose configured write path overwrites a stable keyed row.
+
+    Stability: Evolving (additive capability, ADR 0007).
+
+    Canary apply relies on a later plan omitting rows already written by an
+    earlier, terminal attempt.  An ``upsert_key`` field alone does not prove
+    that property (ClickHouse, for example, treats it as informational), so
+    destinations opt in explicitly and may inspect their own config mode.
+    """
+
+    def supports_keyed_upsert(self, config: DestinationConfig) -> bool:
+        """Return whether re-sending a key overwrites that same logical row."""
+        ...
+
+
+@runtime_checkable
 class ModeCapable(Protocol):
     """Destination that honours advanced ``sync.mode`` values (#1042).
 

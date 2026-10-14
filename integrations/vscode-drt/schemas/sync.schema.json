@@ -3882,6 +3882,18 @@
           ],
           "default": null,
           "title": "Soak"
+        },
+        "max_spool_rows": {
+          "default": 1000000,
+          "exclusiveMinimum": 0,
+          "title": "Max Spool Rows",
+          "type": "integer"
+        },
+        "max_spool_bytes": {
+          "default": 1073741824,
+          "exclusiveMinimum": 0,
+          "title": "Max Spool Bytes",
+          "type": "integer"
         }
       },
       "required": [

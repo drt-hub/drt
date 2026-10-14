@@ -1,4 +1,4 @@
-"""Live PostgreSQL proof for terminal canary halt, re-plan, and completion (#1255)."""
+"""Live PostgreSQL proof for immutable canary replay and terminal claims (#1255)."""
 
 from __future__ import annotations
 
@@ -117,7 +117,17 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
     def fail_second_health_check(*args: Any, **kwargs: Any) -> tuple[str, dict[str, object], bool]:
         nonlocal wave_calls
         name, entry, had_error = real_run_one(*args, **kwargs)
+        if args[1].dry_run:
+            return name, entry, had_error
         wave_calls += 1
+        if wave_calls == 1:
+            # The spool already exists. Later waves must not see this live
+            # mutation or the newly inserted row.
+            _sql(
+                pg,
+                f"UPDATE {source_table} SET name = 'live-source-changed' WHERE id > 1",
+                f"INSERT INTO {source_table} VALUES (401, 'late-row')",
+            )
         if wave_calls == 2:
             entry = dict(entry)
             entry["_row_error_count"] = int(entry.get("rows_extracted", 0)) or 1
@@ -138,6 +148,17 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
         (tmp_path / ".drt" / "applied_plans" / f"{old_plan_id}.json").read_text()
     )
     assert old_claim["status"] == "halted"
+    written_snapshot = _sql(pg, f"SELECT id, name FROM {destination_table} ORDER BY id")
+    assert written_snapshot
+    assert all(name == f"row-{row_id}" for row_id, name in written_snapshot)
+    assert all(row_id != 401 for row_id, _name in written_snapshot)
+    assert not list((tmp_path / ".drt" / "applied_plans").glob("*.spool.jsonl"))
+
+    _sql(
+        pg,
+        f"DELETE FROM {source_table} WHERE id = 401",
+        f"UPDATE {source_table} SET name = 'row-' || id::text",
+    )
 
     monkeypatch.setattr(run_command, "_run_one", real_run_one)
     replanned = runner.invoke(app, ["plan", "canary", "--out", "remaining.json"])
@@ -151,6 +172,63 @@ def test_three_wave_upsert_halts_then_new_plan_applies_remaining_rows(
     expected = [(index, f"row-{index}") for index in range(1, 401)]
     assert actual == expected
     assert len({row[0] for row in actual}) == 400
+
+    # A kill-style interruption is attributable before the wave starts,
+    # terminal, and leaves no value-bearing spool behind.
+    from drt.cli._apply_flow import apply_plan
+
+    _sql(pg, f"INSERT INTO {source_table} VALUES (401, 'row-401')")
+    interrupted_plan = runner.invoke(app, ["plan", "canary", "--out", "interrupt.json"])
+    assert interrupted_plan.exit_code == 0, interrupted_plan.output
+
+    def interrupt_wave(*args: Any, **kwargs: Any) -> Any:
+        if not args[1].dry_run:
+            raise SystemExit(143)
+        return real_run_one(*args, **kwargs)
+
+    monkeypatch.setattr(run_command, "_run_one", interrupt_wave)
+    with pytest.raises(SystemExit):
+        apply_plan(
+            (tmp_path / "interrupt.json").read_text(),
+            project_dir=tmp_path,
+            approved=True,
+            canary_waves=[100],
+        )
+    interrupted_id = json.loads((tmp_path / "interrupt.json").read_text())["plan_id"]
+    interrupted_claim = json.loads(
+        (tmp_path / ".drt" / "applied_plans" / f"{interrupted_id}.json").read_text()
+    )
+    assert interrupted_claim["state"] == "halted"
+    assert interrupted_claim["reason"] == "interrupted"
+    assert interrupted_claim["current_run_id"] == interrupted_claim["run_ids"][0]
+    assert not list((tmp_path / ".drt" / "applied_plans").glob("*.spool.jsonl"))
+    assert int(_sql(pg, f"SELECT COUNT(*) FROM {destination_table}")[0][0]) == 400
+    monkeypatch.setattr(run_command, "_run_one", real_run_one)
+    _sql(pg, f"DELETE FROM {source_table} WHERE id = 401")
+
+    # The live destination declares the required capability; ClickHouse's
+    # informational key is rejected by rollout validation.
+    from pydantic import ValidationError
+
+    from drt.config.models import SyncConfig
+    from drt.destinations.postgres import PostgresDestination
+
+    assert PostgresDestination().supports_keyed_upsert(
+        SyncConfig.model_validate(sync_document).destination
+    )
+    clickhouse = {
+        **sync_document,
+        "destination": {
+            "type": "clickhouse",
+            "host": "localhost",
+            "database": "d",
+            "table": "t",
+            "upsert_key": ["id"],
+        },
+        "sync": {"mode": "upsert", "rollout": {"waves": [100]}},
+    }
+    with pytest.raises(ValidationError, match="keyed-upsert destination"):
+        SyncConfig.model_validate(clickhouse)
 
     # CLI overrides are checked at apply time even when the freshly replanned
     # destination has no remaining changes.

@@ -823,3 +823,7 @@ class MySQLDestination(BaseSqlDestination):
             kwargs_individual["ssl"] = ssl_dict
 
         return pymysql.connect(**kwargs_individual)
+
+    def supports_keyed_upsert(self, config: DestinationConfig) -> bool:
+        assert isinstance(config, MySQLDestinationConfig)
+        return True

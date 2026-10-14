@@ -317,12 +317,33 @@ sync:
     waves: [1, 10, 100]
     max_error_pct: 2
     soak: 30s
+    max_spool_rows: 1000000       # default
+    max_spool_bytes: 1073741824   # default: 1 GiB
 ```
+
+After verification and before wave 1, drt extracts the source once into
+`.drt/applied_plans/<plan_id>.spool.jsonl`. Every wave replays its bucket range
+from that immutable snapshot through the normal engine path, so field mappings,
+computed fields, masking and transforms still run normally while live-source
+changes between waves cannot change the approved row set. The SHA-256 recorded
+in the claim is checked before every wave. Row and byte caps fail closed before
+the first write. Null or missing key components also fail during this snapshot
+step, before wave 1.
+
+Unlike plan files, the spool contains **row values on local disk**. It is a
+private, exclusive 0600 file with type-tagged JSONL encoding (including exact
+date/time, Decimal, bytes and UUID round trips). drt deletes it best-effort when
+apply succeeds, halts, fails, or is interrupted. Spool values never appear in
+claims, command/MCP output, or logs; claims retain only row/byte counts and the
+file hash.
 
 After each wave, drt computes `(failed + error-skipped rows) / rows selected`.
 Error-skipped rows include lookup, computed-field, and transform failures under
-`on_error: skip`; destination failure under `on_error: fail` always halts,
-regardless of the threshold. A zero-row wave passes without division.
+`on_error: skip`; destination row failures under `on_error: skip` are governed
+only by `max_error_pct`. Under `on_error: fail`, any destination failure halts
+regardless of the threshold. A raised wave is recorded as `outcome: error` with
+only its exception class and selected-row count; its failed count is unknown.
+A zero-row wave passes without division.
 `--canary-max-error-pct` and `--canary-soak 30s` override YAML. Each wave is a
 normal run with ordinary finalization and persistence.
 
@@ -332,19 +353,31 @@ normal run with ordinary finalization and persistence.
 > leaving only what still needs to change. Review that new plan and apply it
 > normally.
 
-A claim records per-wave counts and run IDs for audit. An interruption during a
-wave or soak records terminal `halted` with reason `interrupted`. Canary apply
-is not transactional: rows from earlier waves remain written after a halt, and
-every wave re-extracts the source.
+A claim records each wave's run ID before that wave starts, plus per-wave counts
+for audit. An interruption during a wave or soak records terminal `halted` with
+reason `interrupted` and is re-raised. Canary apply is not transactional: rows
+from earlier waves remain written after a halt.
 
-Canary v1 supports only the plain, non-incremental per-row write path:
+Canary v2 supports only the plain, non-incremental per-row write path:
 `sync.mode: full` or `upsert`, with `destination.upsert_key`. It rejects
 incremental syncs (a per-wave cursor/watermark can skip rows),
 `incremental_strategy: diff` (waves would mutate the snapshot baseline),
 mirror/replace and tracked mirror state (per-run finalization is unsafe), staged
-destinations, and keys produced by destination lookups or run metadata. These
-rules are enforced both for `sync.rollout` validation and CLI/MCP canary
-overrides. Plain `drt run` ignores `sync.rollout`.
+destinations, any `metadata_columns`, `match_policy: update_only | create_only`,
+keys produced by destination lookups, and key columns masked with non-injective
+`redact` or `truncate` (key hashing is allowed). These rules are enforced both
+for `sync.rollout` validation and CLI/MCP canary overrides. Plain `drt run`
+ignores `sync.rollout`.
+
+| Destination | Canary keyed-upsert support |
+|---|---|
+| PostgreSQL | yes |
+| MySQL | yes |
+| Snowflake | only with `destination.mode: merge` |
+| Databricks | only with `destination.mode: merge` |
+| BigQuery | only with `destination.mode: merge` |
+| ClickHouse | no — `upsert_key` is informational |
+| all other built-ins and plugins | no by default; must implement `KeyedUpsertCapable` |
 
 A halt is an apply failure and exits 1, using the existing error exit code. In
 JSON mode, `result.canary` contains the wave documents, status, halt reason and

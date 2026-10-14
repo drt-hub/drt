@@ -345,6 +345,8 @@ class RolloutConfig(BaseModel):
     waves: list[float]
     max_error_pct: float = Field(default=2.0, ge=0, le=100, allow_inf_nan=False, strict=True)
     soak: str | None = None
+    max_spool_rows: int = Field(default=1_000_000, gt=0, strict=True)
+    max_spool_bytes: int = Field(default=1_073_741_824, gt=0, strict=True)
 
     @field_validator("waves", mode="before")
     @classmethod
@@ -355,8 +357,8 @@ class RolloutConfig(BaseModel):
             raise ValueError("rollout.waves must be a list of numbers (not booleans or strings).")
         if not value:
             raise ValueError("rollout.waves must contain at least one cumulative percentage.")
-        waves = [float(wave) for wave in value]
-        if any(not 0 < wave <= 100 or wave != wave or abs(wave) == float("inf") for wave in waves):
+        waves = [Decimal(str(wave)) for wave in value]
+        if any(not wave.is_finite() or not 0 < wave <= 100 for wave in waves):
             raise ValueError("rollout.waves entries must be greater than 0 and at most 100.")
         if any((Decimal(str(wave)) * 100) % 1 for wave in waves):
             raise ValueError(
@@ -365,8 +367,8 @@ class RolloutConfig(BaseModel):
         if any(left >= right for left, right in zip(waves, waves[1:], strict=False)):
             raise ValueError("rollout.waves must be strictly increasing without duplicates.")
         if waves[-1] != 100:
-            waves.append(100.0)
-        return waves
+            waves.append(Decimal(100))
+        return [float(wave) for wave in waves]
 
     @field_validator("soak")
     @classmethod
@@ -998,45 +1000,74 @@ class SyncConfig(BaseModel):
             return self
         if self.sync.mode not in {"full", "upsert"}:
             raise ValueError(
-                "sync.rollout v1 supports only non-incremental mode: full or upsert; "
+                "sync.rollout supports only non-incremental mode: full or upsert; "
                 "incremental, mirror, and replace have unsafe per-wave state/finalization."
             )
         if self.sync.incremental_strategy == "diff":
             raise ValueError(
-                "sync.rollout v1 does not support incremental_strategy: diff because waves "
+                "sync.rollout does not support incremental_strategy: diff because waves "
                 "would mutate the snapshot baseline."
             )
         destination_type = destination_type_of(self.destination)
         if destination_type in {"staged_upload", "salesforce_bulk"}:
             raise ValueError(
-                "sync.rollout v1 supports only non-staged per-row destinations; "
+                "sync.rollout supports only non-staged per-row destinations; "
                 f"destination type {destination_type!r} is staged."
             )
         upsert_key = getattr(self.destination, "upsert_key", None)
         if not upsert_key:
             raise ValueError(
-                "sync.rollout v1 requires destination.upsert_key so wave membership is stable "
+                "sync.rollout requires destination.upsert_key so wave membership is stable "
                 "and a new plan after a halt can identify remaining rows."
+            )
+        if self.sync.metadata_columns is not None:
+            raise ValueError(
+                "sync.rollout cannot be combined with sync.metadata_columns: run_id and "
+                "synced_at values vary between waves, so a new plan cannot identify only "
+                "what remains. Remove metadata_columns or the rollout."
+            )
+        if self.sync.match_policy != "upsert":
+            raise ValueError(
+                "sync.rollout requires sync.match_policy: upsert; update_only/create_only "
+                "cannot guarantee that a new plan lists only what remains."
+            )
+        masked_keys = []
+        for key in upsert_key:
+            rule = (self.sync.mask or {}).get(key)
+            strategy = rule if isinstance(rule, str) else getattr(rule, "strategy", None)
+            if strategy not in {None, "hash"}:
+                masked_keys.append(key)
+        if masked_keys:
+            raise ValueError(
+                "sync.rollout requires injective key handling; upsert_key columns cannot use "
+                f"redact/truncate masking: {sorted(masked_keys)}. Use hash or no key mask."
+            )
+        keyed_upsert = destination_type in {"postgres", "mysql"} or (
+            destination_type in {"snowflake", "databricks", "bigquery"}
+            and getattr(self.destination, "mode", None) == "merge"
+        )
+        if not keyed_upsert:
+            mode_hint = (
+                " Set destination.mode: merge."
+                if destination_type in {"snowflake", "databricks", "bigquery"}
+                else (
+                    " Use PostgreSQL/MySQL or a merge-mode "
+                    "Snowflake/Databricks/BigQuery destination."
+                )
+            )
+            raise ValueError(
+                f"sync.rollout requires a keyed-upsert destination; {destination_type!r} does "
+                f"not provably overwrite the same upsert_key row.{mode_hint}"
             )
         lookup_outputs = {
             (self.sync.field_mappings or {}).get(name, name)
             for name in (getattr(self.destination, "lookups", None) or {})
         }
-        metadata = self.sync.metadata_columns
-        metadata_outputs = {
-            value
-            for value in (
-                metadata.synced_at if metadata is not None else None,
-                metadata.run_id if metadata is not None else None,
-                metadata.sync_name if metadata is not None else None,
-            )
-            if value is not None
-        }
-        unstable_keys = set(upsert_key) & (lookup_outputs | metadata_outputs)
+        unstable_keys = set(upsert_key) & lookup_outputs
         if unstable_keys:
             raise ValueError(
-                "sync.rollout cannot use an upsert_key produced by a destination lookup or "
-                f"run metadata: {sorted(unstable_keys)}. Choose source/computed key columns."
+                "sync.rollout cannot use an upsert_key produced by a destination lookup: "
+                f"{sorted(unstable_keys)}. Choose source/computed key columns."
             )
         return self
 

@@ -479,26 +479,40 @@ sync:
     waves: [1, 10, 100]
     max_error_pct: 2
     soak: 30s
+    max_spool_rows: 1000000
+    max_spool_bytes: 1073741824
 ```
 
 CLI overrides are `--canary 1,10,100`, `--canary-max-error-pct`, and
 `--canary-soak 30s`. MCP `drt_apply` accepts `canary: [1, 10, 100]` and
 `canary_max_error_pct`. Rows use a stable SHA-256 bucket over a typed canonical
-encoding of `destination.upsert_key`: null, normalized numbers, NFC strings,
+encoding of `destination.upsert_key`: normalized numbers, NFC strings,
 UTC datetimes, dates and bytes are distinct encodings; `True`, `1`, `1.0`, and
 `Decimal('1')` hash together, while `'1'` hashes separately. Missing key
-columns and unsupported types are errors.
+columns, null key components and unsupported types are errors.
+
+After verify-by-replan, apply extracts one raw source snapshot to a private
+0600 type-tagged JSONL spool beside the claim. The claim stores only its row and
+byte counts and SHA-256; the hash is checked before each wave. Waves replay that
+spool through normal `run_sync` transforms. The spool contains row values
+(plans do not) and is deleted best-effort on every terminal outcome. The
+configurable row/byte caps fail before any destination write.
 
 A wave halts when `(failed + error-skipped rows) / rows selected` is strictly
 above the threshold. Computed-field/transform errors under `on_error: skip`
-count; destination failure under `on_error: fail` always halts; zero rows pass.
+count; destination failures under `on_error: skip` are threshold-governed,
+while any destination failure under `on_error: fail` halts; zero rows pass.
 Each wave is an ordinary run.
 
 **A halt is terminal: stop, re-plan, re-review, and apply the new plan.** There
-is no resume operation and the halted plan remains single-use. Canary v1 only
+is no resume operation and the halted plan remains single-use. Canary v2 only
 supports non-incremental `mode: full | upsert` with an `upsert_key`. It rejects
 incremental/cursor and snapshot-diff syncs, mirror/replace/tracked state,
-staged destinations, and lookup- or run-metadata-derived keys. Configured
+staged destinations, any `metadata_columns`, non-default `match_policy`,
+lookup-derived keys, non-injective key masks, and destinations without the
+`KeyedUpsertCapable` guarantee. PostgreSQL/MySQL qualify; Snowflake,
+Databricks and BigQuery qualify only in `destination.mode: merge`; ClickHouse
+and all other destinations/plugins are false by default. Configured
 rollouts fail validation; CLI/MCP overrides fail during apply before writes.
 
 ### Snapshot-diff incremental and diff mirror (#755/#1110)

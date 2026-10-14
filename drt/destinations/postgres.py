@@ -135,6 +135,10 @@ class PostgresDestination(BaseSqlDestination):
     resolution, and mirror bookkeeping come from ``BaseSqlDestination``.
     """
 
+    def supports_keyed_upsert(self, config: DestinationConfig) -> bool:
+        assert isinstance(config, PostgresDestinationConfig)
+        return True
+
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
 
