@@ -451,6 +451,44 @@ class MySQLDestination(BaseSqlDestination):
     def _supports_runtime_delete_guards(self) -> bool:
         return True
 
+    def _ensure_runtime_guard_transactionality(
+        self,
+        cur: Any,
+        tables: list[tuple[str, str]],
+    ) -> None:
+        """Require InnoDB wherever a guard refusal depends on rollback."""
+        for table, role in tables:
+            params: tuple[str, ...]
+            if "." in table:
+                database, relation = table.rsplit(".", 1)
+                schema_clause = "table_schema = %s"
+                params = (database, relation)
+            else:
+                relation = table
+                schema_clause = "table_schema = DATABASE()"
+                params = (relation,)
+            try:
+                cur.execute(
+                    "SELECT engine FROM information_schema.tables "
+                    f"WHERE {schema_clause} AND table_name = %s",
+                    params,
+                )
+                row = cur.fetchone()
+            except Exception as error:
+                raise RuntimeError(
+                    "MySQL run-time change guards could not verify the storage engine for "
+                    f"{role} {table!r}; refusing destructive finalization because rollback "
+                    "safety is unknown."
+                ) from error
+            engine = str(row[0]) if row and row[0] is not None else None
+            if engine is None or engine.casefold() != "innodb":
+                found = engine or "unknown/missing"
+                raise RuntimeError(
+                    "MySQL run-time change guards require InnoDB for "
+                    f"{role} {table!r}; found {found}. Refusing destructive finalization "
+                    "because a guard-triggered DELETE must be rollback-safe."
+                )
+
     def _build_mirror_count(
         self,
         table: str,
@@ -578,7 +616,7 @@ class MySQLDestination(BaseSqlDestination):
             "key_json TEXT NOT NULL, "
             "scope_spec TEXT, "
             "scope_key TEXT, "
-            "PRIMARY KEY (sync_name, key_hash))"
+            "PRIMARY KEY (sync_name, key_hash)) ENGINE=InnoDB"
         )
 
     def _state_scope_columns_exist(self, cur: Any, scope: Any, raw: str) -> bool:

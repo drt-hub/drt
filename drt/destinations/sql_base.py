@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import nullcontext
-from typing import Any
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
+from typing import Any, NoReturn
 
 from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
+from drt.engine.guards import GuardTripped
 
 # #1136: per-row SAVEPOINT name, shared by Postgres and MySQL (identical
 # SQL on both dialects) — see BaseSqlDestination._recover_row_savepoint.
@@ -43,6 +45,17 @@ def _attach_exception_detail(error: BaseException, detail: str) -> None:
     notes = list(getattr(error, "_drt_notes", []))
     notes.append(detail)
     error._drt_notes = notes  # type: ignore[attr-defined]
+
+
+def _rollback_after_guard(conn: Any, guard_error: GuardTripped) -> NoReturn:
+    """Roll back a refused DELETE, reporting an explicitly uncertain outcome on failure."""
+    from drt.engine.guards import GuardOutcomeUncertain
+
+    try:
+        conn.rollback()
+    except Exception as rollback_error:
+        raise GuardOutcomeUncertain(guard_error, rollback_error) from rollback_error
+    raise guard_error
 
 
 def _union_columns(records: list[dict[str, Any]]) -> list[str]:
@@ -258,11 +271,11 @@ class BaseSqlDestination:
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         swap_locked = False
+        active_guard: GuardTripped | None = None
         try:
             with self._swap_cursor_context(conn, sync_options) as cur:
                 if self._delete_guards_enabled(sync_options):
-                    from drt.engine.guards import GuardTripped
-
+                    self._ensure_runtime_guard_transactionality(cur, [(table, "target table")])
                     self._lock_swap_tables(cur, table, shadow)
                     swap_locked = True
                     cur.execute(self._build_table_count(table))
@@ -305,12 +318,15 @@ class BaseSqlDestination:
                             _attach_exception_detail(guard_error, detail)
                         raise
                 self._complete_swap(conn, cur, table, shadow)
+        except GuardTripped as guard_error:
+            active_guard = guard_error
+            raise
         finally:
             try:
                 if swap_locked:
                     self._unlock_swap_tables(conn)
             finally:
-                conn.close()
+                self._close_finalize_connection(conn, active_guard)
                 self._reset_swap_state_after_completion()
 
         return SyncResult()
@@ -367,8 +383,10 @@ class BaseSqlDestination:
         scopes = list(self._mirror_scopes or set()) if scope_cols else None
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
-        try:
+        with self._guard_preserving_connection(conn):
             cur = _tagged_cursor(conn.cursor(), sync_options)
+            if self._delete_guards_enabled(sync_options):
+                self._ensure_runtime_guard_transactionality(cur, [(config.table, "target table")])
             stmt, params = self._build_mirror_delete(
                 self._mirror_table_ident(config),
                 upsert_cols,
@@ -398,20 +416,9 @@ class BaseSqlDestination:
                         deletes=self._affected_rows(cur),
                         baseline=baseline,
                     )
-                except Exception as guard_error:
-                    try:
-                        conn.rollback()
-                    except Exception as rollback_error:  # noqa: BLE001
-                        _attach_exception_detail(
-                            guard_error,
-                            "rollback after guard refusal failed: "
-                            f"{type(rollback_error).__name__}: "
-                            f"{rollback_error}",
-                        )
-                    raise
+                except GuardTripped as guard_error:
+                    _rollback_after_guard(conn, guard_error)
             self._commit_mirror(conn)
-        finally:
-            conn.close()
 
         # SyncResult has no dedicated `deleted` field; future work tracks
         # this separately. Returning a bare SyncResult signals "finalize
@@ -441,8 +448,10 @@ class BaseSqlDestination:
         keys = [tuple(row[col] for col in upsert_cols) for row in removed_keys]
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
-        try:
+        with self._guard_preserving_connection(conn):
             cur = _tagged_cursor(conn.cursor(), sync_options)
+            if self._delete_guards_enabled(sync_options):
+                self._ensure_runtime_guard_transactionality(cur, [(config.table, "target table")])
             stmt, params = self._build_mirror_delete(
                 self._mirror_table_ident(config), upsert_cols, keys, negate=False
             )
@@ -454,20 +463,9 @@ class BaseSqlDestination:
                         deletes=self._affected_rows(cur),
                         baseline=None,
                     )
-                except Exception as guard_error:
-                    try:
-                        conn.rollback()
-                    except Exception as rollback_error:  # noqa: BLE001
-                        _attach_exception_detail(
-                            guard_error,
-                            "rollback after guard refusal failed: "
-                            f"{type(rollback_error).__name__}: "
-                            f"{rollback_error}",
-                        )
-                    raise
+                except GuardTripped as guard_error:
+                    _rollback_after_guard(conn, guard_error)
             self._commit_mirror(conn)
-        finally:
-            conn.close()
 
         return SyncResult()
 
@@ -942,6 +940,43 @@ class BaseSqlDestination:
             and (guards.max_deletes is not None or guards.max_delete_pct is not None)
         )
 
+    def _ensure_runtime_guard_transactionality(
+        self,
+        cur: Any,
+        tables: list[tuple[str, str]],
+    ) -> None:
+        """Fail closed when a dialect cannot roll back guarded destructive SQL.
+
+        Transactional dialects need no probe. MySQL overrides this hook to
+        verify that every table participating in a guarded DELETE uses InnoDB.
+        """
+
+    @contextmanager
+    def _guard_preserving_connection(self, conn: Any) -> Iterator[None]:
+        """Close a finalize connection without replacing an active guard error."""
+        active_guard: GuardTripped | None = None
+        try:
+            yield
+        except GuardTripped as guard_error:
+            active_guard = guard_error
+            raise
+        finally:
+            self._close_finalize_connection(conn, active_guard)
+
+    @staticmethod
+    def _close_finalize_connection(conn: Any, active_guard: BaseException | None) -> None:
+        try:
+            conn.close()
+        except Exception as close_error:
+            if not isinstance(active_guard, GuardTripped):
+                raise
+            detail = (
+                "connection close failed while preserving a change-guard refusal: "
+                f"{type(close_error).__name__}: {close_error}"
+            )
+            logging.getLogger(__name__).warning(detail)
+            _attach_exception_detail(active_guard, detail)
+
     def _enforce_delete_guards(
         self,
         sync_options: SyncOptions,
@@ -1237,7 +1272,7 @@ class BaseSqlDestination:
         observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
-        try:
+        with self._guard_preserving_connection(conn):
             cur = _tagged_cursor(conn.cursor(), sync_options)
             # Pre-provisioning (#695): check existence before issuing DDL so a
             # locked-down destination user (no CREATE privilege) can run against
@@ -1247,6 +1282,14 @@ class BaseSqlDestination:
             fresh_table = not self._state_table_exists(cur, state_scope, state_raw)
             if fresh_table:
                 self._create_state_table(cur, state_ident)
+            if self._delete_guards_enabled(sync_options):
+                self._ensure_runtime_guard_transactionality(
+                    cur,
+                    [
+                        (config.table, "target table"),
+                        (state_raw, "tracked-state table"),
+                    ],
+                )
 
             # #890: the scope columns let the diff be filtered server-side.
             # Only ever probed for a scoped run — an unscoped sync has nothing
@@ -1437,16 +1480,8 @@ class BaseSqlDestination:
                             deletes=self._affected_rows(cur),
                             baseline=guard_baseline_exact,
                         )
-                    except Exception as guard_error:
-                        try:
-                            conn.rollback()
-                        except Exception as rollback_error:  # noqa: BLE001
-                            _attach_exception_detail(
-                                guard_error,
-                                "rollback after guard refusal failed: "
-                                f"{type(rollback_error).__name__}: {rollback_error}",
-                            )
-                        raise
+                    except GuardTripped as guard_error:
+                        _rollback_after_guard(conn, guard_error)
             elif not previous_exists:
                 # No prior state at all for this sync (never run, or lost
                 # state) — baseline. Prior state existing for *other* scopes
@@ -1552,7 +1587,5 @@ class BaseSqlDestination:
             if staging_available:
                 cur.execute(f"DROP TABLE {diff_table}")
             self._commit_mirror(conn)
-        finally:
-            conn.close()
 
         return SyncResult()

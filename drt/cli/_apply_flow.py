@@ -417,6 +417,7 @@ def apply_plan(
         )
     reviewed_trips = {str(t["guard"]): t for t in doc.get("guards", {}).get("tripped", [])}
     reviewed_deletes = int(doc["summary"]["delete"])
+    reviewed_baseline_present = "delete_baseline" in doc["summary"]
     reviewed_baseline_value = doc["summary"].get("delete_baseline")
     reviewed_baseline = (
         int(reviewed_baseline_value) if reviewed_baseline_value is not None else None
@@ -428,6 +429,11 @@ def apply_plan(
             if not larger and trip.guard == "max_deletes":
                 larger = current.summary["delete"] > reviewed_deletes
             elif not larger and trip.guard == "max_delete_pct":
+                if not reviewed_baseline_present:
+                    raise ApplyRefused(
+                        "The reviewed schema-v1 plan predates delete_baseline, so "
+                        "--force-guards cannot safely bound max_delete_pct. Re-run `drt plan`."
+                    )
                 if current.delete_baseline and reviewed_baseline:
                     larger = (
                         current.summary["delete"] * reviewed_baseline

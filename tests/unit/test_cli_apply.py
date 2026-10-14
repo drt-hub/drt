@@ -786,6 +786,23 @@ def test_force_percentage_is_bounded_by_the_reviewed_baseline(project: Path, wor
     assert _writes(world) == []
 
 
+def test_force_percentage_refuses_legacy_schema_v1_plan_without_baseline(
+    project: Path, world: _World
+) -> None:
+    world.deleted = [{"id": 100}, {"id": 101}]
+    world.baseline = 10
+    _guarded_sync(project, {"max_delete_pct": 10})
+    _plan(project)
+    _forge(project, lambda doc: doc["summary"].pop("delete_baseline"))
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--force-guards"])
+
+    assert result.exit_code == 1
+    assert "predates delete_baseline" in result.output
+    assert "Re-run `drt plan`" in result.output
+    assert _writes(world) == []
+
+
 def test_force_unevaluable_percentage_is_bounded_by_delete_count(
     project: Path, world: _World
 ) -> None:

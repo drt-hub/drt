@@ -171,12 +171,16 @@ Safety guards:
 
 - **Empty source short-circuit** — if no batch ever delivered records, the DELETE is skipped. A transient empty source (auth failure mid-extract, vendor outage) cannot wipe the destination.
 - **Run-time change guards** — `sync.guards.max_deletes` and
-  `max_delete_pct` are counted in the finalize connection before the DELETE.
-  The count uses the exact predicate and scope; tracked mirror counts its
-  staged state diff, while diff mirror has no percentage baseline and fails
-  closed. `drt run --force-guards` proceeds and records the override. The same
-  protection covers replace-swap (a refusal drops its shadow), but not
-  replace-truncate.
+  `max_delete_pct` execute the final mirror DELETE inside the finalize
+  transaction, judge its authoritative affected-row count, and roll it back on
+  a trip. Destination mirror first counts the exact scoped percentage baseline;
+  tracked mirror counts its staged-state baseline, while diff mirror has no
+  percentage baseline and fails closed. Guarded finalization also verifies that
+  the target table—and `_drt_synced_keys` for tracked mirror—uses InnoDB; an
+  unknown or non-transactional engine is refused before DELETE because rollback
+  cannot provide the safety contract. `drt run --force-guards` proceeds and
+  records the override. Replace-swap is guarded by locked-table counts before
+  the swap (and also requires an InnoDB target); replace-truncate is not.
 - **Failed rows excluded from the key set** — only successfully upserted keys count as "observed source state"; a row that failed during upsert won't cause its destination counterpart to be deleted.
 - **`upsert_key` required** — load() raises `ValueError` before any write if `destination.upsert_key` is empty.
 - **Composite keys supported** — `upsert_key: [tenant_id, employee_id]` produces `WHERE (tenant_id, employee_id) NOT IN (...)`.
@@ -205,7 +209,7 @@ CREATE TABLE IF NOT EXISTS `analytics`.`_drt_synced_keys` (
   key_hash  CHAR(64)     NOT NULL,
   key_json  TEXT         NOT NULL,
   PRIMARY KEY (sync_name, key_hash)
-);
+) ENGINE=InnoDB;
 GRANT SELECT, INSERT, DELETE ON `analytics`.`_drt_synced_keys` TO 'retl_user'@'%';
 -- table-level grants can be issued before the table exists
 ```

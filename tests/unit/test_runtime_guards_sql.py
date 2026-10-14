@@ -11,7 +11,7 @@ import pytest
 from drt.config.models import MySQLDestinationConfig, PostgresDestinationConfig, SyncOptions
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
-from drt.engine.guards import GuardTripped
+from drt.engine.guards import GuardOutcomeUncertain, GuardTripped
 
 
 def _mysql_config() -> MySQLDestinationConfig:
@@ -41,7 +41,15 @@ def _postgres_config() -> PostgresDestinationConfig:
 def _conn(*counts: int, rowcount: int = 0) -> MagicMock:
     conn = MagicMock()
     cur = conn.cursor.return_value
-    cur.fetchone.side_effect = [(count,) for count in counts]
+    remaining = iter(counts)
+
+    def fetchone() -> tuple[Any, ...]:
+        statement = str(cur.execute.call_args.args[0])
+        if "SELECT engine FROM information_schema.tables" in statement:
+            return ("InnoDB",)
+        return (next(remaining),)
+
+    cur.fetchone.side_effect = fetchone
     cur.rowcount = rowcount
     return conn
 
@@ -68,7 +76,11 @@ def test_destination_guard_uses_actual_delete_count_then_rolls_back(
         destination.finalize_sync(config, options)
 
     assert raised.value.trips[0].observed == 3
-    statements = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+    statements = [
+        str(call.args[0])
+        for call in conn.cursor.return_value.execute.call_args_list
+        if "SELECT engine FROM information_schema.tables" not in str(call.args[0])
+    ]
     assert len(statements) == 2
     assert "COUNT" in statements[0]
     assert "DELETE" in statements[1]
@@ -116,7 +128,7 @@ def test_destination_scope_is_identical_on_delete_count_and_baseline() -> None:
     with patch.object(MySQLDestination, "_connect", return_value=conn):
         destination.finalize_sync(config, options)
 
-    calls = conn.cursor.return_value.execute.call_args_list
+    calls = conn.cursor.return_value.execute.call_args_list[-2:]
     assert "`tenant` IN (%s)" in calls[0].args[0]
     assert "`tenant` IN (%s) AND" in calls[1].args[0]
     assert calls[0].args[1][0] == calls[1].args[1][0] == "tenant-a"
@@ -186,11 +198,64 @@ def test_count_builders_cover_composite_scope_and_keys_for_both_dialects() -> No
 
     pg_cur = MagicMock()
     postgres._lock_swap_tables(pg_cur, "public.scores", "public.scores__shadow")
-    assert "LOCK TABLE" in str(pg_cur.execute.call_args.args[0])
+    pg_lock = str(pg_cur.execute.call_args.args[0])
+    assert "LOCK TABLE" in pg_lock
+    assert "scores" in pg_lock and "scores__shadow" in pg_lock
 
     broken_unlock = MagicMock()
     broken_unlock.cursor.return_value.execute.side_effect = RuntimeError("unlock failed")
     mysql._unlock_swap_tables(broken_unlock)  # best-effort and must not raise
+
+
+def test_mysql_runtime_guards_refuse_nontransactional_target_before_delete() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 0})
+    conn = MagicMock()
+    cur = conn.cursor.return_value
+    cur.fetchone.return_value = ("MyISAM",)
+
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(RuntimeError, match="require InnoDB.*target table.*MyISAM"),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    statements = [str(call.args[0]) for call in cur.execute.call_args_list]
+    assert not any(statement.startswith("DELETE") for statement in statements)
+    conn.rollback.assert_not_called()
+
+
+def test_mysql_runtime_guards_require_innodb_for_tracked_state_and_qualified_tables() -> None:
+    destination = MySQLDestination()
+    cur = MagicMock()
+    cur.fetchone.side_effect = [("InnoDB",), ("MEMORY",)]
+
+    with pytest.raises(RuntimeError, match="tracked-state table.*MEMORY"):
+        destination._ensure_runtime_guard_transactionality(
+            cur,
+            [
+                ("analytics.scores", "target table"),
+                ("analytics._drt_synced_keys", "tracked-state table"),
+            ],
+        )
+
+    assert [call.args[1] for call in cur.execute.call_args_list] == [
+        ("analytics", "scores"),
+        ("analytics", "_drt_synced_keys"),
+    ]
+
+
+def test_mysql_runtime_guard_engine_probe_fails_closed_when_unknown_or_unreadable() -> None:
+    destination = MySQLDestination()
+    cur = MagicMock()
+    cur.fetchone.return_value = None
+    with pytest.raises(RuntimeError, match="unknown/missing"):
+        destination._ensure_runtime_guard_transactionality(cur, [("scores", "target table")])
+
+    cur.execute.side_effect = PermissionError("information_schema denied")
+    with pytest.raises(RuntimeError, match="could not verify.*rollback safety is unknown"):
+        destination._ensure_runtime_guard_transactionality(cur, [("scores", "target table")])
 
 
 def test_diff_guard_uses_actual_delete_count_and_rolls_back_then_force_deletes() -> None:
@@ -220,18 +285,22 @@ def test_diff_guard_uses_actual_delete_count_and_rolls_back_then_force_deletes()
     assert "DELETE" in conn.cursor.return_value.execute.call_args.args[0]
 
 
-def test_guard_refusal_preserves_trip_when_destination_or_diff_rollback_fails() -> None:
+def test_guard_rollback_failure_reports_an_uncertain_outcome_for_destination_and_diff() -> None:
     destination = MySQLDestination()
     destination._mirror_keys = [(1,)]
     options = SyncOptions(mode="mirror", guards={"max_deletes": 0})
     conn = _conn(1, rowcount=1)
     conn.rollback.side_effect = RuntimeError("rollback failed")
+    conn.close.side_effect = RuntimeError("destination close failed")
     with (
         patch.object(MySQLDestination, "_connect", return_value=conn),
-        pytest.raises(GuardTripped) as destination_trip,
+        pytest.raises(GuardOutcomeUncertain) as destination_trip,
     ):
         destination.finalize_sync(_mysql_config(), options)
-    assert "rollback failed" in destination_trip.value._drt_notes[0]
+    assert "rollback failed" in str(destination_trip.value)
+    assert "outcome is uncertain" in str(destination_trip.value)
+    assert "nothing was deleted" not in str(destination_trip.value).lower()
+    assert "destination close failed" in destination_trip.value._drt_notes[0]
 
     diff = MySQLDestination()
     diff_options = SyncOptions(
@@ -244,12 +313,15 @@ def test_guard_refusal_preserves_trip_when_destination_or_diff_rollback_fails() 
     diff_options._diff_removed_keys = [{"id": 1}]
     conn = _conn(rowcount=1)
     conn.rollback.side_effect = RuntimeError("diff rollback failed")
+    conn.close.side_effect = RuntimeError("diff close failed")
     with (
         patch.object(MySQLDestination, "_connect", return_value=conn),
-        pytest.raises(GuardTripped) as diff_trip,
+        pytest.raises(GuardOutcomeUncertain) as diff_trip,
     ):
         diff.finalize_sync(_mysql_config(), diff_options)
-    assert "diff rollback failed" in diff_trip.value._drt_notes[0]
+    assert "diff rollback failed" in str(diff_trip.value)
+    assert "outcome is uncertain" in str(diff_trip.value)
+    assert "diff close failed" in diff_trip.value._drt_notes[0]
 
 
 def test_diff_without_delete_guards_uses_the_original_delete_path() -> None:
@@ -282,6 +354,8 @@ def test_replace_swap_trip_drops_shadow_without_swapping_and_force_swaps() -> No
 
     statements = [call.args[0] for call in conn.cursor.return_value.execute.call_args_list]
     assert statements == [
+        "SELECT engine FROM information_schema.tables "
+        "WHERE table_schema = DATABASE() AND table_name = %s",
         "LOCK TABLES `scores` WRITE, `scores__drt_swap` WRITE",
         "SELECT COUNT(*) FROM `scores`",
         "SELECT COUNT(*) FROM `scores` AS l WHERE NOT EXISTS "
@@ -372,6 +446,7 @@ def test_swap_cleanup_failure_does_not_mask_unforced_guard_trip() -> None:
 
     cur.execute.side_effect = execute
     conn.rollback.side_effect = RuntimeError("cleanup rollback also failed")
+    conn.close.side_effect = RuntimeError("swap close failed")
     with (
         patch.object(MySQLDestination, "_connect", return_value=conn),
         pytest.raises(GuardTripped) as raised,
@@ -380,6 +455,7 @@ def test_swap_cleanup_failure_does_not_mask_unforced_guard_trip() -> None:
 
     assert raised.value.trips[0].observed == 2
     assert any("cleanup failed" in note for note in raised.value._drt_notes)
+    assert any("swap close failed" in note for note in raised.value._drt_notes)
     conn.rollback.assert_called_once()
 
 
@@ -441,9 +517,12 @@ def test_tracked_guard_counts_staged_diff_and_refuses_state_rewrite() -> None:
     cur = conn.cursor.return_value
     cur.rowcount = 2
     conn.rollback.side_effect = RuntimeError("tracked rollback failed")
+    conn.close.side_effect = RuntimeError("tracked close failed")
 
     def fetchone() -> tuple[int] | None:
         statement = str(cur.execute.call_args.args[0])
+        if "SELECT engine FROM information_schema.tables" in statement:
+            return ("InnoDB",)  # type: ignore[return-value]
         if "information_schema.tables" in statement:
             return (1,)
         if "LIMIT 1" in statement:
@@ -466,7 +545,7 @@ def test_tracked_guard_counts_staged_diff_and_refuses_state_rewrite() -> None:
     cur.fetchall.side_effect = fetchall
     with (
         patch.object(MySQLDestination, "_connect", return_value=conn),
-        pytest.raises(GuardTripped) as raised,
+        pytest.raises(GuardOutcomeUncertain) as raised,
     ):
         destination.finalize_sync(_mysql_config(), options)
 
@@ -476,7 +555,8 @@ def test_tracked_guard_counts_staged_diff_and_refuses_state_rewrite() -> None:
     )
     assert any(statement.startswith("DELETE FROM `scores`") for statement in statements)
     conn.rollback.assert_called_once()
-    assert "tracked rollback failed" in raised.value._drt_notes[0]
+    assert "tracked rollback failed" in str(raised.value)
+    assert "tracked close failed" in raised.value._drt_notes[0]
     batch_statements = [str(call.args[0]) for call in cur.executemany.call_args_list]
     assert batch_statements == [
         "INSERT INTO __drt_mirror_diff_keys (key_hash, key_json) VALUES (%s, %s)"
@@ -506,6 +586,8 @@ def test_tracked_guard_scoped_counts_and_no_temp_fallback() -> None:
 
     def fetchone() -> tuple[int] | None:
         statement = str(cur.execute.call_args.args[0])
+        if "SELECT engine FROM information_schema.tables" in statement:
+            return ("InnoDB",)  # type: ignore[return-value]
         if "information_schema.tables" in statement:
             return (1,)
         if "information_schema.columns" in statement:
@@ -557,6 +639,8 @@ def test_tracked_guard_unscoped_fallback_uses_materialized_baseline() -> None:
 
     def fetchone() -> tuple[int] | None:
         statement = str(cur.execute.call_args.args[0])
+        if "SELECT engine FROM information_schema.tables" in statement:
+            return ("InnoDB",)  # type: ignore[return-value]
         if "information_schema.tables" in statement:
             return (1,)
         if "LIMIT 1" in statement:
@@ -599,6 +683,8 @@ def test_tracked_guard_scoped_legacy_rows_fail_closed_on_percentage() -> None:
 
     def fetchone() -> tuple[int] | None:
         statement = str(cur.execute.call_args.args[0])
+        if "SELECT engine FROM information_schema.tables" in statement:
+            return ("InnoDB",)  # type: ignore[return-value]
         if "information_schema.tables" in statement:
             return (1,)
         if "information_schema.columns" in statement:
@@ -651,6 +737,8 @@ def test_tracked_guard_scoped_staged_counts_use_scope_predicate() -> None:
 
     def fetchone() -> tuple[int] | None:
         statement = str(cur.execute.call_args.args[0])
+        if "SELECT engine FROM information_schema.tables" in statement:
+            return ("InnoDB",)  # type: ignore[return-value]
         if "information_schema.tables" in statement:
             return (1,)
         if "information_schema.columns" in statement:

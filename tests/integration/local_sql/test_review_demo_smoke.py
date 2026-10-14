@@ -102,6 +102,7 @@ def test_review_demo_plan_apply_and_guard(
     assert plan["summary"] == {
         "create": 0,
         "delete": 0,
+        "delete_baseline": None,
         "insert": 0,
         "kept_values": 300,
         "replace": 0,

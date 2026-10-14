@@ -43,6 +43,20 @@ class GuardTripped(Exception):
         )
 
 
+class GuardOutcomeUncertain(GuardTripped):
+    """A guard tripped, but its destructive statement may not have rolled back."""
+
+    def __init__(self, guard_error: GuardTripped, rollback_error: BaseException) -> None:
+        self.trips = guard_error.trips
+        self.replan_required = guard_error.replan_required
+        Exception.__init__(
+            self,
+            "Change guards tripped, but rollback failed; the destination outcome is "
+            "uncertain and the DELETE may have taken effect: "
+            f"{type(rollback_error).__name__}: {rollback_error}",
+        )
+
+
 def _pct(part: int, whole: int) -> float:
     """For display only: limits are compared exactly (see :func:`_exceeds`)."""
     return round(100.0 * part / whole, 2)

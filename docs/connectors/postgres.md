@@ -136,13 +136,15 @@ Safety guards:
 - **Failed rows excluded from the key set** — only successfully upserted keys count as "observed source state"; a row that failed during upsert won't cause its destination counterpart to be deleted.
 - **`upsert_key` required** — load() raises `ValueError` before any write if `destination.upsert_key` is empty.
 - **Composite keys supported** — `upsert_key: [tenant_id, employee_id]` produces `WHERE (tenant_id, employee_id) NOT IN ((...), (...))`.
-- **Run-time change guards** — PostgreSQL and MySQL evaluate
-  `sync.guards.max_deletes` / `max_delete_pct` in the finalize connection before
-  the DELETE. Destination mirror counts the exact predicate (including scope),
-  tracked mirror counts its staged state diff, and diff mirror fails closed for
-  a percentage because it has no baseline. A trip leaves the DELETE and tracked
-  state rewrite untouched; `drt run --force-guards` proceeds and records the
-  override. Replace-swap is guarded the same way; replace-truncate is not.
+- **Run-time change guards** — PostgreSQL and MySQL execute the final mirror
+  DELETE inside the finalize transaction, judge its authoritative affected-row
+  count, and roll it back if `sync.guards.max_deletes` / `max_delete_pct` trips.
+  Destination mirror first counts the exact scoped baseline needed for a
+  percentage; tracked mirror counts its staged state baseline; diff mirror has
+  no percentage baseline and therefore fails closed. The tracked-state rewrite
+  begins only after the affected-row guard passes. `drt run --force-guards`
+  proceeds and records the override. Replace-swap is guarded by locked-table
+  counts before the swap; replace-truncate is not.
 
 Memory constraint: the in-process key set is memory-bound to source key cardinality. For tables with **more than a few million keys** the temp-table strategy ([#340 follow-up](https://github.com/drt-hub/drt/issues/340)) will be more appropriate. Mirror as shipped today is appropriate for small/medium reference tables.
 

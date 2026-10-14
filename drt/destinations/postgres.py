@@ -599,11 +599,13 @@ class PostgresDestination(BaseSqlDestination):
         ).format(_qualified_ident(table), _qualified_ident(shadow), equality)
 
     def _lock_swap_tables(self, cur: Any, table: str, shadow: str) -> None:
-        """Hold the live table stable from guard count through rename commit."""
+        """Hold the live and shadow tables stable from guard count through rename commit."""
         from psycopg2 import sql as _pgsql
 
         cur.execute(
-            _pgsql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE").format(_qualified_ident(table))
+            _pgsql.SQL("LOCK TABLE {}, {} IN SHARE ROW EXCLUSIVE MODE").format(
+                _qualified_ident(table), _qualified_ident(shadow)
+            )
         )
 
     def _build_drop_table(self, table: str) -> Any:
