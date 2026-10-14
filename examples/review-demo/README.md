@@ -94,7 +94,7 @@ cp .env.example .env
 vhs demo.tape
 ```
 
-The tape is 1280×720 with a readable 22px font and writes both `demo.mp4` and
+The tape is 1280×720 with a 19px font and writes both `demo.mp4` and
 `demo.gif`. Those generated files are ignored.
 
 ## CI and agents
