@@ -75,6 +75,18 @@ drt init && drt run
 
 </td>
 </tr>
+<tr>
+<td width="50%">
+
+**Review before you write.** `drt plan` shows the exact rows a sync would create, update or delete; `drt apply` writes only if nothing changed since you looked, and guards stop a runaway delete.
+
+</td>
+<td width="50%">
+
+**Fill, don't overwrite.** `write_policy: fill_empty` writes a column only where the destination is empty, so values people already entered stay.
+
+</td>
+</tr>
 </table>
 
 > **What's always free?** All connectors, CLI, MCP server, and sync engine. See [OPEN_CORE.md](./OPEN_CORE.md) for the open core boundary.
@@ -143,6 +155,25 @@ postgres|hubspot]` scaffolds keyed Apache Ossie datasets. Review the
 generated TODOs, then run `drt validate`.
 
 ---
+
+## Review before you write
+
+`drt plan` is a read-only, key-level change set; `drt apply` re-computes it and refuses to write if the data, the config or the plan itself changed since you reviewed it.
+
+<p align="center">
+  <img src="docs/assets/review-demo.gif" alt="drt plan shows 450 rows to update and 300 existing values kept; a dangerous mirror that would delete 98% of the table is stopped by a delete guard" width="700">
+</p>
+
+```bash
+drt plan fill_industry --out plan.json   # nothing is written
+drt apply plan.json                      # writes only what you reviewed
+```
+
+In the demo above (Docker + pip, no cloud accounts), a CRM table already has an `industry` filled in by reps for about 70% of companies. The sync uses `write_policy: fill_empty`: the plan says **450 rows to update, 300 rep-entered values kept**, and apply fills only the blanks. A deliberately bad variant (a 25-row mirror into the whole table) proposes 1,487 deletes; a `max_delete_pct: 5` guard stops it at plan time and apply refuses.
+
+- **Try it:** [`examples/review-demo`](examples/review-demo) — one script, a 60-second walkthrough, with copy-paste prompts for an AI agent (`drt_plan` → human approval → `drt_apply`).
+- **In CI:** `drt deploy github-actions --with-plan` scaffolds a plan comment on the pull request and an apply on merge.
+- **Read the guide:** [plan / apply](docs/guides/plan.md), including what it guarantees and what it does not (it is a guard in front of a normal run, not a transaction; plan needs a destination drt can read back, which today means SQL databases and warehouses).
 
 ## CLI Reference
 
