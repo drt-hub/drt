@@ -352,4 +352,5 @@ jobs:
             tests/integration/dwh/test_bigquery_diff_incremental_smoke.py \
             tests/integration/dwh/test_bigquery_mirror_diff_smoke.py \
             tests/integration/dwh/test_bigquery_write_policy_smoke.py \
+            tests/integration/dwh/test_bigquery_runtime_guards_smoke.py \
             -v

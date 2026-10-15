@@ -123,11 +123,12 @@ Safety guards:
 - **Empty source short-circuit** — if no batch ever delivered records, the DELETE mutation is skipped. A transient empty source (auth failure mid-extract, vendor outage) cannot wipe the destination.
 - **Failed rows excluded from the key set** — only successfully INSERTed keys count as "observed source state"; a row that failed during INSERT won't cause its destination counterpart to be deleted.
 - **`upsert_key` required at load time** — `load()` raises `ValueError` before any INSERT if mirror mode is requested without a populated `upsert_key`. Fail-fast: the misconfiguration is surfaced before any row touches ClickHouse.
+- **Run-time change guards** — `ALTER TABLE ... DELETE` is an asynchronous mutation that reports no row count, so with `sync.guards.max_deletes` / `max_delete_pct` drt runs a `count()` over the mutation's exact WHERE predicate first and refuses *before* the mutation if a limit is exceeded (nothing is deleted). The count cannot be re-verified after the mutation, so a concurrent writer between the count and the mutation is a documented residual. Tracked mirror takes its percentage denominator from the state table (unscoped runs only; a scoped run fails the percentage closed — use `max_deletes`); diff has no baseline. Replace-swap compares live keys absent from the shadow (NULL-safe) before `EXCHANGE TABLES` and drops the shadow on a refusal. `drt run --force-guards` proceeds and records the override.
 - **Composite keys supported** — `upsert_key: [tenant_id, user_id]` produces `(toString(\`tenant_id\`), toString(\`user_id\`)) NOT IN {keys:Array(Tuple(String, String))}`.
 
 Memory constraint: the in-process key set is memory-bound to source key cardinality. Mirror as shipped today is appropriate for small/medium reference tables.
 
-Same `sync.mode: mirror` is supported on **Postgres**, **MySQL**, **Snowflake**, and **Databricks**.
+Same `sync.mode: mirror` is supported on **Postgres**, **MySQL**, **Snowflake**, **Databricks**, and **BigQuery**.
 
 **Diff mirror (`mirror.strategy: diff`, [#1110](https://github.com/drt-hub/drt/issues/1110)/[#1177](https://github.com/drt-hub/drt/issues/1177)) — delete only source-snapshot removals:**
 

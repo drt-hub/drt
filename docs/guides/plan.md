@@ -274,7 +274,7 @@ overrode, and records each override once in `run_results.json` and the plan's
 claim file. If a run-time value grows beyond the reviewed forced value, apply
 refuses with the new trip and requires a new plan.
 
-PostgreSQL, MySQL, Snowflake and Databricks also enforce the delete-side limits in the finalization
+PostgreSQL, MySQL, Snowflake, Databricks, BigQuery and ClickHouse also enforce the delete-side limits in the finalization
 transaction. For mirror strategies, drt reads the percentage baseline, runs the
 `DELETE`, judges the driver's actual affected-row count, and rolls back when the
 guard trips; tracked-state rewrites happen only after the guard passes and commit
@@ -297,7 +297,7 @@ override must be explicit (`drt run --force-guards`, or `--force-guards` on
 - Percentage comparisons use exact decimal arithmetic. The displayed percentage
   is rounded to two decimals, but the decision is not: 290/100000 is exactly
   0.29% and passes a 0.29% limit, while 291/100000 trips it.
-- **Run-time enforcement covers PostgreSQL, MySQL, Snowflake and Databricks so far** (BigQuery and ClickHouse follow). Databricks cannot roll a DELETE back: it counts the exact rows first and refuses before deleting, and if the statement's own result later shows more rows than the limit allows (a concurrent writer) it reports that the deletion is already committed instead of claiming nothing happened. For
+- **Run-time enforcement covers PostgreSQL, MySQL, Snowflake and Databricks so far** (and now BigQuery and ClickHouse; see below). Databricks and BigQuery cannot roll a DELETE back: it counts the exact rows first and refuses before deleting, and if the statement's own result later shows more rows than the limit allows (a concurrent writer) it reports that the deletion is already committed instead of claiming nothing happened. For
   `mirror.strategy: destination`, the same scoped predicate used for the
   baseline (including `mirror.scope`) is deleted inside the transaction and the
   actual row count is authoritative. Tracked and diff mirror do the same;
@@ -321,7 +321,7 @@ override must be explicit (`drt run --force-guards`, or `--force-guards` on
   classifications. Configuring only those two adds no run-time queries or
   behavior changes.
 - **Apply still judges all four guards on its verification extraction.** The
-  write extracts again; PostgreSQL/MySQL/Snowflake/Databricks then re-check delete-side limits at
+  write extracts again; PostgreSQL/MySQL/Snowflake/Databricks/BigQuery/ClickHouse then re-check delete-side limits at
   finalization. Create/update changes in that short window remain protected by
   review-time verification only.
 - Forced-guard details are persisted in local and GCS/S3 object-store history

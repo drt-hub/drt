@@ -60,7 +60,7 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import record_row_error
 from drt.destinations.sql_base import BaseSqlDestination, _union_columns
 from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
-from drt.engine.guards import GuardTripped
+from drt.engine.guards import GuardTripped, verify_committed_delete
 
 _SWAP_SUFFIX = "__drt_swap"
 _ALLOW_COLUMN_DEFAULTS = "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')"
@@ -992,28 +992,9 @@ class DatabricksDestination(BaseSqlDestination):
         baseline: int | None,
     ) -> None:
         """Re-judge the statement's own row count; the DELETE already committed."""
-        from drt.engine.guards import GuardOutcomeCommitted, GuardTripped
-
-        actual = self._deleted_rows(cur)
-        if actual is None:
-            raise GuardOutcomeCommitted(
-                [], "the DELETE's affected-row count could not be read back to verify it."
-            )
-        if actual <= counted:
-            return
-        before = len(sync_options._forced_guard_trips)
-        try:
-            self._enforce_delete_guards(sync_options, deletes=actual, baseline=baseline)
-        except GuardTripped as late:
-            raise GuardOutcomeCommitted(
-                late.trips, f"{actual} row(s) were deleted, but {counted} were counted."
-            ) from late
-        # A forced late value replaces, not duplicates, the earlier forced record.
-        if len(sync_options._forced_guard_trips) > before:
-            seen: dict[str, Any] = {}
-            for trip in sync_options._forced_guard_trips:
-                seen[trip.guard] = trip
-            sync_options._forced_guard_trips[:] = list(seen.values())
+        verify_committed_delete(
+            sync_options, counted=counted, actual=self._deleted_rows(cur), baseline=baseline
+        )
 
     @staticmethod
     def _deleted_rows(cur: Any) -> int | None:

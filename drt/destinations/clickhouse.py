@@ -52,13 +52,14 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from drt.config.credentials import resolve_env
 from drt.config.models import ClickHouseDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 from drt.destinations.sql_utils import tag_query
+from drt.engine.guards import GuardTripped, delete_guards_enabled, judge_delete_guards
 
 
 class ClickHouseDestination:
@@ -445,11 +446,13 @@ class ClickHouseDestination:
           as "don't delete anything" for safety.
         """
         if sync_options.mode == "mirror":
-            result = self._finalize_mirror(config, sync_options)
-            # Reset mirror state regardless of result so a re-run starts fresh.
-            self._mirror_keys = None
-            self._mirror_scopes = None
-            return result
+            try:
+                return self._finalize_mirror(config, sync_options)
+            finally:
+                # Reset mirror state regardless of result — a guard refusal is a
+                # finalize failure too — so a re-run starts fresh.
+                self._mirror_keys = None
+                self._mirror_scopes = None
 
         if not self._swap_shadow_created or self._swap_table is None:
             return None
@@ -462,6 +465,16 @@ class ClickHouseDestination:
 
         client = self._connect(config)
         try:
+            if delete_guards_enabled(sync_options):
+                try:
+                    self._judge_swap(client, config, sync_options, table_q, shadow_q)
+                except GuardTripped:
+                    # A refused replace must not leave a stale shadow behind.
+                    try:
+                        client.command(tag_query(f"DROP TABLE IF EXISTS {shadow_q}", sync_options))
+                    except Exception:  # noqa: BLE001 — never mask the refusal
+                        pass
+                    raise
             client.command(tag_query(f"EXCHANGE TABLES {table_q} AND {shadow_q}", sync_options))
             # Shadow now contains the OLD data — drop it.
             client.command(tag_query(f"DROP TABLE {shadow_q}", sync_options))
@@ -471,6 +484,111 @@ class ClickHouseDestination:
             self._swap_table = None
 
         return SyncResult()
+
+    @staticmethod
+    def _scope_clause(
+        scope_cols: list[str] | None, scopes: list[tuple[Any, ...]] | None
+    ) -> tuple[str, dict[str, Any]]:
+        """``scope IN {scope_keys} AND `` prefix shared by the mutation and its count."""
+        if not (scope_cols and scopes):
+            return "", {}
+        if len(scope_cols) == 1:
+            scope_col_q = f"toString(`{scope_cols[0]}`)"
+            return (
+                f"{scope_col_q} IN {{scope_keys:Array(String)}} AND ",
+                {"scope_keys": [str(s[0]) for s in scopes]},
+            )
+        scope_col_tuple = "(" + ", ".join(f"toString(`{c}`)" for c in scope_cols) + ")"
+        scope_tuple_type = "Tuple(" + ", ".join(["String"] * len(scope_cols)) + ")"
+        return (
+            f"{scope_col_tuple} IN {{scope_keys:Array({scope_tuple_type})}} AND ",
+            {"scope_keys": [tuple(str(v) for v in s) for s in scopes]},
+        )
+
+    # --- run-time delete guards (#1218 part 2) ----------------------------
+    def _count_rows(self, client: Any, sql: str, params: dict[str, Any], opts: SyncOptions) -> int:
+        result = client.query(tag_query(sql, opts), parameters=params)
+        return int(result.result_rows[0][0])
+
+    def _build_mirror_count(
+        self,
+        table_q: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None,
+        scopes: list[tuple[Any, ...]] | None,
+        negate: bool,
+    ) -> tuple[str, dict[str, Any]]:
+        """``SELECT count()`` over exactly the mutation's WHERE predicate."""
+        stmt, params = self._build_mirror_delete(
+            table_q, upsert_cols, keys, scope_cols, scopes, negate
+        )
+        prefix = f"ALTER TABLE {table_q} DELETE WHERE "
+        assert stmt.startswith(prefix)
+        return f"SELECT count() FROM {table_q} WHERE " + stmt[len(prefix) :], params
+
+    def _guard_mirror_delete(
+        self,
+        client: Any,
+        sync_options: SyncOptions,
+        table_q: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None,
+        scopes: list[tuple[Any, ...]] | None,
+        negate: bool,
+        baseline: int | None | Literal["table"],
+    ) -> None:
+        """Judge the mutation before it runs. ClickHouse mutations report no row count."""
+        if not delete_guards_enabled(sync_options):
+            return
+        sql, params = self._build_mirror_count(
+            table_q, upsert_cols, keys, scope_cols, scopes, negate
+        )
+        deletes = self._count_rows(client, sql, params, sync_options)
+        guards = sync_options.guards
+        denominator: int | None
+        if baseline == "table":
+            denominator = None
+            if guards is not None and guards.max_delete_pct is not None:
+                scope_clause, scope_params = self._scope_clause(scope_cols, scopes)
+                where = f" WHERE {scope_clause[: -len(' AND ')]}" if scope_clause else ""
+                denominator = self._count_rows(
+                    client, f"SELECT count() FROM {table_q}{where}", scope_params, sync_options
+                )
+        else:
+            denominator = baseline
+        judge_delete_guards(sync_options, deletes=deletes, baseline=denominator)
+
+    def _judge_swap(
+        self,
+        client: Any,
+        config: ClickHouseDestinationConfig,
+        sync_options: SyncOptions,
+        table_q: str,
+        shadow_q: str,
+    ) -> None:
+        """Compare the shadow with the live table before EXCHANGE TABLES."""
+        live_rows = self._count_rows(client, f"SELECT count() FROM {table_q}", {}, sync_options)
+        upsert_cols = list(config.upsert_key or [])
+        if upsert_cols:
+            # NULL-safe on both sides, like the mutation's toString() comparison.
+            exprs = [f"ifNull(toString(`{c}`), '__drt_null__')" for c in upsert_cols]
+            lhs = exprs[0] if len(exprs) == 1 else "(" + ", ".join(exprs) + ")"
+            rhs = ", ".join(exprs)
+            deletes = self._count_rows(
+                client,
+                f"SELECT count() FROM {table_q} WHERE {lhs} NOT IN (SELECT {rhs} FROM {shadow_q})",
+                {},
+                sync_options,
+            )
+        else:
+            # Keyless replace: the documented cardinality-only fallback.
+            shadow_rows = self._count_rows(
+                client, f"SELECT count() FROM {shadow_q}", {}, sync_options
+            )
+            deletes = max(live_rows - shadow_rows, 0)
+        judge_delete_guards(sync_options, deletes=deletes, baseline=live_rows)
 
     def _build_mirror_delete(
         self,
@@ -499,18 +617,7 @@ class ClickHouseDestination:
         mutation finishes.
         """
         op = "NOT IN" if negate else "IN"
-        scope_clause = ""
-        params: dict[str, Any] = {}
-        if scope_cols and scopes:
-            if len(scope_cols) == 1:
-                scope_col_q = f"toString(`{scope_cols[0]}`)"
-                scope_clause = f"{scope_col_q} IN {{scope_keys:Array(String)}} AND "
-                params["scope_keys"] = [str(s[0]) for s in scopes]
-            else:
-                scope_col_tuple = "(" + ", ".join(f"toString(`{c}`)" for c in scope_cols) + ")"
-                scope_tuple_type = "Tuple(" + ", ".join(["String"] * len(scope_cols)) + ")"
-                scope_clause = f"{scope_col_tuple} IN {{scope_keys:Array({scope_tuple_type})}} AND "
-                params["scope_keys"] = [tuple(str(v) for v in s) for s in scopes]
+        scope_clause, params = self._scope_clause(scope_cols, scopes)
 
         if len(upsert_cols) == 1:
             col_q = f"toString(`{upsert_cols[0]}`)"
@@ -585,6 +692,17 @@ class ClickHouseDestination:
 
         client = self._connect(config)
         try:
+            self._guard_mirror_delete(
+                client,
+                sync_options,
+                table_q,
+                upsert_cols,
+                keys,
+                scope_cols,
+                scopes,
+                True,
+                "table",
+            )
             sql, params = self._build_mirror_delete(
                 table_q, upsert_cols, keys, scope_cols, scopes, negate=True
             )
@@ -614,6 +732,10 @@ class ClickHouseDestination:
 
         client = self._connect(config)
         try:
+            # Diff reports no percentage baseline: max_delete_pct fails closed.
+            self._guard_mirror_delete(
+                client, sync_options, table_q, upsert_cols, keys, None, None, False, None
+            )
             sql, params = self._build_mirror_delete(
                 table_q,
                 upsert_cols,
@@ -851,6 +973,32 @@ class ClickHouseDestination:
                 to_delete = [decode_key(kj) for _h, kj in raw_diff]
 
             if to_delete:
+                tracked_baseline: int | None = None
+                limits = sync_options.guards
+                if (
+                    scope_positions is None
+                    and limits is not None
+                    and limits.max_delete_pct is not None
+                ):
+                    # Unscoped: every tracked key of this sync is in the denominator.
+                    # A scoped run leaves it unavailable, so a percentage fails closed.
+                    tracked_baseline = self._count_rows(
+                        client,
+                        f"SELECT count() FROM {state_q} WHERE sync_name = {{sync_name:String}}",
+                        {"sync_name": sync_name},
+                        sync_options,
+                    )
+                self._guard_mirror_delete(
+                    client,
+                    sync_options,
+                    table_q,
+                    upsert_cols,
+                    to_delete,
+                    None,
+                    None,
+                    False,
+                    tracked_baseline,
+                )
                 sql, params = self._build_mirror_delete(
                     table_q, upsert_cols, to_delete, None, None, negate=False
                 )

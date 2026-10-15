@@ -178,8 +178,9 @@ class GuardsConfig(BaseModel):
 
     Evaluated against the change set a plan computes: ``drt plan`` reports a
     trip and ``drt apply`` refuses to write (``--force-guards`` overrides,
-    loudly). PostgreSQL/MySQL/Snowflake/Databricks run-time finalization also enforces the two
-    delete-side guards immediately before a mirror DELETE or replace swap.
+    loudly). Run-time finalization (PostgreSQL, MySQL, Snowflake, Databricks,
+    BigQuery, ClickHouse) also enforces the two delete-side guards immediately
+    before a mirror DELETE or replace swap.
 
     - ``max_creates`` — rows to be created (including append-only inserts).
     - ``max_deletes`` — rows to be deleted (mirror / replace).

@@ -188,7 +188,13 @@ key and scope columns from the target with `WHERE FALSE`, then loads each
 batch's observed key/scope values into that typed table. One target-schema
 lookup per batch supplies explicit types to every signature temp load and the
 mirror-key load, avoiding BigQuery autodetect choosing `STRING` when a nullable
-target column is all `NULL`. After all batches, drt issues one anti-join delete:
+target column is all `NULL`. With `sync.guards.max_deletes` / `max_delete_pct`, drt first runs a `COUNT(*)` over the
+same predicate (plus the scoped table size when a percentage is set) and refuses before
+deleting; the DML job's `num_dml_affected_rows` is then re-checked, and a larger-than-counted
+deletion that exceeds a limit (or an unreadable count) raises an error stating the deletion is
+already committed (use time travel to recover). Replace-swap compares live keys absent from the
+shadow table before the copy job; diff has no percentage baseline. See the
+[plan guide](../guides/plan.md). After all batches, drt issues one anti-join delete:
 
 ```sql
 DELETE FROM `project.dataset.table` AS T
