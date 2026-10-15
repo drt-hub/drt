@@ -145,6 +145,22 @@ Composite keys use Delta's supported `MERGE` anti-join with
 zero rows), the DELETE is skipped entirely — protects against wiping
 the destination when the source is transiently empty.
 
+**Run-time change guards** (`sync.guards.max_deletes` / `max_delete_pct`): Delta
+has no multi-statement rollback, so drt counts first. It runs a `COUNT(*)` over the
+exact predicate of the staged DELETE/MERGE (and the scoped table size when a
+percentage is set), refuses before deleting anything if a limit is exceeded, and
+then re-checks the statement's own result row. If a concurrent writer made the
+statement remove more rows than were counted and the larger value exceeds a limit,
+or the result row cannot be read back, drt raises an error saying the deletion is
+**already committed** (never "nothing was deleted"); recover with
+`RESTORE TABLE ... TO VERSION AS OF`. Tracked mirror takes its percentage
+denominator from the state table and fails the percentage closed when legacy
+scope-less rows make that denominator inexact; diff mirror has no percentage
+baseline, so use `max_deletes` there. Replace-swap compares live keys absent from
+the shadow table before `INSERT OVERWRITE` (no table lock exists: a concurrent
+writer to the shadow is a documented residual). `drt run --force-guards` proceeds
+and records the override.
+
 Mirror semantics fit the same shape as Postgres / MySQL / ClickHouse /
 Snowflake mirror destinations (see #340) — same `upsert_key` contract,
 same source-key-cardinality memory bound on `_mirror_keys`.

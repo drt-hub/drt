@@ -57,6 +57,25 @@ class GuardOutcomeUncertain(GuardTripped):
         )
 
 
+class GuardOutcomeCommitted(GuardTripped):
+    """A guard tripped only after a non-transactional DELETE had already run.
+
+    Delta has no multi-statement rollback: the pre-DELETE count passed, but the
+    statement then removed more rows than the guard allows (a concurrent writer),
+    or its row count could not be read back. The deletion is committed.
+    """
+
+    def __init__(self, trips: list[GuardTrip], detail: str) -> None:
+        self.trips = trips
+        self.replan_required = False
+        Exception.__init__(
+            self,
+            "Change guards tripped AFTER the DELETE ran; it is already committed "
+            "(this destination has no rollback; consider RESTORE TABLE ... TO VERSION AS OF): "
+            + detail,
+        )
+
+
 def _pct(part: int, whole: int) -> float:
     """For display only: limits are compared exactly (see :func:`_exceeds`)."""
     return round(100.0 * part / whole, 2)
