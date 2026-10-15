@@ -240,3 +240,58 @@ def enforce_delete_guards(
         if unreviewed:
             raise GuardTripped(unreviewed, replan_required=True)
     return trips
+
+
+def delete_guards_enabled(sync_options: Any) -> bool:
+    """Whether a run-time delete guard is configured (so extra reads are justified)."""
+    guards = getattr(sync_options, "guards", None)
+    return guards is not None and (
+        guards.max_deletes is not None or guards.max_delete_pct is not None
+    )
+
+
+def judge_delete_guards(sync_options: Any, *, deletes: int, baseline: int | None) -> None:
+    """Judge a destructive step's own numbers; record a forced trip on the options.
+
+    Raises :class:`GuardTripped` (nothing has been deleted yet) unless forced.
+    """
+    trips = enforce_delete_guards(
+        sync_options.guards,
+        deletes=deletes,
+        baseline=baseline,
+        force=sync_options._force_guards,
+        reviewed_deletes=sync_options._reviewed_guard_deletes,
+        reviewed_baseline=sync_options._reviewed_guard_baseline,
+        reviewed_guards=sync_options._reviewed_forced_guards,
+    )
+    if trips:
+        sync_options._forced_guard_trips.extend(trips)
+
+
+def verify_committed_delete(
+    sync_options: Any, *, counted: int, actual: int | None, baseline: int | None
+) -> None:
+    """Re-judge a non-transactional DELETE against its own affected-row count.
+
+    The deletion has already happened, so a failure here is reported as
+    :class:`GuardOutcomeCommitted`, never as a clean refusal. ``actual`` is
+    ``None`` when the destination cannot report it.
+    """
+    if actual is None:
+        raise GuardOutcomeCommitted(
+            [], "the DELETE's affected-row count could not be read back to verify it."
+        )
+    if actual <= counted:
+        return
+    before = len(sync_options._forced_guard_trips)
+    try:
+        judge_delete_guards(sync_options, deletes=actual, baseline=baseline)
+    except GuardTripped as late:
+        raise GuardOutcomeCommitted(
+            late.trips, f"{actual} row(s) were deleted, but {counted} were counted."
+        ) from late
+    if len(sync_options._forced_guard_trips) > before:
+        latest: dict[str, GuardTrip] = {}
+        for trip in sync_options._forced_guard_trips:
+            latest[trip.guard] = trip
+        sync_options._forced_guard_trips[:] = list(latest.values())

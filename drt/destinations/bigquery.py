@@ -53,6 +53,7 @@ from drt.destinations.sql_utils import (
     check_mirror_supported,
     unsupported_tracked_scope_msg,
 )
+from drt.engine.guards import delete_guards_enabled, judge_delete_guards, verify_committed_delete
 
 _SWAP_SUFFIX = "__drt_swap"
 _MIRROR_KEYS_SUFFIX = "__drt_mirror_keys"
@@ -505,6 +506,8 @@ class BigQueryDestination:
         shadow_table_id = self._scratch_table_id(table_id, _SWAP_SUFFIX)
         labels = self._labels(sync_options._query_tags)
         try:
+            if delete_guards_enabled(sync_options):
+                self._judge_swap(client, config, sync_options, table_id, shadow_table_id, labels)
             client.copy_table(
                 shadow_table_id,
                 table_id,
@@ -558,12 +561,33 @@ class BigQueryDestination:
                     f"EXISTS (SELECT 1 FROM {self._quote_table(keys_table_id)} K "
                     f"WHERE {scope_match}) AND "
                 )
-            sql = (
-                f"DELETE FROM {self._quote_table(self._table_id(config))} AS T "
-                f"WHERE {scope_prefix}NOT EXISTS "
+            target = self._quote_table(self._table_id(config))
+            predicate = (
+                f"{scope_prefix}NOT EXISTS "
                 f"(SELECT 1 FROM {self._quote_table(keys_table_id)} K WHERE {key_match})"
             )
-            client.query(sql, job_config=self._query_job_config(labels)).result()
+            sql = f"DELETE FROM {target} AS T WHERE {predicate}"
+            counted = baseline = None
+            if delete_guards_enabled(sync_options):
+                counted = self._count_rows(
+                    client, f"SELECT COUNT(*) FROM {target} AS T WHERE {predicate}", labels
+                )
+                if sync_options.guards.max_delete_pct is not None:  # type: ignore[union-attr]
+                    baseline_where = f" WHERE {scope_prefix[: -len(' AND ')]}" if scope else ""
+                    baseline = self._count_rows(
+                        client, f"SELECT COUNT(*) FROM {target} AS T{baseline_where}", labels
+                    )
+                # Nothing has been deleted yet: a refusal here is a clean stop.
+                judge_delete_guards(sync_options, deletes=counted, baseline=baseline)
+            job = client.query(sql, job_config=self._query_job_config(labels))
+            job.result()
+            if counted is not None:
+                verify_committed_delete(
+                    sync_options,
+                    counted=counted,
+                    actual=self._affected_rows(job),
+                    baseline=baseline,
+                )
             return SyncResult()
         finally:
             try:
@@ -614,15 +638,79 @@ class BigQueryDestination:
             key_match = " AND ".join(
                 [f"T.{self._quote_column(c)} = K.{self._quote_column(c)}" for c in upsert_key]
             )
-            sql = (
-                f"DELETE FROM {self._quote_table(table_id)} AS T "
-                f"WHERE EXISTS (SELECT 1 FROM {self._quote_table(keys_table_id)} K "
-                f"WHERE {key_match})"
+            predicate = (
+                f"EXISTS (SELECT 1 FROM {self._quote_table(keys_table_id)} K WHERE {key_match})"
             )
-            client.query(sql, job_config=self._query_job_config(labels)).result()
+            sql = f"DELETE FROM {self._quote_table(table_id)} AS T WHERE {predicate}"
+            counted = None
+            if delete_guards_enabled(sync_options):
+                # Diff reports no percentage baseline: max_delete_pct fails closed.
+                counted = self._count_rows(
+                    client,
+                    f"SELECT COUNT(*) FROM {self._quote_table(table_id)} AS T WHERE {predicate}",
+                    labels,
+                )
+                judge_delete_guards(sync_options, deletes=counted, baseline=None)
+            job = client.query(sql, job_config=self._query_job_config(labels))
+            job.result()
+            if counted is not None:
+                verify_committed_delete(
+                    sync_options,
+                    counted=counted,
+                    actual=self._affected_rows(job),
+                    baseline=None,
+                )
             return SyncResult()
         finally:
             self._cleanup_mirror_staging(client)
+
+    # --- run-time delete guards (#1218 part 2) ----------------------------
+    def _count_rows(self, client: Any, sql: str, labels: Any) -> int:
+        rows = list(client.query(sql, job_config=self._query_job_config(labels)).result())
+        return int(rows[0][0])
+
+    @staticmethod
+    def _affected_rows(job: Any) -> int | None:
+        """Rows the DML job reports; ``None`` when absent or implausible."""
+        value = getattr(job, "num_dml_affected_rows", None)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    def _judge_swap(
+        self,
+        client: Any,
+        config: BigQueryDestinationConfig,
+        sync_options: SyncOptions,
+        table_id: str,
+        shadow_table_id: str,
+        labels: Any,
+    ) -> None:
+        """Compare the shadow table with the live one before the copy overwrites it."""
+        live = self._quote_table(table_id)
+        shadow = self._quote_table(shadow_table_id)
+        live_rows = self._count_rows(client, f"SELECT COUNT(*) FROM {live}", labels)
+        upsert_key = list(config.upsert_key or [])
+        if upsert_key:
+            # BigQuery rejects IS NOT DISTINCT FROM in a correlated EXISTS;
+            # TO_JSON_STRING keeps it an equality and maps NULL to 'null' on both sides.
+            match = " AND ".join(
+                f"TO_JSON_STRING(L.{self._quote_column(c)}) = "
+                f"TO_JSON_STRING(S.{self._quote_column(c)})"
+                for c in upsert_key
+            )
+            deletes = self._count_rows(
+                client,
+                f"SELECT COUNT(*) FROM {live} AS L "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {shadow} AS S WHERE {match})",
+                labels,
+            )
+        else:
+            # A keyless replace cannot tell replacement rows from deleted rows:
+            # the documented cardinality-only fallback.
+            shadow_rows = self._count_rows(client, f"SELECT COUNT(*) FROM {shadow}", labels)
+            deletes = max(live_rows - shadow_rows, 0)
+        judge_delete_guards(sync_options, deletes=deletes, baseline=live_rows)
 
     def _cleanup_mirror_staging(self, client: Any) -> None:
         if self._mirror_keys_table_id is not None:
