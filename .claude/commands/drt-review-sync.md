@@ -45,9 +45,11 @@ Nothing was written. Read the reason and tell the human; do not retry blindly.
 ## Things to know
 
 - A plan is a **guard in front of a normal run**, not a transaction: apply recomputes the plan and refuses on any difference, then runs the sync, which writes every extracted row. The source can still change in the short window after verification.
-- PostgreSQL/MySQL judge mirror guards on the DELETE's actual affected-row count
-  inside the transaction and roll it back on refusal; guarded swaps count missing
-  keys under a table lock. A second "Change guards tripped" refusal means the
+- Run-time delete guards are judged on the destructive step's own numbers: where the
+  destination has transactions (PostgreSQL/MySQL/Snowflake) the DELETE's affected-row
+  count is judged inside the transaction and rolled back on refusal; warehouses without
+  rollback count first and refuse before deleting (`docs/guides/plan.md` lists which
+  destinations are covered). Guarded swaps compare live keys absent from the replacement. A second "Change guards tripped" refusal means the
   run-time value exceeded what the reviewed force covered. Re-plan and show the
   human the new result; apply cannot stretch the old approval to cover it.
 - Direct MCP `drt_run_sync(force_guards=true)` requires a non-empty
