@@ -113,7 +113,7 @@ Debug a failing drt sync.
 
 ### `drt apply` refuses a plan (v1.2)
 - **Cause**: apply recomputes the plan and aborts on any difference (the source or destination changed, or the sync definition changed), if the plan was already applied (a plan is single-use), or if the destination cannot be read back (plan covers SQL databases/warehouses; `update_only` / `create_only` are refused).
-- **Fix**: run `drt plan` again and review the new change set. See `docs/guides/plan.md` for the refusal table.
+- **Fix**: run `drt plan` again and review the new change set. See `docs/guides/plan.md` and the refusal table in the `drt-review-sync` skill.
 
 ### `write_policy: fill_empty` rejected at validate (v1.2)
 - **Cause**: `fill_empty` needs an upsert write path — it is rejected with `destination.mode: insert` and with `sync.mode: replace` (a rebuilt table has no existing value to keep), and `create_only` has nothing to fill.
