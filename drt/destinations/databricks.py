@@ -60,7 +60,7 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import record_row_error
 from drt.destinations.sql_base import BaseSqlDestination, _union_columns
 from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
-from drt.engine.guards import GuardTripped
+from drt.engine.guards import GuardTripped, run_cleanup_preserving_guard
 
 _SWAP_SUFFIX = "__drt_swap"
 _ALLOW_COLUMN_DEFAULTS = "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')"
@@ -1111,7 +1111,7 @@ class DatabricksDestination(BaseSqlDestination):
                     guard_baseline="table",
                 )
         finally:
-            conn.close()
+            run_cleanup_preserving_guard(conn.close)
 
         return SyncResult()
 
@@ -1157,7 +1157,7 @@ class DatabricksDestination(BaseSqlDestination):
                     guard_baseline=None,
                 )
         finally:
-            conn.close()
+            run_cleanup_preserving_guard(conn.close)
 
         return SyncResult()
 
@@ -1492,7 +1492,7 @@ class DatabricksDestination(BaseSqlDestination):
 
                 cur.execute(f"DROP TABLE IF EXISTS {diff_table}")
         finally:
-            conn.close()
+            run_cleanup_preserving_guard(conn.close)
 
         return SyncResult()
 
