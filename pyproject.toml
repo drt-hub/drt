@@ -124,7 +124,7 @@ dev = [
 # `regenerate-schemas.sh` and CI's vscode-schema-drift job install it, and
 # nothing else should.
 schema-gen = [
-    "pydantic==2.13.5",
+    "pydantic==2.14.1",
 ]
 
 [project.scripts]
