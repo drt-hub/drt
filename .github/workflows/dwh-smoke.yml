@@ -138,6 +138,12 @@ jobs:
     name: Databricks smoke
     runs-on: ubuntu-latest
     if: github.repository == 'drt-hub/drt'
+    # issues: write lets the INACTIVE-workspace report below open/close one
+    # tracking issue (the same pattern drift-check.yml uses). The workflow's
+    # default stays contents: read for every other job.
+    permissions:
+      contents: read
+      issues: write
     env:
       DRT_SMOKE_DATABRICKS_HOST: ${{ secrets.SMOKE_DATABRICKS_HOST }}
       DRT_SMOKE_DATABRICKS_HTTP_PATH: ${{ secrets.SMOKE_DATABRICKS_HTTP_PATH }}
@@ -285,6 +291,46 @@ jobs:
             fi
           fi
           echo "Warehouse is running."
+      # A scheduled run with an INACTIVE workspace is green by design (it is an
+      # operational state, not a code regression), but a green nightly then
+      # reads as "Databricks passed" when the leg did not run at all. Surface
+      # it as ONE tracking issue instead of a silent skip; close it as soon as
+      # a scheduled run reaches the warehouse again.
+      - name: Report skipped Databricks leg (INACTIVE workspace)
+        if: github.event_name == 'schedule' && steps.warehouse.outputs.workspace_inactive == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="dwh-smoke: Databricks leg skipped - workspace INACTIVE"
+          BODY=$(cat <<EOF
+          The scheduled \`dwh-smoke\` run could not start the Databricks SQL warehouse because the workspace is **INACTIVE** (Free Edition deactivates idle workspaces). The Databricks leg did **not** run, so a green nightly run does not mean Databricks passed.
+
+          **Fix:** press **Start** on the SQL warehouse in the Databricks console (the API cannot reactivate the workspace).
+          Latest scheduled run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          _Auto-filed by the \`dwh-smoke\` workflow; it updates this issue in place and closes it when a scheduled run reaches the warehouse again._
+          EOF
+          )
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --search "in:title \"$TITLE\"" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --body "Still INACTIVE on $(date -u +%Y-%m-%d): ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+          fi
+      - name: Close the INACTIVE tracking issue once the warehouse is reachable
+        if: github.event_name == 'schedule' && steps.warehouse.outputs.workspace_inactive != 'true' && steps.creds.outputs.has_creds == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="dwh-smoke: Databricks leg skipped - workspace INACTIVE"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --search "in:title \"$TITLE\"" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --comment "A scheduled run reached the Databricks warehouse again on $(date -u +%Y-%m-%d) - closing."
+          fi
       - name: Run Databricks smoke
         if: steps.creds.outputs.has_creds == 'true' && steps.warehouse.outputs.workspace_inactive != 'true'
         # #1108's managed-table/warehouse-state suites and #1114/#1177's diff
