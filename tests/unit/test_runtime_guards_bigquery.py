@@ -220,3 +220,45 @@ def test_keyless_swap_uses_the_documented_cardinality_fallback() -> None:
     with pytest.raises(GuardTripped) as raised:
         _swap(client, {"max_deletes": 2}, _config())
     assert raised.value.trips[0].observed == 4
+
+
+def test_staging_cleanup_failure_never_masks_a_guard_refusal() -> None:
+    client = _fake_client()
+    _scripted(client, [3])
+    config = _config(mode="insert", upsert_key=["id"])
+    options = _mirror({"max_deletes": 1})
+    destination = BigQueryDestination()
+    with patch.dict("sys.modules", _mocked_bq_modules(client)):
+        destination.load([{"id": 1}], config, options)
+        client.delete_table.side_effect = RuntimeError("cleanup failed")  # finalize only
+        with pytest.raises(GuardTripped):
+            destination.finalize_sync(config, options)
+
+    client = _fake_client()
+    client.get_table.return_value.schema = [_schema_field("id")]
+    _scripted(client, [2])
+    client.delete_table.side_effect = RuntimeError("cleanup failed")
+    destination = BigQueryDestination()
+    with patch.dict("sys.modules", _mocked_bq_modules(client)), pytest.raises(GuardTripped):
+        destination.finalize_sync(_config(upsert_key=["id"]), _diff_options({"max_deletes": 1}))
+
+
+def test_shadow_cleanup_failure_never_masks_a_swap_refusal_but_surfaces_otherwise() -> None:
+    client = _fake_client()
+    _scripted(client, [5, 3])
+    client.delete_table.side_effect = RuntimeError("cleanup failed")
+    with pytest.raises(GuardTripped):
+        _swap(client, {"max_deletes": 1}, _config(upsert_key=["id"]))
+
+
+def test_staging_cleanup_failure_still_surfaces_when_nothing_tripped() -> None:
+    client = _fake_client()
+    _scripted(client, [1], affected=1)
+    config = _config(mode="insert", upsert_key=["id"])
+    options = _mirror({"max_deletes": 5})
+    destination = BigQueryDestination()
+    with patch.dict("sys.modules", _mocked_bq_modules(client)):
+        destination.load([{"id": 1}], config, options)
+        client.delete_table.side_effect = RuntimeError("cleanup failed")
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            destination.finalize_sync(config, options)

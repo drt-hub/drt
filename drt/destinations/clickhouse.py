@@ -59,7 +59,12 @@ from drt.config.models import ClickHouseDestinationConfig, DestinationConfig, Sy
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 from drt.destinations.sql_utils import tag_query
-from drt.engine.guards import GuardTripped, delete_guards_enabled, judge_delete_guards
+from drt.engine.guards import (
+    GuardTripped,
+    delete_guards_enabled,
+    judge_delete_guards,
+    run_cleanup_preserving_guard,
+)
 
 
 class ClickHouseDestination:
@@ -479,7 +484,7 @@ class ClickHouseDestination:
             # Shadow now contains the OLD data — drop it.
             client.command(tag_query(f"DROP TABLE {shadow_q}", sync_options))
         finally:
-            client.close()
+            run_cleanup_preserving_guard(client.close)
             self._swap_shadow_created = False
             self._swap_table = None
 
@@ -710,7 +715,7 @@ class ClickHouseDestination:
                 tag_query(sql, sync_options), parameters=params, settings={"mutations_sync": 1}
             )
         finally:
-            client.close()
+            run_cleanup_preserving_guard(client.close)
 
         # SyncResult has no dedicated `deleted` field; future work tracks
         # this separately. Returning a bare SyncResult signals "finalize
@@ -750,7 +755,7 @@ class ClickHouseDestination:
                 settings={"mutations_sync": 1},
             )
         finally:
-            client.close()
+            run_cleanup_preserving_guard(client.close)
 
         return SyncResult()
 
@@ -1060,7 +1065,7 @@ class ClickHouseDestination:
                     columns = ["sync_name", "key_hash", "key_json"]
                 client.insert(state_q, state_rows, column_names=columns)
         finally:
-            client.close()
+            run_cleanup_preserving_guard(client.close)
 
         return SyncResult()
 

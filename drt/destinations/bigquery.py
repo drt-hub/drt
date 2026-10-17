@@ -53,7 +53,12 @@ from drt.destinations.sql_utils import (
     check_mirror_supported,
     unsupported_tracked_scope_msg,
 )
-from drt.engine.guards import delete_guards_enabled, judge_delete_guards, verify_committed_delete
+from drt.engine.guards import (
+    delete_guards_enabled,
+    judge_delete_guards,
+    run_cleanup_preserving_guard,
+    verify_committed_delete,
+)
 
 _SWAP_SUFFIX = "__drt_swap"
 _MIRROR_KEYS_SUFFIX = "__drt_mirror_keys"
@@ -516,7 +521,9 @@ class BigQueryDestination:
             return SyncResult()
         finally:
             try:
-                client.delete_table(shadow_table_id, not_found_ok=True)
+                run_cleanup_preserving_guard(
+                    lambda: client.delete_table(shadow_table_id, not_found_ok=True)
+                )
             finally:
                 self._reset_swap_state()
 
@@ -591,7 +598,9 @@ class BigQueryDestination:
             return SyncResult()
         finally:
             try:
-                client.delete_table(keys_table_id, not_found_ok=True)
+                run_cleanup_preserving_guard(
+                    lambda: client.delete_table(keys_table_id, not_found_ok=True)
+                )
             finally:
                 self._mirror_keys_table_id = None
                 self._mirror_aborted = False
@@ -662,7 +671,7 @@ class BigQueryDestination:
                 )
             return SyncResult()
         finally:
-            self._cleanup_mirror_staging(client)
+            run_cleanup_preserving_guard(lambda: self._cleanup_mirror_staging(client))
 
     # --- run-time delete guards (#1218 part 2) ----------------------------
     def _count_rows(self, client: Any, sql: str, labels: Any) -> int:

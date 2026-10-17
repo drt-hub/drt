@@ -243,3 +243,41 @@ def test_keyless_swap_uses_the_documented_cardinality_fallback_and_survives_drop
     with pytest.raises(GuardTripped) as raised:
         _swap(client, {"max_deletes": 2}, _config())
     assert raised.value.trips[0].observed == 4
+
+
+@pytest.mark.parametrize("path", ["destination", "diff", "tracked", "swap"])
+def test_client_close_failure_never_masks_a_guard_refusal(path: str) -> None:
+    destination = ClickHouseDestination()
+    config = _config(upsert_key=["id"])
+    if path == "destination":
+        destination._mirror_keys = [(1,), (2,)]
+        options = _mirror({"max_deletes": 1})
+        client = _client([3])
+    elif path == "diff":
+        options = _diff({"max_deletes": 1})
+        client = _client([2])
+    elif path == "tracked":
+        destination._mirror_keys = [(1,)]
+        options = _tracked({"max_deletes": 1})
+        client = _client([2], stale=[("h2", json.dumps([2])), ("h3", json.dumps([3]))], state=4)
+    else:
+        destination._swap_shadow_created = True
+        destination._swap_table = "analytics_scores"
+        options = _options(mode="replace", replace_strategy="swap", guards={"max_deletes": 1})
+        client = _client([5, 3])
+    client.close.side_effect = RuntimeError("close failed")
+
+    with pytest.raises(GuardTripped):
+        _finalize(destination, client, config, options)
+
+    client.close.assert_called_once()
+
+
+def test_client_close_failure_still_surfaces_when_nothing_tripped() -> None:
+    destination = ClickHouseDestination()
+    destination._mirror_keys = [(1,)]
+    client = _client([1])
+    client.close.side_effect = RuntimeError("close failed")
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        _finalize(destination, client, _config(upsert_key=["id"]), _mirror({"max_deletes": 5}))
