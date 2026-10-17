@@ -452,8 +452,9 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.10.0** ✅       | **Enterprise Boundary & Ecosystem** — Protocol stability/freeze prep · OSS product and Enterprise extension boundaries · age-encrypted project secrets · `QueryableDestination` · entry-point plugins usable from YAML · dbt exposures · benchmark/real-I/O/PyO3 evidence · pluggable rate-limit coordination · dagster-drt v0.4.0 event-driven sensors · FileDestination and least-privilege Snowflake mirror fixes |
 | **v1.0.0** ✅        | **Stable Release** — Source/Destination/StateManager Protocol freeze (semver-guaranteed) · migration guide for connector/plugin authors · `Development Status :: 5 - Production/Stable` · hardening pass: `drt serve --auth oidc`, `klaviyo.backfill`, `target/drt/run_results.json` run artifact, `google_ads.cloud_project_id`, DLQ/destination-batch correctness fixes |
 | **v1.1.0** ✅        | **Warehouse parity** — managed tables · warehouse-backed state/history/DLQ · diff-based incremental · `replace`/`mirror` and `mirror.strategy: diff` across Snowflake, Databricks and BigQuery |
+| **v1.2.0** ✅        | **Reviewable syncs** — `drt plan` / `drt apply` (a saved, redacted change set; apply only if the world still matches) · change guards (`max_deletes` / `max_delete_pct`) at plan, apply and run on every mirror/replace destination · `write_policy: fill_empty` · CI PR review loop (`deploy github-actions --with-plan`) · MCP `drt_plan` / `drt_apply` with human approval · `drt init --from-ossie` · Amazon SQS destination |
 
-**Next:** [v1.2 Reviewable syncs](ROADMAP.md) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
+**Next:** [v1.3 Depth and durability](ROADMAP.md#v13--depth-and-durability) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 

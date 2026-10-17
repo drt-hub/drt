@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL as code — no UI, no lock-in, no per-row bill."
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v1.1.0
+- **Current version:** v1.2.0
 
 ## What drt is NOT
 
@@ -80,6 +80,9 @@ my-project/
 | MySQL | `drt-core[mysql]` | Uses pymysql. Supports host, port, dbname, user, password_env |
 | Databricks | `drt-core[databricks]` | SQL Warehouse via databricks-sql-connector. Supports Unity Catalog, access_token_env, managed_schema |
 | SQL Server | `drt-core[sqlserver]` | Microsoft SQL Server via pure-Python pymssql. Supports host, port, database, user, password_env |
+| Delta Lake | `drt-core[deltalake]` | Delta tables from a local path, S3, or GCS (no warehouse in between) |
+| Apache Iceberg | `drt-core[iceberg]` | Iceberg tables through a REST, SQL, Hive, or local catalog |
+| REST API | (core) | Read records from an HTTP API |
 
 Source is configured in `~/.drt/profiles.yml` (dbt-style):
 
@@ -123,6 +126,14 @@ default:
 | Databricks | `databricks` | INSERT / MERGE, replace, and mirror into Delta tables. Requires `drt-core[databricks]` |
 | BigQuery | `bigquery` | INSERT / MERGE, load-job replace, and mirror. Requires `drt-core[bigquery]` |
 | Amplitude | `amplitude` | Identify API (user properties) or HTTP V2 API (events). No extra dependencies. |
+| Airtable | `airtable` | Append or upsert records into an Airtable base table. No extra dependencies |
+| Klaviyo | `klaviyo` | Upsert profiles or track events. No extra dependencies |
+| Mixpanel | `mixpanel` | Profile-set (`/engage`) or events (`/import`). No extra dependencies |
+| Elasticsearch / OpenSearch | `elasticsearch` | Bulk-index rows via the `_bulk` API. No extra dependencies |
+| Amazon S3 | `s3` | CSV / JSON / JSONL / Parquet objects, optional gzip. Requires `drt-core[s3]` |
+| Google Cloud Storage | `gcs` | CSV / JSON / JSONL / Parquet objects, optional gzip. Requires `drt-core[gcs]` |
+| Azure Blob Storage | `azure_blob` | CSV / JSON / JSONL / Parquet blobs, optional gzip. Requires `drt-core[azure]` |
+| Amazon SQS | `sqs` | JSON messages to a standard or FIFO queue, boto3 credential chain. Requires `drt-core[sqs]` |
 
 ## CLI Commands
 
