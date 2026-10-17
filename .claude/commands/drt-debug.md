@@ -97,6 +97,21 @@ Debug a failing drt sync.
 - **Cause**: Webhook URL returned 4xx but the upstream sync still succeeded; you missed it.
 - **Fix**: Configure the sync's `alerts.on_failure` channels — Slack / webhook notifications fire when the run hits a hard failure.
 
+### `Change guards tripped` (v1.2)
+- **Cause**: `sync.guards` (`max_deletes` / `max_delete_pct`, plus `max_creates` / `max_updates_pct` in `drt plan` / `drt apply`) refused a run that would change more rows than allowed. This is the guard working, not a bug: nothing was deleted or swapped.
+- **Fix**: first ask *why* the number is larger than usual (empty or partial source, a changed model, a wrong `mirror.scope`). If the change is genuinely intended, review it with `drt plan`, then `drt apply --force-guards` (a human decision; recorded in the run results), or raise the limit in the YAML. Never add `--force-guards` to an automated job.
+- **A percentage trip with no baseline**: `mirror.strategy: diff` reports no denominator, so `max_delete_pct` fails closed — use `max_deletes` there.
+- **`...but rollback failed; the destination outcome is uncertain`** (Postgres/MySQL/Snowflake): the guard tripped but the rollback of the refused DELETE failed — check the target table's row count before re-running.
+- **`...AFTER the DELETE ran; it is already committed`** (Databricks/BigQuery): these cannot roll a DELETE back. The pre-count passed but the statement removed more than counted (a concurrent writer) or its row count was unreadable. Recover with `RESTORE TABLE ... TO VERSION AS OF` (Delta) or table time travel (BigQuery).
+
+### `drt apply` refuses a plan (v1.2)
+- **Cause**: apply recomputes the plan and aborts on any difference (the source or destination changed, or the sync definition changed), if the plan was already applied (a plan is single-use), or if the destination cannot be read back (plan covers SQL databases/warehouses; `update_only` / `create_only` are refused).
+- **Fix**: run `drt plan` again and review the new change set. See `docs/guides/plan.md` and the refusal table in the `drt-review-sync` skill.
+
+### `write_policy: fill_empty` rejected at validate (v1.2)
+- **Cause**: `fill_empty` needs an upsert write path — it is rejected with `destination.mode: insert` and with `sync.mode: replace` (a rebuilt table has no existing value to keep), and `create_only` has nothing to fill.
+- **Fix**: use `mode: merge`/upsert with an `upsert_key`; see `docs/guides/write-policy.md`.
+
 ## Tools to escalate to
 
 - `drt test --select <name>` — runs the post-sync validation tests (freshness / unique / accepted_values) declared in the sync YAML; use this when "the sync says success but the data looks wrong".

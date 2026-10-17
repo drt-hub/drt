@@ -75,7 +75,11 @@ def create_server(project_dir: Path | None = None) -> Any:
             "Use these tools to list, run, validate, and monitor data syncs "
             "from a data warehouse to external services. Sync configuration "
             "supports cursor or warehouse snapshot-diff incremental delivery, "
-            "replace/mirror modes, and local, object-store, or warehouse state."
+            "replace/mirror modes, and local, object-store, or warehouse state. "
+            "To change data on a destination that can be read back, prefer "
+            "drt_plan then drt_apply: show the human the change set and any "
+            "tripped guards, and call drt_apply only after they approve "
+            "(approved_by is required). Never use force_guards on your own."
         ),
     )
 
