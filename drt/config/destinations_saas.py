@@ -1139,3 +1139,33 @@ class SalesforceBulkDestinationConfig(BaseModel):
         if not self.instance_url and not self.instance_url_env:
             raise ValueError("Either instance_url or instance_url_env is required.")
         return self
+
+
+class KafkaAuthConfig(BaseModel):
+    type: Literal["none", "sasl_plain", "sasl_scram", "ssl"] = "none"
+    username_env: str | None = None
+    password_env: str | None = None
+    scram_mechanism: Literal["SCRAM-SHA-256", "SCRAM-SHA-512"] = "SCRAM-SHA-256"
+    ca_env: str | None = None
+    cert_env: str | None = None
+    key_env: str | None = None
+
+    @model_validator(mode="after")
+    def _check_auth_fields(self) -> KafkaAuthConfig:
+        ...
+
+
+class KafkaDestinationConfig(DescribableConfig):
+    type: Literal["kafka"]
+    bootstrap_servers_env: str = Field(min_length=1)
+    topic: str = Field(min_length=1)
+    key_field: str = Field(min_length=1)
+    value_format: Literal["json"] = "json"
+    headers: dict[str, str] = Field(default_factory=dict)
+    auth: KafkaAuthConfig = Field(default_factory=KafkaAuthConfig)
+    delivery_timeout_seconds: float = Field(default=30.0, gt=0)
+    retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None
+
+    def _describe_detail(self) -> str:
+        ...
