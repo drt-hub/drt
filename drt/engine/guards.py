@@ -8,6 +8,9 @@ reads as "within limits".
 
 from __future__ import annotations
 
+import logging
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -295,3 +298,23 @@ def verify_committed_delete(
         for trip in sync_options._forced_guard_trips:
             latest[trip.guard] = trip
         sync_options._forced_guard_trips[:] = list(latest.values())
+
+
+def run_cleanup_preserving_guard(cleanup: Callable[[], Any]) -> None:
+    """Run best-effort cleanup from a ``finally`` without replacing a guard refusal.
+
+    If a :class:`GuardTripped` is the active exception and the cleanup itself
+    fails, the refusal wins and the cleanup failure is logged. With no guard
+    refusal in flight, a cleanup failure propagates exactly as before.
+    """
+    active = sys.exc_info()[1]
+    try:
+        cleanup()
+    except Exception as exc:
+        if not isinstance(active, GuardTripped):
+            raise
+        logging.getLogger(__name__).warning(
+            "cleanup failed while preserving a change-guard refusal: %s: %s",
+            type(exc).__name__,
+            exc,
+        )

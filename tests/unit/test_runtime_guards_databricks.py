@@ -395,3 +395,51 @@ def test_deleted_rows_treats_a_broken_cursor_as_unverified() -> None:
     cur = MagicMock()
     cur.fetchone.return_value = None
     assert DatabricksDestination._deleted_rows(cur) is None
+
+
+@pytest.mark.parametrize("path", ["destination", "diff", "tracked"])
+def test_connection_close_failure_never_masks_a_guard_refusal(path: str) -> None:
+    destination = DatabricksDestination()
+    if path == "destination":
+        destination._mirror_keys = [(1,), (2,)]
+        options = _guards(max_deletes=2)
+        cur = _Cursor([3])
+    elif path == "diff":
+        options = SyncOptions(
+            mode="mirror",
+            incremental_strategy="diff",
+            mirror={"strategy": "diff"},  # type: ignore[arg-type]
+            guards={"max_deletes": 1},  # type: ignore[arg-type]
+        )
+        options._diff_removed_keys = [{"id": 1}, {"id": 2}]
+        options._sync_name = "s"
+        cur = _Cursor([2])
+    else:
+        destination._mirror_keys = [(1,)]
+        options = _tracked_options()
+        options.guards = _guards(max_deletes=1).guards
+        cur = _TrackedCursor([("h2", json.dumps([2])), ("h3", json.dumps([3]))], 4, counts=[2])
+    conn = _conn(cur)
+    conn.close.side_effect = RuntimeError("close failed")
+
+    with (
+        patch.object(DatabricksDestination, "_connect", return_value=conn),
+        pytest.raises(GuardTripped),
+    ):
+        destination.finalize_sync(_config(), options)
+
+    conn.close.assert_called_once()
+
+
+def test_connection_close_failure_still_surfaces_when_nothing_tripped() -> None:
+    destination = DatabricksDestination()
+    destination._mirror_keys = [(1,)]
+    cur = _Cursor([1], dml=(1,))
+    conn = _conn(cur)
+    conn.close.side_effect = RuntimeError("close failed")
+
+    with (
+        patch.object(DatabricksDestination, "_connect", return_value=conn),
+        pytest.raises(RuntimeError, match="close failed"),
+    ):
+        destination.finalize_sync(_config(), _guards(max_deletes=5))
