@@ -4,7 +4,9 @@ All notable changes to the **drt — Reverse ETL** VS Code extension are documen
 here. This extension versions independently of `drt-core`; each release notes the
 drt-core version its bundled schemas were generated from.
 
-## [0.1.14] - Unreleased
+## [0.1.14] - 2026-10-17
+
+Bundled schemas match drt-core 1.2.0 ("Reviewable syncs").
 
 - Bundled JSON Schemas regenerated from the drt-core checkout: `sqs` gains destination
   `retry` and `rate_limit` overrides (drt-hub/drt#1182).
@@ -15,7 +17,9 @@ drt-core version its bundled schemas were generated from.
 
 - Bundled JSON Schemas regenerated from drt-core: `sync.guards`
   (`max_creates`, `max_deletes`, `max_delete_pct`, `max_updates_pct`) limits how
-  much a run may change, enforced by `drt apply` (drt-hub/drt#1218).
+  much a run may change, enforced by `drt apply` and, for `max_deletes` /
+  `max_delete_pct`, at run time on every mirror/replace destination
+  (drt-hub/drt#1218).
 
 ## [0.1.13] - 2026-10-08
 
