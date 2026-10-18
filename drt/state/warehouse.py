@@ -77,6 +77,13 @@ from typing import Any
 
 from drt.config.credentials import PostgresProfile
 from drt.sources.postgres import PostgresSource
+from drt.state._history_columns import (
+    OPTIONAL_HISTORY_COLUMNS,
+    column_list_sql,
+    decode_optional,
+    encode_optional,
+    resolve_optional_columns,
+)
 from drt.state.audit_trail import AuditEntry
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry
@@ -324,6 +331,50 @@ class PostgresWarehouseHistoryStore:
 
     def __init__(self, profile: PostgresProfile) -> None:
         self._profile = profile
+        # Optional additive columns (#1264) present on the table; resolved lazily.
+        self._optional: tuple[str, ...] | None = None
+        self._alter_tried = False
+
+    def _optional_columns(self, conn: Any, *, allow_alter: bool) -> tuple[str, ...]:
+        """Optional history columns this table has; an append adds missing ones."""
+        from psycopg2 import sql as _pgsql
+
+        if self._optional is not None and (
+            not allow_alter
+            or self._alter_tried
+            or len(self._optional) == len(OPTIONAL_HISTORY_COLUMNS)
+        ):
+            return self._optional
+
+        def list_columns() -> list[str]:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (self._profile.managed_schema, _HISTORY_TABLE),
+            )
+            return [row[0] for row in cur.fetchall()]
+
+        def add_column(name: str) -> None:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    _pgsql.SQL("ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT").format(
+                        _qualified(self._profile, _HISTORY_TABLE), _pgsql.Identifier(name)
+                    )
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        self._optional = resolve_optional_columns(
+            list_columns,
+            add_column if allow_alter else None,
+            table=f"{self._profile.managed_schema}.{_HISTORY_TABLE}",
+        )
+        self._alter_tried = self._alter_tried or allow_alter
+        return self._optional
 
     def _ensure_table(self, conn: Any) -> None:
         _ensure_table_exists(
@@ -360,13 +411,17 @@ class PostgresWarehouseHistoryStore:
             conn = _connect(self._profile)
             try:
                 self._ensure_table(conn)
+                present = self._optional_columns(conn, allow_alter=True)
                 cur = conn.cursor()
                 cur.execute(
                     _pgsql.SQL(
                         "INSERT INTO {} (sync_name, started_at, completed_at, "
                         "duration_seconds, status, records_synced, records_failed, "
-                        "errors, cursor_value_used, dry_run, run_id, sync_run_id) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        "errors, cursor_value_used, dry_run, run_id, sync_run_id"
+                        + column_list_sql(present)
+                        + ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
+                        + ", %s" * len(present)
+                        + ")"
                     ).format(_qualified(self._profile, _HISTORY_TABLE)),
                     (
                         entry.sync_name,
@@ -381,6 +436,7 @@ class PostgresWarehouseHistoryStore:
                         entry.dry_run,
                         entry.run_id,
                         entry.sync_run_id,
+                        *encode_optional(entry, present),
                     ),
                 )
                 conn.commit()
@@ -394,11 +450,12 @@ class PostgresWarehouseHistoryStore:
 
         conn = _connect(self._profile)
         try:
+            present = self._optional_columns(conn, allow_alter=False)
             cur = conn.cursor()
             columns = (
                 "sync_name, started_at, completed_at, duration_seconds, status, "
                 "records_synced, records_failed, errors, cursor_value_used, dry_run, "
-                "run_id, sync_run_id"
+                "run_id, sync_run_id" + column_list_sql(present)
             )
             try:
                 if sync_name is not None:
@@ -420,7 +477,7 @@ class PostgresWarehouseHistoryStore:
                 if _is_undefined_table(exc):
                     return []
                 raise
-            return [_row_to_history_entry(row) for row in cur.fetchall()]
+            return [_row_to_history_entry(row, present) for row in cur.fetchall()]
         finally:
             conn.close()
 
@@ -449,7 +506,7 @@ class PostgresWarehouseHistoryStore:
             conn.close()
 
 
-def _row_to_history_entry(row: tuple[Any, ...]) -> HistoryEntry:
+def _row_to_history_entry(row: tuple[Any, ...], optional: tuple[str, ...] = ()) -> HistoryEntry:
     (
         sync_name,
         started_at,
@@ -463,8 +520,10 @@ def _row_to_history_entry(row: tuple[Any, ...]) -> HistoryEntry:
         dry_run,
         run_id,
         sync_run_id,
+        *optional_cells,
     ) = row
     return HistoryEntry(
+        **decode_optional(optional, optional_cells),
         sync_name=sync_name,
         started_at=started_at,
         completed_at=completed_at,

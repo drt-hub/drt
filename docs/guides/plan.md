@@ -328,11 +328,11 @@ override must be explicit (`drt run --force-guards`, or `--force-guards` on
   write extracts again; PostgreSQL/MySQL/Snowflake/Databricks/BigQuery/ClickHouse then re-check delete-side limits at
   finalization. Create/update changes in that short window remain protected by
   review-time verification only.
-- Forced-guard details are persisted in local and GCS/S3 object-store history
-  and in `target/drt/run_results.json`. Warehouse-backed `_drt_history` keeps
-  its existing schema for compatibility with already-managed tables and does
-  not store the new `guards` field yet. A follow-up schema-evolution issue is
-  needed before that backend can retain it.
+- Forced-guard details are persisted in local and GCS/S3 object-store history,
+  in `target/drt/run_results.json`, and in warehouse-backed `_drt_history` (an
+  optional `guards` column that drt adds on the first append when the role may
+  alter the table; otherwise it logs a warning and records the legacy columns only,
+  see [warehouse state](warehouse-state.md#optional-history-columns-guards)).
 
 ## Exit codes
 
