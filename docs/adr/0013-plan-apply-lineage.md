@@ -1,6 +1,6 @@
 # ADR 0013 — Plan/apply lineage: `plan_id`, approver and guard overrides in run history and the manifest
 
-- **Status:** Proposed 2026-10-18 (draft; owner review pending).
+- **Status:** Accepted 2026-10-20 (owner confirmed the three open questions; implementation follows the v1.2 release).
 - **Issue:** [#1222](https://github.com/drt-hub/drt/issues/1222) (epic [#1227](https://github.com/drt-hub/drt/issues/1227)).
 - **Relates to:** [ADR 0003](0003-manifest-schema-v2.md) / [ADR 0006](0006-manifest-schema-v3.md)
   (manifest versioning: additive field → version bump, omit-when-absent, older manifests stay loadable);
@@ -107,8 +107,10 @@ guard names.
   no plan ids, so the demo output is unchanged apart from `schema_version`.
 - The `drt docs` HTML is unchanged in this ADR's implementation, so no visual-regression baseline moves.
 
-## Open questions for the owner
+## Resolved questions
 
-1. Is `approved_by` withheld from the default manifest (this draft's choice), or always shown?
-2. Should `drt status` show the last applied plan by default, or behind `--history`?
-3. Keep `ComplianceAuditTrail` unchanged (this draft), or add `plan_id` to the audit row in the same release?
+Confirmed by the owner on 2026-10-20:
+
+1. `approved_by` is withheld from the default manifest; it appears only with `--full-labels`.
+2. `drt status` shows the last applied plan only behind `--history`; the default output is unchanged.
+3. `ComplianceAuditTrail` is unchanged. Audit rows join history on `run_id`; `plan_id` can be added later as an additive change.
