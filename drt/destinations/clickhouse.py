@@ -580,7 +580,9 @@ class ClickHouseDestination:
             # NULL-safe on both sides without a sentinel string: a NULL key and the
             # literal text of any sentinel must never compare equal, or a live NULL
             # row would read as "kept" and the swap would delete it unseen.
-            exprs = ", ".join(f"isNull(`{c}`), toString(`{c}`)" for c in upsert_cols)
+            # ifNull keeps the payload non-Nullable: with the default
+            # transform_null_in=0 a NULL inside a tuple never matches under IN.
+            exprs = ", ".join(f"isNull(`{c}`), ifNull(toString(`{c}`), '')" for c in upsert_cols)
             lhs = rhs = f"({exprs})"
             deletes = self._count_rows(
                 client,

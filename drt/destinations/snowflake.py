@@ -581,6 +581,9 @@ class SnowflakeDestination(BaseSqlDestination):
         cur.execute("BEGIN")
         self._guard_txn_open = True
 
+    def _end_guarded_delete(self) -> None:
+        self._guard_txn_open = False
+
     def _build_mirror_count(
         self,
         table: str,

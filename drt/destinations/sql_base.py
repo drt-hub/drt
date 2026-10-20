@@ -47,13 +47,13 @@ def _attach_exception_detail(error: BaseException, detail: str) -> None:
     error._drt_notes = notes  # type: ignore[attr-defined]
 
 
-def _rollback_after_guard(conn: Any, guard_error: Exception) -> NoReturn:
+def _rollback_after_guard(conn: Any, guard_error: BaseException) -> NoReturn:
     """Roll back a refused (or unjudgeable) DELETE; an explicitly uncertain outcome on failure."""
     from drt.engine.guards import GuardOutcomeUncertain
 
     try:
         conn.rollback()
-    except Exception as rollback_error:
+    except BaseException as rollback_error:  # noqa: BLE001 — an interrupt here is uncertain too
         raise GuardOutcomeUncertain(guard_error, rollback_error) from rollback_error
     raise guard_error
 
@@ -419,7 +419,8 @@ class BaseSqlDestination:
                         deletes=self._affected_rows(cur),
                         baseline=baseline,
                     )
-                except Exception as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                except BaseException as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                    self._end_guarded_delete()
                     _rollback_after_guard(conn, delete_error)
             self._commit_mirror(conn)
 
@@ -468,7 +469,8 @@ class BaseSqlDestination:
                         deletes=self._affected_rows(cur),
                         baseline=None,
                     )
-                except Exception as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                except BaseException as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                    self._end_guarded_delete()
                     _rollback_after_guard(conn, delete_error)
             self._commit_mirror(conn)
 
@@ -1029,6 +1031,13 @@ class BaseSqlDestination:
         """Build the cleanup DROP used when a replace-swap guard refuses."""
         raise NotImplementedError
 
+    def _end_guarded_delete(self) -> None:
+        """The guarded DELETE was refused or failed and is being rolled back.
+
+        Dialects that track an open explicit transaction (Snowflake) clear it so a
+        reused instance does not issue a stale COMMIT on a later run.
+        """
+
     def _begin_guarded_delete(self, cur: Any) -> None:
         """Open an explicit transaction around a guarded DELETE.
 
@@ -1504,7 +1513,8 @@ class BaseSqlDestination:
                             deletes=self._affected_rows(cur),
                             baseline=guard_baseline_exact,
                         )
-                    except Exception as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                    except BaseException as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                        self._end_guarded_delete()
                         _rollback_after_guard(conn, delete_error)
             elif not previous_exists:
                 # No prior state at all for this sync (never run, or lost

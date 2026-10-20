@@ -55,10 +55,16 @@ class GuardOutcomeUncertain(GuardTripped):
         # rowcount): the DELETE's fate is equally unknown if rollback fails.
         self.trips = list(getattr(guard_error, "trips", []))
         self.replan_required = bool(getattr(guard_error, "replan_required", False))
+        self.original_error = guard_error
+        cause = (
+            ""
+            if isinstance(guard_error, GuardTripped)
+            else f" (after {type(guard_error).__name__}: {guard_error})"
+        )
         Exception.__init__(
             self,
             "Change guards tripped, but rollback failed; the destination outcome is "
-            "uncertain and the DELETE may have taken effect: "
+            f"uncertain and the DELETE may have taken effect{cause}: "
             f"{type(rollback_error).__name__}: {rollback_error}",
         )
 

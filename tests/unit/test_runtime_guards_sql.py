@@ -817,3 +817,34 @@ def test_unusable_rowcount_with_failed_rollback_is_an_uncertain_outcome() -> Non
         destination.finalize_sync(_mysql_config(), options)
 
     assert "rollback failed" in str(raised.value)
+
+
+def test_interrupt_after_the_delete_rolls_back_before_propagating() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=1)
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        patch.object(MySQLDestination, "_affected_rows", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
+
+
+def test_uncertain_outcome_names_the_original_non_guard_failure() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=None)  # type: ignore[arg-type]
+    conn.rollback.side_effect = RuntimeError("rollback failed")
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(GuardOutcomeUncertain) as raised,
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+    assert "could not determine how many rows" in str(raised.value)
+    assert isinstance(raised.value.original_error, RuntimeError)

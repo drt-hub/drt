@@ -231,3 +231,26 @@ def test_replace_swap_counts_a_null_key_even_when_the_shadow_holds_a_sentinel_lo
         destination.finalize_sync(_config(ch, table), options)
     assert raised.value.trips[0].observed == 1
     assert client.query(f"SELECT count() FROM {table}").result_rows == [(1,)]
+
+
+def test_replace_swap_treats_a_null_key_present_in_both_tables_as_kept(ch: Any) -> None:
+    """With ClickHouse's default transform_null_in=0 a bare NULL never matches under IN."""
+    table = "drt_guard_swap_nullnull"
+    shadow = f"{table}__drt_swap"
+    client = ch[2]
+    for name in (table, shadow):
+        client.command(f"DROP TABLE IF EXISTS {name}")
+        client.command(
+            f"CREATE TABLE {name} (id Nullable(String)) ENGINE = MergeTree ORDER BY tuple() "
+            "SETTINGS allow_nullable_key = 1"
+        )
+        client.command(f"INSERT INTO {name} VALUES (NULL), ('x')")
+    destination = ClickHouseDestination()
+    destination._swap_shadow_created = True
+    destination._swap_table = table
+    options = SyncOptions(
+        mode="replace",
+        replace_strategy="swap",
+        guards={"max_deletes": 0},  # type: ignore[arg-type]
+    )
+    destination.finalize_sync(_config(ch, table), options)  # nothing removed -> no trip
