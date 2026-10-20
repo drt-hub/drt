@@ -222,7 +222,8 @@ def test_swap_trip_never_exchanges_and_drops_the_shadow() -> None:
     assert commands[-1] == "DROP TABLE IF EXISTS `analytics_scores__drt_swap`"
     assert client.queries[0][0] == "SELECT count() FROM `analytics_scores`"
     assert "NOT IN (SELECT" in client.queries[1][0]
-    assert "ifNull(toString(`id`), '__drt_null__')" in client.queries[1][0]
+    assert "(isNull(`id`), ifNull(toString(`id`), ''))" in client.queries[1][0]
+    assert "__drt_null__" not in client.queries[1][0]  # no sentinel a real value could equal
 
 
 def test_swap_force_exchanges_and_records_and_composite_is_null_safe() -> None:
@@ -232,8 +233,9 @@ def test_swap_force_exchanges_and_records_and_composite_is_null_safe() -> None:
     assert any(c.args[0].startswith("EXCHANGE") for c in client.command.call_args_list)
     assert options._forced_guard_trips[0].guard == "max_deletes"
     assert client.queries[1][0].startswith(
-        "SELECT count() FROM `analytics_scores` WHERE (ifNull(toString(`a`), '__drt_null__'), "
-        "ifNull(toString(`b`), '__drt_null__')) NOT IN (SELECT "
+        "SELECT count() FROM `analytics_scores` WHERE "
+        "(isNull(`a`), ifNull(toString(`a`), ''), "
+        "isNull(`b`), ifNull(toString(`b`), '')) NOT IN (SELECT "
     )
 
 

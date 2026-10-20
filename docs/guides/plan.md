@@ -274,12 +274,16 @@ overrode, and records each override once in `run_results.json` and the plan's
 claim file. If a run-time value grows beyond the reviewed forced value, apply
 refuses with the new trip and requires a new plan.
 
-PostgreSQL, MySQL, Snowflake, Databricks, BigQuery and ClickHouse also enforce the delete-side limits in the finalization
-transaction. For mirror strategies, drt reads the percentage baseline, runs the
-`DELETE`, judges the driver's actual affected-row count, and rolls back when the
-guard trips; tracked-state rewrites happen only after the guard passes and commit
-with the delete. A refusal is an ordinary failed sync: no deletion is committed,
-failure alerts and history record it, the watermark does not advance, and `drt
+PostgreSQL, MySQL, Snowflake, Databricks, BigQuery and ClickHouse also enforce the delete-side limits at run time, in
+two different ways. **PostgreSQL, MySQL and Snowflake** run the `DELETE` inside the
+finalization transaction, judge the driver's actual affected-row count, and roll
+back when a guard trips (if the rollback itself fails, the error says the outcome
+is uncertain). **Databricks, BigQuery and ClickHouse** have no multi-statement
+rollback: drt counts the exact rows the statement would remove first and refuses
+*before* deleting; Databricks and BigQuery also re-check the statement's own
+count afterwards and report an "already committed" failure if it was larger or
+unreadable. Tracked-state rewrites happen only after the guard passes. A refusal
+before the delete is an ordinary failed sync: nothing is deleted, failure alerts and history record it, the watermark does not advance, and `drt
 run` exits 1. A reviewed
 override must be explicit (`drt run --force-guards`, or `--force-guards` on
 `drt apply`; the MCP tools have the matching `force_guards` parameter). MCP

@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.2.0] - 2026-10-17
+## [1.2.0] - 2026-10-21
 
 ### Added
 
@@ -112,8 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Claude skills and the MCP server now teach the v1.2 review loop**: `drt-create-sync` offers `write_policy: fill_empty`, `sync.guards` and `drt plan` / `drt apply`; `drt-debug` explains `Change guards tripped`, the uncertain-rollback and already-committed guard errors, refused plans and a rejected `fill_empty`; `drt-review-sync` describes run-time guard behaviour per destination type; and the MCP server `instructions` tell an agent to prefer `drt_plan` then `drt_apply` with human approval and never to force guards on its own. (PR [#1269](https://github.com/drt-hub/drt/pull/1269))
 - **GitHub Sponsors now points at the `drt-hub` organization** ([#1250](https://github.com/drt-hub/drt/pull/1250), [#1251](https://github.com/drt-hub/drt/pull/1251)): `.github/FUNDING.yml` and the README sponsor badge target the organization's Sponsors page (goal and tiers are set there), and a new `SPONSORS.md` explains what sponsorship funds and how sponsors are credited. No functional change to drt itself.
 - **Nightly Snowflake smoke thinned to cut credits** (PR [#1247](https://github.com/drt-hub/drt/pull/1247)): the scheduled `dwh-smoke` runs only the core Snowflake file nightly and the full set on Sundays (UTC); manual runs can still target specific files. CI-only; no behavior change for users.
+- **Scheduled `dwh-smoke` files one tracking issue when the Databricks leg is skipped** ([#1276](https://github.com/drt-hub/drt/pull/1276)): an INACTIVE Databricks Free Edition workspace used to leave the nightly run green with the leg silently skipped; the workflow now opens (and later closes) a single issue telling the maintainer to press Start. Manual runs still fail loudly.
 
 ### Fixed
+
+- **Run-time delete guards: four defects from the final adversarial review** ([#1218](https://github.com/drt-hub/drt/issues/1218)): (1) PostgreSQL/MySQL/Snowflake now roll back explicitly — and report an uncertain outcome if that fails — when a `DELETE`'s row count is unusable (`None`, negative, non-integer), instead of relying on connection close; (2) a forced guard override is no longer erased from history, `drt run` and MCP results when a Databricks/BigQuery `DELETE` commits and its row count cannot be read back; (3) Databricks tracked mirror no longer heals legacy scope rows before the delete guard has passed, so a refused run leaves tracked state untouched; (4) ClickHouse replace-swap compares keys as `(isNull, ifNull(toString, ''))` pairs, so a live NULL key is neither mistaken for a sentinel-text value nor counted as deleted when the shadow also holds NULL; the explicit rollback also covers interrupts, and Snowflake clears its open-transaction flag on a refusal. Docs and the `drt-debug` skill now state precisely which destinations roll back and which refuse before deleting.
 
 - **`drt plan` text output no longer colours a fragment of the plan id / digest**: Rich's automatic highlighter coloured part of the `sha256:` digest (e.g. `a256:f777`), which read as noise on screen and in recordings. The `plan_id:` and `digest:` lines are printed without highlighting; numbers in the summary keep theirs. (PR [#1260](https://github.com/drt-hub/drt/pull/1260))
 

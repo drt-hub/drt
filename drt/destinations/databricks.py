@@ -1349,28 +1349,6 @@ class DatabricksDestination(BaseSqlDestination):
                 else:
                     to_delete = [decode_key(kj) for _h, kj in raw_diff]
 
-                # #890 backfill — see the Postgres/MySQL leg for why. Delta takes
-                # a plain UPDATE, so the "rows are already in hand" cost argument
-                # holds here as it does on Postgres/MySQL/Snowflake (unlike
-                # ClickHouse, where it would be a part-rewriting mutation).
-                # Capped per run; rows about to be deleted are skipped.
-                if stale_scope and scope_positions is not None:
-                    doomed = {key_hash(k) for k in to_delete}
-                    heal = [(h, kj) for h, kj in stale_scope if h not in doomed][
-                        :SCOPE_BACKFILL_PER_RUN
-                    ]
-                    for h, kj in heal:
-                        cur.execute(
-                            f"UPDATE {state_fq} SET scope_spec = ?, scope_key = ? "
-                            "WHERE sync_name = ? AND key_hash = ?",
-                            [
-                                scope_spec,
-                                scope_key_json(decode_key(kj), scope_positions),
-                                sync_name,
-                                h,
-                            ],
-                        )
-
                 tracked_baseline: int | None = None
                 if (
                     self._delete_guards_enabled(sync_options)
@@ -1421,6 +1399,30 @@ class DatabricksDestination(BaseSqlDestination):
                         STATE_TABLE,
                         len(current),
                     )
+
+                # The backfill runs only after the delete guard has passed: a refused
+                # run must leave the tracked state exactly as it found it.
+                # #890 backfill — see the Postgres/MySQL leg for why. Delta takes
+                # a plain UPDATE, so the "rows are already in hand" cost argument
+                # holds here as it does on Postgres/MySQL/Snowflake (unlike
+                # ClickHouse, where it would be a part-rewriting mutation).
+                # Capped per run; rows about to be deleted are skipped.
+                if stale_scope and scope_positions is not None:
+                    doomed = {key_hash(k) for k in to_delete}
+                    heal = [(h, kj) for h, kj in stale_scope if h not in doomed][
+                        :SCOPE_BACKFILL_PER_RUN
+                    ]
+                    for h, kj in heal:
+                        cur.execute(
+                            f"UPDATE {state_fq} SET scope_spec = ?, scope_key = ? "
+                            "WHERE sync_name = ? AND key_hash = ?",
+                            [
+                                scope_spec,
+                                scope_key_json(decode_key(kj), scope_positions),
+                                sync_name,
+                                h,
+                            ],
+                        )
 
                 if to_delete:
                     delete_prefix = f"DELETE FROM {state_fq} WHERE sync_name = ? AND key_hash IN ("

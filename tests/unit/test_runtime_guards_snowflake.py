@@ -226,3 +226,18 @@ def test_tracked_guard_keeps_ddl_outside_the_begin_window_and_skips_state_rewrit
     assert len(after) == 1
     conn.rollback.assert_called_once()
     assert cur.executemany.call_count == 1  # only the diff-key staging inserts
+
+
+def test_refused_guarded_delete_clears_the_open_transaction_flag() -> None:
+    destination = SnowflakeDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 0})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=3)
+
+    with (
+        patch.object(SnowflakeDestination, "_connect", return_value=conn),
+        pytest.raises(GuardTripped),
+    ):
+        destination.finalize_sync(_config(), options)
+
+    assert destination._guard_txn_open is False

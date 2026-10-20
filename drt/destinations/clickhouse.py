@@ -577,10 +577,13 @@ class ClickHouseDestination:
         live_rows = self._count_rows(client, f"SELECT count() FROM {table_q}", {}, sync_options)
         upsert_cols = list(config.upsert_key or [])
         if upsert_cols:
-            # NULL-safe on both sides, like the mutation's toString() comparison.
-            exprs = [f"ifNull(toString(`{c}`), '__drt_null__')" for c in upsert_cols]
-            lhs = exprs[0] if len(exprs) == 1 else "(" + ", ".join(exprs) + ")"
-            rhs = ", ".join(exprs)
+            # NULL-safe on both sides without a sentinel string: a NULL key and the
+            # literal text of any sentinel must never compare equal, or a live NULL
+            # row would read as "kept" and the swap would delete it unseen.
+            # ifNull keeps the payload non-Nullable: with the default
+            # transform_null_in=0 a NULL inside a tuple never matches under IN.
+            exprs = ", ".join(f"isNull(`{c}`), ifNull(toString(`{c}`), '')" for c in upsert_cols)
+            lhs = rhs = f"({exprs})"
             deletes = self._count_rows(
                 client,
                 f"SELECT count() FROM {table_q} WHERE {lhs} NOT IN (SELECT {rhs} FROM {shadow_q})",
