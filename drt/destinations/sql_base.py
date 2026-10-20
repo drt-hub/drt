@@ -410,10 +410,9 @@ class BaseSqlDestination:
                 cur.execute(baseline_stmt, baseline_params)
                 baseline = int(cur.fetchone()[0])
             if self._delete_guards_enabled(sync_options):
-                self._begin_guarded_delete(cur)
-            cur.execute(stmt, params)
-            if self._delete_guards_enabled(sync_options):
                 try:
+                    self._begin_guarded_delete(cur)
+                    cur.execute(stmt, params)
                     self._enforce_delete_guards(
                         sync_options,
                         deletes=self._affected_rows(cur),
@@ -422,6 +421,8 @@ class BaseSqlDestination:
                 except BaseException as delete_error:  # noqa: BLE001 — roll back, then re-raise
                     self._end_guarded_delete()
                     _rollback_after_guard(conn, delete_error)
+            else:
+                cur.execute(stmt, params)
             self._commit_mirror(conn)
 
         # SyncResult has no dedicated `deleted` field; future work tracks
@@ -460,10 +461,9 @@ class BaseSqlDestination:
                 self._mirror_table_ident(config), upsert_cols, keys, negate=False
             )
             if self._delete_guards_enabled(sync_options):
-                self._begin_guarded_delete(cur)
-            cur.execute(stmt, params)
-            if self._delete_guards_enabled(sync_options):
                 try:
+                    self._begin_guarded_delete(cur)
+                    cur.execute(stmt, params)
                     self._enforce_delete_guards(
                         sync_options,
                         deletes=self._affected_rows(cur),
@@ -472,6 +472,8 @@ class BaseSqlDestination:
                 except BaseException as delete_error:  # noqa: BLE001 — roll back, then re-raise
                     self._end_guarded_delete()
                     _rollback_after_guard(conn, delete_error)
+            else:
+                cur.execute(stmt, params)
             self._commit_mirror(conn)
 
         return SyncResult()
@@ -1504,10 +1506,9 @@ class BaseSqlDestination:
                     negate=False,
                 )
                 if self._delete_guards_enabled(sync_options):
-                    self._begin_guarded_delete(cur)
-                cur.execute(stmt, params)
-                if self._delete_guards_enabled(sync_options):
                     try:
+                        self._begin_guarded_delete(cur)
+                        cur.execute(stmt, params)
                         self._enforce_delete_guards(
                             sync_options,
                             deletes=self._affected_rows(cur),
@@ -1516,6 +1517,8 @@ class BaseSqlDestination:
                     except BaseException as delete_error:  # noqa: BLE001 — roll back, then re-raise
                         self._end_guarded_delete()
                         _rollback_after_guard(conn, delete_error)
+                else:
+                    cur.execute(stmt, params)
             elif not previous_exists:
                 # No prior state at all for this sync (never run, or lost
                 # state) — baseline. Prior state existing for *other* scopes

@@ -848,3 +848,27 @@ def test_uncertain_outcome_names_the_original_non_guard_failure() -> None:
         destination.finalize_sync(_mysql_config(), options)
     assert "could not determine how many rows" in str(raised.value)
     assert isinstance(raised.value.original_error, RuntimeError)
+
+
+def test_interrupt_during_the_delete_itself_rolls_back_before_propagating() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=1)
+    cur = conn.cursor.return_value
+    original = cur.execute.side_effect
+
+    def execute(statement: Any, *args: Any) -> Any:
+        if str(statement).startswith("DELETE"):
+            raise KeyboardInterrupt
+        return original(statement, *args) if original else None
+
+    cur.execute.side_effect = execute
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
