@@ -153,6 +153,22 @@ def test_late_larger_delete_is_reported_as_already_committed() -> None:
     assert cur.statements[-1] == f"DROP TABLE IF EXISTS {KEYS}"
 
 
+def test_forced_trip_with_unreadable_result_keeps_the_forced_record() -> None:
+    from drt.engine.guards import guards_outcome_of
+
+    destination = DatabricksDestination()
+    destination._mirror_keys = [(1,)]
+    options = _guards(max_deletes=1)
+    options._force_guards = True
+    cur = _Cursor([5], dml=None)
+    with pytest.raises(GuardOutcomeCommitted) as raised:
+        _run(destination, _config(), options, cur)
+
+    outcome = guards_outcome_of(raised.value)
+    assert outcome["forced"] is True
+    assert outcome["tripped"][0]["guard"] == "max_deletes"
+
+
 def test_unreadable_result_row_refuses_to_claim_nothing_was_deleted() -> None:
     destination = DatabricksDestination()
     destination._mirror_keys = [(1,)]
@@ -257,6 +273,7 @@ def _tracked_options(**extra: Any) -> SyncOptions:
 def _assert_state_untouched(cur: _Cursor) -> None:
     for statement in cur.statements:
         assert not statement.startswith(("INSERT INTO main.default._drt_synced_keys",))
+        assert not statement.startswith("UPDATE main.default._drt_synced_keys")
         assert not statement.startswith("DELETE FROM main.default._drt_synced_keys")
 
 
@@ -324,6 +341,23 @@ def test_tracked_scoped_with_legacy_rows_fails_percentage_closed() -> None:
     assert not any(
         s.startswith("SELECT COUNT(*) FROM main.default._drt_synced_keys") for s in cur.statements
     )
+
+
+def test_refused_run_does_not_heal_legacy_scope_rows() -> None:
+    destination = DatabricksDestination()
+    destination._mirror_keys = [("a", 1)]
+    destination._mirror_scopes = {("a",)}
+    config = _config(upsert_key=["tenant", "id"])
+    stale = [
+        ("h2", json.dumps(["a", 2]), json.dumps(["a"])),  # doomed
+        ("h3", json.dumps(["b", 3]), None),  # legacy row of an unobserved scope
+    ]
+    cur = _TrackedCursor(stale, state_count=1000, counts=[2])
+
+    with pytest.raises(GuardTripped):
+        _run(destination, config, _tracked_options(scope=["tenant"]), cur)
+
+    _assert_state_untouched(cur)
 
 
 def test_replace_swap_trip_drops_shadow_and_never_overwrites_then_force_overwrites() -> None:

@@ -784,3 +784,36 @@ def test_base_guard_sql_hooks_are_explicit_dialect_seams() -> None:
         base._build_swap_delete_count("t", "t_shadow", ["id"])
     with pytest.raises(NotImplementedError):
         base._build_drop_table("t")
+
+
+@pytest.mark.parametrize("bad", [None, -1, "7", 7.5, True])
+def test_unusable_rowcount_rolls_back_explicitly_and_never_reads_as_a_count(bad: Any) -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=bad)  # type: ignore[arg-type]
+
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(RuntimeError, match="could not determine"),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
+
+
+def test_unusable_rowcount_with_failed_rollback_is_an_uncertain_outcome() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=None)  # type: ignore[arg-type]
+    conn.rollback.side_effect = RuntimeError("rollback failed")
+
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(GuardOutcomeUncertain) as raised,
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    assert "rollback failed" in str(raised.value)

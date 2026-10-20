@@ -47,8 +47,8 @@ def _attach_exception_detail(error: BaseException, detail: str) -> None:
     error._drt_notes = notes  # type: ignore[attr-defined]
 
 
-def _rollback_after_guard(conn: Any, guard_error: GuardTripped) -> NoReturn:
-    """Roll back a refused DELETE, reporting an explicitly uncertain outcome on failure."""
+def _rollback_after_guard(conn: Any, guard_error: Exception) -> NoReturn:
+    """Roll back a refused (or unjudgeable) DELETE; an explicitly uncertain outcome on failure."""
     from drt.engine.guards import GuardOutcomeUncertain
 
     try:
@@ -419,8 +419,8 @@ class BaseSqlDestination:
                         deletes=self._affected_rows(cur),
                         baseline=baseline,
                     )
-                except GuardTripped as guard_error:
-                    _rollback_after_guard(conn, guard_error)
+                except Exception as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                    _rollback_after_guard(conn, delete_error)
             self._commit_mirror(conn)
 
         # SyncResult has no dedicated `deleted` field; future work tracks
@@ -468,8 +468,8 @@ class BaseSqlDestination:
                         deletes=self._affected_rows(cur),
                         baseline=None,
                     )
-                except GuardTripped as guard_error:
-                    _rollback_after_guard(conn, guard_error)
+                except Exception as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                    _rollback_after_guard(conn, delete_error)
             self._commit_mirror(conn)
 
         return SyncResult()
@@ -1045,12 +1045,12 @@ class BaseSqlDestination:
         guard.
         """
         rowcount = getattr(cur, "rowcount", None)
-        if rowcount is None or isinstance(rowcount, bool) or int(rowcount) < 0:
+        if not isinstance(rowcount, int) or isinstance(rowcount, bool) or rowcount < 0:
             raise RuntimeError(
                 "Run-time change guards could not determine how many rows the DELETE "
                 "affected; refusing to proceed."
             )
-        return int(rowcount)
+        return rowcount
 
     def _mirror_table_ident(self, config: Any) -> str:
         """Target-table identifier handed to ``_build_mirror_delete``.
@@ -1504,8 +1504,8 @@ class BaseSqlDestination:
                             deletes=self._affected_rows(cur),
                             baseline=guard_baseline_exact,
                         )
-                    except GuardTripped as guard_error:
-                        _rollback_after_guard(conn, guard_error)
+                    except Exception as delete_error:  # noqa: BLE001 — roll back, then re-raise
+                        _rollback_after_guard(conn, delete_error)
             elif not previous_exists:
                 # No prior state at all for this sync (never run, or lost
                 # state) — baseline. Prior state existing for *other* scopes

@@ -201,3 +201,33 @@ def test_tracked_mirror_refusal_keeps_rows_and_state_then_force_deletes(ch: Any)
     forced._force_guards = True
     destination.finalize_sync(config, forced)
     assert _ids(ch, table) == [1, 2]
+
+
+def test_replace_swap_counts_a_null_key_even_when_the_shadow_holds_a_sentinel_lookalike(
+    ch: Any,
+) -> None:
+    """A live NULL key is absent from the shadow even if the shadow holds the text a
+    sentinel-based comparison would have mapped NULL to (Codex review, B4)."""
+    table = "drt_guard_swap_null"
+    shadow = f"{table}__drt_swap"
+    client = ch[2]
+    for name in (table, shadow):
+        client.command(f"DROP TABLE IF EXISTS {name}")
+        client.command(
+            f"CREATE TABLE {name} (id Nullable(String)) ENGINE = MergeTree ORDER BY tuple() "
+            "SETTINGS allow_nullable_key = 1"
+        )
+    client.command(f"INSERT INTO {table} VALUES (NULL)")
+    client.command(f"INSERT INTO {shadow} VALUES ('__drt_null__')")
+    destination = ClickHouseDestination()
+    destination._swap_shadow_created = True
+    destination._swap_table = table
+    options = SyncOptions(
+        mode="replace",
+        replace_strategy="swap",
+        guards={"max_deletes": 0},  # type: ignore[arg-type]
+    )
+    with pytest.raises(GuardTripped) as raised:
+        destination.finalize_sync(_config(ch, table), options)
+    assert raised.value.trips[0].observed == 1
+    assert client.query(f"SELECT count() FROM {table}").result_rows == [(1,)]
