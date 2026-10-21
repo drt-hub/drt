@@ -474,14 +474,20 @@ def test_history_adds_the_guards_column_to_a_legacy_table_and_round_trips_it() -
             assert "guards" not in _history_columns(admin)
 
             guards = {"forced": True, "tripped": [{"guard": "max_deletes", "observed": 3}]}
-            PostgresWarehouseHistoryStore(profile).append(_guards_entry("s", guards=guards))
-            assert "guards" in _history_columns(admin)
+            PostgresWarehouseHistoryStore(profile).append(
+                _guards_entry("s", guards=guards, plan_id="sha256:smoke", approved_by="smoke-user")
+            )
+            assert {"guards", "plan_id", "approved_by"} <= set(_history_columns(admin))
 
             entries = PostgresWarehouseHistoryStore(profile).read("s")
             assert [e.guards for e in entries] == [
                 guards,
                 None,
             ]  # newest first; legacy row stays NULL
+            assert [(e.plan_id, e.approved_by) for e in entries] == [
+                ("sha256:smoke", "smoke-user"),
+                (None, None),
+            ]
 
             # A second append (a new store, a new run) must not try to add it again.
             PostgresWarehouseHistoryStore(profile).append(_guards_entry("s"))
