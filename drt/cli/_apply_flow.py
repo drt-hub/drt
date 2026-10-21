@@ -504,6 +504,8 @@ def apply_plan(
         reviewed_forced_guards=set(reviewed_trips) if force_guards else None,
         reviewed_guard_deletes=reviewed_deletes if force_guards else None,
         reviewed_guard_baseline=reviewed_baseline if force_guards else None,
+        plan_id=plan_id,
+        approved_by=approved_by or None,
         project_dir=project_dir,
     )
     try:

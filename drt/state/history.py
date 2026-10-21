@@ -55,6 +55,11 @@ class HistoryEntry:
     # Structured run-time guard outcome (#1218 part 2), omitted on historical
     # entries and ordinary runs. Shape: {"tripped": [...], "forced": bool}.
     guards: dict[str, Any] | None = None
+    # Plan/apply lineage (#1222, ADR 0013): the plan this run applied and who
+    # approved it. Both None for an ordinary ``drt run`` and on entries written
+    # before these fields existed.
+    plan_id: str | None = None
+    approved_by: str | None = None
 
 
 @runtime_checkable

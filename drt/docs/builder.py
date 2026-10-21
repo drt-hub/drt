@@ -173,6 +173,10 @@ def _sync_runs(entries: list[HistoryEntry], redact: bool) -> tuple[SyncRun, ...]
                 records_failed=e.records_failed,
                 errors=errors,
                 cursor_value_used=e.cursor_value_used,
+                plan_id=e.plan_id,
+                guards=e.guards,
+                # A person's name: same opt-in as the other redacted labels (#696).
+                approved_by=None if redact else e.approved_by,
             )
         )
     return tuple(runs)
