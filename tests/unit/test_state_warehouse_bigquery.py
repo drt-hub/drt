@@ -377,7 +377,7 @@ class TestBigQueryWarehouseHistoryStore:
 
     def test_append_uses_bound_json_string_and_is_best_effort(self) -> None:
         client = _client([])
-        self._table_with(client, "guards")
+        self._table_with(client, "guards", "plan_id", "approved_by")
         store = BigQueryWarehouseHistoryStore(_profile())
         guards = {"forced": True, "tripped": [{"guard": "max_deletes"}]}
         with (
@@ -388,14 +388,15 @@ class TestBigQueryWarehouseHistoryStore:
         params = {p.name: p.value for p in _params(client.query.call_args_list[0])}
         assert params["errors"] == '["a", "b", "c", "d", "e"]'
         assert "@errors" in _sqls(client)[0]
-        assert ", guards)" in _sqls(client)[0] and ", @guards)" in _sqls(client)[0]
+        assert ", guards, plan_id, approved_by)" in _sqls(client)[0]
+        assert ", @guards, @plan_id, @approved_by)" in _sqls(client)[0]
         assert json.loads(params["guards"]) == guards
 
         with patch("drt.state.warehouse_bigquery._connect", side_effect=RuntimeError("offline")):
             store.append(_history_entry())  # must not raise
 
     def test_append_adds_the_missing_column_to_a_legacy_table(self) -> None:
-        client = _client([], [])
+        client = _client([], [], [], [])
         self._table_with(client)
         store = BigQueryWarehouseHistoryStore(_profile())
         with (
@@ -405,8 +406,9 @@ class TestBigQueryWarehouseHistoryStore:
             store.append(_history_entry(guards={"forced": False, "tripped": []}))
 
         sqls = _sqls(client)
-        assert "ADD COLUMN IF NOT EXISTS guards STRING" in sqls[0]
-        assert sqls[1].startswith("INSERT INTO") and "@guards" in sqls[1]
+        for i, column in enumerate(("guards", "plan_id", "approved_by")):
+            assert f"ADD COLUMN IF NOT EXISTS {column} STRING" in sqls[i]
+        assert sqls[3].startswith("INSERT INTO") and "@guards" in sqls[3]
 
     def test_append_falls_back_to_the_legacy_insert_when_alter_is_refused(
         self, caplog: pytest.LogCaptureFixture
@@ -436,8 +438,8 @@ class TestBigQueryWarehouseHistoryStore:
     def test_read_returns_guards_when_the_column_exists_and_never_alters(self) -> None:
         guards = {"forced": True, "tripped": [{"guard": "max_delete_pct"}]}
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, '["boom"]', "c", False, "run-1", "sync-run-1")
-        client = _client([(*row, json.dumps(guards))])
-        self._table_with(client, "guards")
+        client = _client([(*row, json.dumps(guards), None, None)])
+        self._table_with(client, "guards", "plan_id", "approved_by")
         with (
             patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
             patch("drt.state.warehouse_bigquery._connect", return_value=client),
@@ -457,7 +459,7 @@ class TestBigQueryWarehouseHistoryStore:
 
     def test_resolution_is_cached_per_store_instance(self) -> None:
         client = _client([], [])
-        self._table_with(client, "guards")
+        self._table_with(client, "guards", "plan_id", "approved_by")
         store = BigQueryWarehouseHistoryStore(_profile())
         with (
             patch("drt.state.warehouse_bigquery._connect", return_value=client),

@@ -154,6 +154,11 @@ def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
     table.add_column("Synced", justify="right")
     table.add_column("Failed", justify="right")
     table.add_column("Duration", justify="right")
+    # Lineage (#1222): only when some run applied a plan, so ordinary history
+    # keeps its existing shape.
+    show_plan = any(e.plan_id for e in entries)
+    if show_plan:
+        table.add_column("Plan", overflow="fold")
     table.add_column("Error", overflow="fold")
 
     for e in entries:
@@ -162,13 +167,18 @@ def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
             "partial": "yellow",
             "failed": "red",
         }.get(e.status, "white")
-        table.add_row(
+        cells = [
             e.started_at[:19].replace("T", " "),
             e.sync_name,
             f"[{status_style}]{e.status}[/{status_style}]",
             str(e.records_synced),
             str(e.records_failed),
             f"{e.duration_seconds:.1f}s",
-            (e.errors[0] if e.errors else ""),
-        )
+        ]
+        if show_plan:
+            plan = (e.plan_id or "").replace("[", "\\[")
+            by = f" by {e.approved_by}".replace("[", "\\[") if e.approved_by else ""
+            cells.append(f"{plan}{by}" if plan else "")
+        cells.append(e.errors[0] if e.errors else "")
+        table.add_row(*cells)
     console.print(table)

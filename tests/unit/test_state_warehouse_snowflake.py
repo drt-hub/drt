@@ -295,8 +295,8 @@ class TestSnowflakeWarehouseHistoryStore:
         assert "VALUES" not in sql
         # The mock probe reports no ``guards`` column and ALTER "succeeds", so the
         # optional column is written (the dedicated suite covers every branch).
-        assert ", guards)" in sql
-        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 13
+        assert ", guards, plan_id, approved_by)" in sql
+        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 15
 
     def test_read_reconstructs_history_entry_from_a_json_string_variant(self) -> None:
         """Covers the branch where the connector hands VARIANT back as a
@@ -763,14 +763,14 @@ class TestSnowflakeHistoryOptionalColumns:
         return next((s, p) for s, p in conn.cursor.return_value.statements if "INSERT" in s)
 
     def test_writes_guards_json_when_the_column_exists(self) -> None:
-        conn = self._conn([*self._BASE, "guards"])
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
         guards = {"forced": True, "tripped": [{"guard": "max_deletes"}]}
 
         self._append(conn, self._entry(guards=guards))
 
         sql, params = self._insert(conn)
-        assert ", guards)" in sql and len(params) == 13
-        assert json.loads(params[-1]) == guards
+        assert ", guards, plan_id, approved_by)" in sql and len(params) == 15
+        assert json.loads(params[-3]) == guards
         assert not any("ALTER TABLE" in s for s, _ in conn.cursor.return_value.statements)
 
     def test_adds_the_missing_column_to_a_legacy_table_before_the_insert(self) -> None:
@@ -780,14 +780,14 @@ class TestSnowflakeHistoryOptionalColumns:
 
         statements = [s for s, _ in conn.cursor.return_value.statements]
         alters = [s for s in statements if "ALTER TABLE" in s]
-        assert len(alters) == 1 and "ADD COLUMN IF NOT EXISTS guards TEXT" in alters[0]
+        assert len(alters) == 3 and "ADD COLUMN IF NOT EXISTS guards TEXT" in alters[0]
         assert statements.index(alters[0]) < next(
             i for i, s in enumerate(statements) if "INSERT" in s
         )
-        assert len(self._insert(conn)[1]) == 13
+        assert len(self._insert(conn)[1]) == 15
 
     def test_stores_null_without_guards(self) -> None:
-        conn = self._conn([*self._BASE, "guards"])
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
 
         self._append(conn, self._entry())
 
@@ -808,7 +808,10 @@ class TestSnowflakeHistoryOptionalColumns:
     def test_read_returns_guards_and_never_alters(self) -> None:
         guards = {"forced": True, "tripped": [{"guard": "max_delete_pct"}]}
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "r", "sr")
-        conn = self._conn([*self._BASE, "guards"], rows=[(*row, json.dumps(guards))])
+        conn = self._conn(
+            [*self._BASE, "guards", "plan_id", "approved_by"],
+            rows=[(*row, json.dumps(guards), None, None)],
+        )
         with (
             patch("drt.state.warehouse_snowflake._connect", return_value=conn),
             patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
@@ -829,7 +832,7 @@ class TestSnowflakeHistoryOptionalColumns:
         assert not any("guards" in s for s in statements if "ORDER BY" in s)
 
     def test_resolution_is_cached_per_store_instance(self) -> None:
-        conn = self._conn([*self._BASE, "guards"])
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
         src = "drt.sources.snowflake.SnowflakeSource"
         store = SnowflakeWarehouseHistoryStore(_profile())
         with (

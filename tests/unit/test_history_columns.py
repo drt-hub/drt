@@ -105,13 +105,14 @@ def test_a_successful_add_is_reported_present_and_listing_failure_means_legacy(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     added: list[str] = []
-    assert resolve_optional_columns(lambda: ["sync_name"], added.append, table="t") == ("guards",)
-    assert added == ["guards"]
+    expected = ("guards", "plan_id", "approved_by")
+    assert resolve_optional_columns(lambda: ["sync_name"], added.append, table="t") == expected
+    assert added == list(expected)
 
     def broken() -> list[str]:
         raise RuntimeError("no information_schema access")
 
     with caplog.at_level("WARNING"):
         assert resolve_optional_columns(broken, added.append, table="t") == ()
-    assert added == ["guards"]  # nothing was altered when the probe itself failed
+    assert added == list(expected)  # nothing was altered when the probe itself failed
     assert "could not inspect columns" in caplog.text
