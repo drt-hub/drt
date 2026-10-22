@@ -64,9 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-23
+
 ### Fixed
 
-- **`drt plan` no longer runs `incremental_strategy: diff` syncs** (found by a Codex review of the plan coverage work): the guard that reports "incremental_strategy: diff is not supported by drt plan yet" tested `mode == "incremental"`, a combination the config validator never allows (diff requires `mode: upsert` or `mirror`), so it never fired and `drt plan` ran snapshot extraction, which writes scratch tables. The guard now fires for every `incremental_strategy: diff` sync, as `docs/guides/plan.md` already stated; such syncs report *plan unavailable* with the reason.
+- **`drt plan` no longer runs `incremental_strategy: diff` syncs** ([#1286](https://github.com/drt-hub/drt/pull/1286), found by a Codex review of the plan coverage work): the guard that reports "incremental_strategy: diff is not supported by drt plan yet" tested `mode == "incremental"`, a combination the config validator never allows (diff requires `mode: upsert` or `mirror`), so it never fired and `drt plan` ran snapshot extraction, which writes scratch tables in the source despite plans being read-only. The guard now fires for every `incremental_strategy: diff` sync, as `docs/guides/plan.md` already stated.
+- **A sync that `drt plan` knows it cannot plan is now an *unavailable* result, not an error**: previously `drt plan --all` recorded it as `error` and exited 1 (failing the CI loop and making `drt apply <dir>` refuse the whole directory), and MCP `drt_plan` returned an error instead of `available: false`. `plan --all` now records `unavailable` and carries on, MCP answers `available: false` with the reason, and a single `drt plan <sync>` still exits 1. This also covers `sync.match_policy: update_only` / `create_only`.
 
 ## [1.2.0] - 2026-10-21
 
