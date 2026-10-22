@@ -15,7 +15,14 @@ from drt.destinations import query
 from drt.engine.diff import _is_append_only
 from drt.engine.plan_coverage import PLAN_COVERAGE, PLAN_STATUSES, plan_coverage
 
-_BUILTIN = sorted(registry.registered_destination_types())
+
+def _is_builtin(destination_type: str) -> bool:
+    _config_class, impl = registry._destination_registry[destination_type]
+    return impl.__module__.startswith("drt.")
+
+
+# Installed third-party plugins are registered too; the matrix covers built-ins only.
+_BUILTIN = sorted(t for t in registry.registered_destination_types() if _is_builtin(t))
 
 
 def _config(destination_type: str, **fields: Any) -> Any:
@@ -61,7 +68,8 @@ def _derived_group(destination_type: str) -> str:
 
 def test_every_builtin_destination_declares_its_plan_status() -> None:
     assert sorted(set(_BUILTIN) - set(PLAN_COVERAGE)) == []
-    assert sorted(set(PLAN_COVERAGE) - set(_BUILTIN)) == [], "declared but not registered"
+    registered = set(registry.registered_destination_types())
+    assert sorted(set(PLAN_COVERAGE) - registered) == [], "declared but not registered"
 
 
 @pytest.mark.parametrize("destination_type", _BUILTIN)
@@ -88,11 +96,9 @@ def test_anything_short_of_available_says_why(destination_type: str) -> None:
         assert len(declared.reason.strip()) > 10
 
 
-def test_an_undeclared_plugin_destination_is_unavailable_not_an_error() -> None:
-    coverage = plan_coverage("some_third_party_destination")
-
-    assert coverage.status == "unavailable"
-    assert "third-party" in coverage.reason
+def test_an_undeclared_type_has_no_declaration_rather_than_a_wrong_one() -> None:
+    assert plan_coverage("some_third_party_destination") is None
+    assert plan_coverage("postgres") is PLAN_COVERAGE["postgres"]
 
 
 def test_the_generated_coverage_page_is_current() -> None:

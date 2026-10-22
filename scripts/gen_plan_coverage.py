@@ -11,6 +11,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import drt.connectors  # noqa: F401 — registers the built-in destinations
 from drt.engine.plan_coverage import PLAN_COVERAGE, PLAN_STATUSES
 
@@ -52,7 +54,10 @@ def render() -> str:
         lines += [f"| `{m}` | {PLAN_COVERAGE[m].reason} |" for m in members]
         lines.append("")
     lines += [
-        "A third-party (plugin) destination needs no entry; it resolves to *not planned*.",
+        "Every plan also needs `destination.upsert_key` and a sync a plan can represent; see "
+        "[When a plan is unavailable](plan.md#when-a-plan-is-unavailable). A third-party "
+        "(plugin) destination needs no entry and is not listed here; whether it can be planned "
+        "depends on what it implements.",
         "",
     ]
     return "\n".join(lines)
