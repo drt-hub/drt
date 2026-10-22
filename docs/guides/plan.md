@@ -82,6 +82,9 @@ reason when:
   extraction writes scratch tables, so it is not read-only), or an engine
   metadata column inside `upsert_key`.
 
+See [plan coverage by destination](plan-coverage.md) for which destinations can be
+planned today.
+
 ## Review loop in CI (GitHub Actions)
 
 ```bash
