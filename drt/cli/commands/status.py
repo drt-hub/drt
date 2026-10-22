@@ -177,8 +177,9 @@ def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
             f"{e.duration_seconds:.1f}s",
         ]
         if show_plan:
-            plan = escape(e.plan_id or "")
-            by = f" by {escape(e.approved_by)}" if e.approved_by else ""
+            # str(): a hand-edited JSONL row may hold a non-string value.
+            plan = escape(str(e.plan_id or ""))
+            by = f" by {escape(str(e.approved_by))}" if e.approved_by else ""
             cells.append(f"{plan}{by}" if plan else "")
         cells.append(e.errors[0] if e.errors else "")
         table.add_row(*cells)
