@@ -600,3 +600,18 @@ async def test_an_unreadable_plan_file_is_not_a_fetched_plan(
     refused = await call(server, "drt_apply", plan_id=planned["plan_id"], approved_by="me")
 
     assert refused["applied"] is False and "Call drt_plan first" in refused["error"]
+
+
+@pytest.mark.asyncio
+async def test_incremental_diff_sync_is_unavailable_over_mcp_and_never_extracts(
+    project_dir: Path, world: _World
+) -> None:
+    cfg = {**SYNC_YML, "sync": {"mode": "upsert", "incremental_strategy": "diff", "diff": {}}}
+    (project_dir / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    server = create_server(project_dir)
+
+    planned = await call(server, "drt_plan", sync_name="orders_to_pg")
+
+    assert planned["available"] is False
+    assert "incremental_strategy: diff" in planned["reason"]
+    assert world.calls == []  # snapshot extraction (scratch tables) never started
