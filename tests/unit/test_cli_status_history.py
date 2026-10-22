@@ -104,6 +104,30 @@ class TestStatusHistoryLineage:
 
         assert "mallory" in result.stdout and "conceal" in result.stdout
 
+    def test_a_hand_edited_non_string_lineage_value_does_not_crash_status(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / ".drt" / "history"
+        path.mkdir(parents=True)
+        (path / "alpha.jsonl").write_text(
+            json.dumps(
+                {
+                    "sync_name": "alpha",
+                    "started_at": "2026-05-01T10:00:00+00:00",
+                    "completed_at": "2026-05-01T10:00:30+00:00",
+                    "duration_seconds": 1.0,
+                    "status": "success",
+                    "records_synced": 1,
+                    "records_failed": 0,
+                    "plan_id": 12345,
+                    "approved_by": {"name": "x"},
+                }
+            )
+            + "\n"
+        )
+
+        assert self._run(tmp_path).exit_code == 0
+
     def test_ordinary_history_keeps_its_existing_columns(self, tmp_path: Path) -> None:
         _seed_history(tmp_path, sync="alpha", count=1)
 
