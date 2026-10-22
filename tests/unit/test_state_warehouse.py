@@ -228,8 +228,8 @@ class TestPostgresWarehouseHistoryStore:
         sql, params = self._insert(conn)
         assert ", guards, plan_id, approved_by)" in sql and len(params) == 15
         assert json.loads(params[-3]) == guards
-        assert json.loads(params[-2]) == "sha256:abc"
-        assert json.loads(params[-1]) == "alice"
+        assert params[-2] == "sha256:abc"  # scalar columns are plain, queryable text
+        assert params[-1] == "alice"
         assert not any("ALTER TABLE" in s for s, _ in conn.cursor.return_value.statements)
 
     def test_append_adds_the_missing_column_to_a_legacy_table_once(self) -> None:

@@ -435,3 +435,5 @@ this run apply, and who approved it?" answerable from history alone:
   [ADR 0013](../adr/0013-plan-apply-lineage.md).
 
 `approved_by` is recorded as supplied; it is an audit note, not proof of identity.
+
+A failure before the run starts (permission check, destination setup) writes no history entry, exactly like an ordinary `drt run`; the claim file (state `failed`) and `run_results.json` still carry the plan id.
