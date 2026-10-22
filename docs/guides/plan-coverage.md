@@ -12,7 +12,7 @@
 
 | Destination | Why |
 |---|---|
-| `bigquery` | Only `mode: insert` is planned (append-only). `merge`, mirror and replace need a target read that BigQuery does not implement yet. |
+| `bigquery` | Only `mode: insert` (append-only) can be planned. `merge`, mirror and replace need a target read that BigQuery does not implement yet. |
 
 ## Not planned yet — could be (API-based diff, #472)
 
@@ -54,4 +54,4 @@
 | `teams` | Event/message sink: there is no stored target state to diff. |
 | `twilio` | Event/message sink: there is no stored target state to diff. |
 
-A third-party (plugin) destination needs no entry; it resolves to *not planned*.
+Every plan also needs `destination.upsert_key` and a sync a plan can represent; see [When a plan is unavailable](plan.md#when-a-plan-is-unavailable). A third-party (plugin) destination needs no entry and is not listed here; whether it can be planned depends on what it implements.

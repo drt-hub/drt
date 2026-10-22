@@ -253,7 +253,10 @@ if [ ! -f "$PLAN_COVERAGE_FILE" ]; then
     echo "ERROR: expected file not found: $PLAN_COVERAGE_FILE" >&2
     exit 2
 fi
-declared_plan=$(grep -oE '^    "[a-z_0-9]+": ' "$PLAN_COVERAGE_FILE" | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
+declared_plan=$(PYTHONPATH="$REPO_ROOT" python3 -c 'from drt.engine.plan_coverage import PLAN_COVERAGE; print("\n".join(sorted(PLAN_COVERAGE)))') || {
+    echo "ERROR: could not import $PLAN_COVERAGE_FILE" >&2
+    exit 2
+}
 for dest in $destinations; do
     if ! echo "$declared_plan" | grep -qx -- "$dest"; then
         report "plan-coverage" "$dest" "no entry in $PLAN_COVERAGE_FILE (declare its drt plan status)"

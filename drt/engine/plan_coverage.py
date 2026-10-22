@@ -6,13 +6,18 @@ unavailable, with a reason* instead of a partial plan. This module is the one
 declared place that says which is which, so the answer is visible in the docs and
 a new destination cannot ship without stating it.
 
+This describes the *destination's* capability to answer "what exists today". Every
+plan additionally needs ``destination.upsert_key`` and a sync that a plan can
+represent (see "When a plan is unavailable" in ``docs/guides/plan.md``); a keyless
+sync is reported unavailable whatever the destination.
+
 Status values:
 
 ``available``
     The destination can be read back, so every sync mode (append, upsert/merge,
-    mirror, replace) is planned with a true create/update/delete change set.
+    mirror, replace) can be planned with a true create/update/delete change set.
 ``partial``
-    Only some write shapes are planned (an append-only ``mode: insert``, whose
+    Only some write shapes can be planned (an append-only ``mode: insert``, whose
     write is known exactly without reading the target).
 ``needs-api-diff``
     The destination has an API that could answer "what exists today"; planning it
@@ -23,9 +28,9 @@ Status values:
 
 The declaration is checked against the real code paths by
 ``tests/unit/test_plan_coverage.py``: it cannot say ``available`` for a destination
-whose rows ``drt`` cannot read, and ``scripts/check_drift.sh`` fails when a built-in
-destination has no entry. Third-party (plugin) destinations need no entry; an
-undeclared type resolves to ``unavailable``.
+whose rows ``drt`` cannot read. ``scripts/check_drift.sh`` and that test fail when a
+built-in destination has no entry. Third-party (plugin) destinations need no entry
+and are not listed; whether one can be planned depends on what it implements.
 """
 
 from __future__ import annotations
@@ -57,7 +62,7 @@ PLAN_COVERAGE: dict[str, PlanCoverage] = {
     "clickhouse": _SQL_READ,
     "bigquery": PlanCoverage(
         "partial",
-        "Only `mode: insert` is planned (append-only). `merge`, mirror and replace need a "
+        "Only `mode: insert` (append-only) can be planned. `merge`, mirror and replace need a "
         "target read that BigQuery does not implement yet.",
     ),
     "airtable": PlanCoverage("needs-api-diff", _API),
@@ -95,9 +100,10 @@ PLAN_COVERAGE: dict[str, PlanCoverage] = {
 }
 
 
-def plan_coverage(destination_type: str) -> PlanCoverage:
-    """The declared coverage of a destination type (``unavailable`` when undeclared)."""
-    return PLAN_COVERAGE.get(
-        destination_type,
-        PlanCoverage("unavailable", "No plan coverage declared (third-party destination)."),
-    )
+def plan_coverage(destination_type: str) -> PlanCoverage | None:
+    """The declared coverage of a built-in destination type, or ``None`` (undeclared).
+
+    ``None`` does not mean "cannot be planned": the planner decides from the
+    destination itself. It only means the matrix says nothing about this type.
+    """
+    return PLAN_COVERAGE.get(destination_type)
