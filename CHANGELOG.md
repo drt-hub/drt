@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`drt plan` no longer runs `incremental_strategy: diff` syncs** (found by a Codex review of the plan coverage work): the guard that reports "incremental_strategy: diff is not supported by drt plan yet" tested `mode == "incremental"`, a combination the config validator never allows (diff requires `mode: upsert` or `mirror`), so it never fired and `drt plan` ran snapshot extraction, which writes scratch tables. The guard now fires for every `incremental_strategy: diff` sync, as `docs/guides/plan.md` already stated; such syncs report *plan unavailable* with the reason.
+
 ## [1.2.0] - 2026-10-21
 
 ### Added

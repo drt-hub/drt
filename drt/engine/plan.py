@@ -489,10 +489,7 @@ def unsupported_reason(sync: Any) -> str | None:
             f"sync.match_policy: {policy} is not supported by drt plan yet "
             "(the plan would list creates/updates the destination skips)"
         )
-    if (
-        options.mode == "incremental"
-        and getattr(options, "incremental_strategy", "cursor") == "diff"
-    ):
+    if getattr(options, "incremental_strategy", "cursor") == "diff":
         return (
             "incremental_strategy: diff is not supported by drt plan yet "
             "(snapshot extraction writes scratch tables, so it is not read-only)"
