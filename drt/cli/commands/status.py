@@ -138,6 +138,7 @@ def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
         console.print(f"[yellow]No history found for {scope}.[/yellow]")
         return
 
+    from rich.markup import escape
     from rich.table import Table
 
     table = Table(
@@ -176,8 +177,8 @@ def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
             f"{e.duration_seconds:.1f}s",
         ]
         if show_plan:
-            plan = (e.plan_id or "").replace("[", "\\[")
-            by = f" by {e.approved_by}".replace("[", "\\[") if e.approved_by else ""
+            plan = escape(e.plan_id or "")
+            by = f" by {escape(e.approved_by)}" if e.approved_by else ""
             cells.append(f"{plan}{by}" if plan else "")
         cells.append(e.errors[0] if e.errors else "")
         table.add_row(*cells)

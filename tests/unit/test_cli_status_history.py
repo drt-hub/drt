@@ -52,7 +52,12 @@ class TestStatusHistoryLineage:
         old = os.getcwd()
         os.chdir(project_dir)
         try:
-            return runner.invoke(app, ["status", "--history", *args], catch_exceptions=False)
+            return runner.invoke(
+                app,
+                ["status", "--history", *args],
+                catch_exceptions=False,
+                env={"COLUMNS": "200"},
+            )
         finally:
             os.chdir(old)
 
@@ -79,6 +84,25 @@ class TestStatusHistoryLineage:
         payload = json.loads(self._run(tmp_path, "--output", "json").stdout)
         assert payload["entries"][0]["plan_id"] == "sha256:cafe1234"
         assert payload["entries"][0]["approved_by"] == "alice"
+
+    def test_an_approver_name_cannot_inject_rich_markup(self, tmp_path: Path) -> None:
+        HistoryManager(tmp_path).append(
+            HistoryEntry(
+                sync_name="alpha",
+                started_at="2026-05-01T10:00:00+00:00",
+                completed_at="2026-05-01T10:00:30+00:00",
+                duration_seconds=30.0,
+                status="success",
+                records_synced=3,
+                records_failed=0,
+                plan_id="sha256:abc",
+                approved_by="\\\\[conceal]mallory",
+            )
+        )
+
+        result = self._run(tmp_path)
+
+        assert "mallory" in result.stdout and "conceal" in result.stdout
 
     def test_ordinary_history_keeps_its_existing_columns(self, tmp_path: Path) -> None:
         _seed_history(tmp_path, sync="alpha", count=1)

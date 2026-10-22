@@ -61,6 +61,18 @@ class HistoryEntry:
     plan_id: str | None = None
     approved_by: str | None = None
 
+    # Optional additive fields are left out of the serialized line when absent
+    # (ADR 0013), so ordinary runs and re-written retained history stay as small
+    # and as unchanged as before.
+    _OMIT_WHEN_NONE = ("guards", "plan_id", "approved_by")
+
+    def to_json_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        for key in self._OMIT_WHEN_NONE:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
 
 @runtime_checkable
 class HistoryStore(Protocol):
@@ -128,7 +140,7 @@ class LocalHistoryManager:
             self._dir.mkdir(parents=True, exist_ok=True)
             # Truncate errors to bound disk growth on long-failing syncs.
             entry.errors = entry.errors[: self._MAX_ERRORS_PER_ENTRY]
-            line = json.dumps(asdict(entry), default=str)
+            line = json.dumps(entry.to_json_dict(), default=str)
             path = self._file_for(entry.sync_name)
             with advisory_lock(path):
                 with path.open("a") as f:
@@ -200,7 +212,7 @@ class LocalHistoryManager:
                 tmp = path.with_suffix(".jsonl.tmp")
                 with tmp.open("w") as f:
                     for entry in kept:
-                        f.write(json.dumps(asdict(entry), default=str) + "\n")
+                        f.write(json.dumps(entry.to_json_dict(), default=str) + "\n")
                 tmp.replace(path)
                 return removed
 

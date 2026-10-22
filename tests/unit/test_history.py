@@ -385,6 +385,19 @@ class TestHistoryEntryCorrelationIds:
         [loaded] = mgr.read(sync_name="s")
         assert (loaded.plan_id, loaded.approved_by) == ("sha256:abc", "alice")
 
+    def test_absent_optional_fields_are_left_out_of_the_serialized_line(
+        self, tmp_path: Path
+    ) -> None:
+        mgr = HistoryManager(tmp_path)
+        entry = _entry()
+        mgr.append(entry)
+
+        [line] = (
+            (tmp_path / ".drt" / "history" / f"{entry.sync_name}.jsonl").read_text().splitlines()
+        )
+
+        assert not {"guards", "plan_id", "approved_by"} & set(json.loads(line))
+
     def test_a_pre_762_jsonl_line_still_loads(self, tmp_path: Path) -> None:
         """The reader unpacks each line via HistoryEntry(**data); a line
         written before these fields existed has neither key at all, and must
