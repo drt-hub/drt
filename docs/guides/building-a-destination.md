@@ -385,6 +385,7 @@ make test       # all tests
 - [ ] Respects `on_error` ("fail" returns early, "skip" continues)
 - [ ] Config and destination imported and registered with `register_destination()` in `drt/connectors/registry.py`
 - [ ] Tests cover: success, skip, fail-stops-early, missing config
+- [ ] `drt plan` coverage declared in `drt/engine/plan_coverage.py` (`available`, `partial`, `needs-api-diff` or `unavailable`, with a reason), then `python scripts/gen_plan_coverage.py` ([coverage](plan-coverage.md)); CI fails without it
 - [ ] Connector documentation added under `docs/connectors/`
 - [ ] Optional dependency extra added to `pyproject.toml` (if needed)
 - [ ] `CHANGELOG.md` updated under `[Unreleased]`

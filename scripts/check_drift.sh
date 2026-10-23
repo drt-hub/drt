@@ -24,6 +24,8 @@
 #   8. Every registered connector appears in the drt_list_connectors inventory
 #   9. Every behaviour-changing CLI option reaches the MCP tool covering the
 #      same command (#871, via scripts/check_cli_mcp_parity.py)
+#  10. Every registered destination declares its `drt plan` coverage and the
+#      generated docs/guides/plan-coverage.md is current (#1223)
 #
 # Baseline: scripts/drift_baseline.txt holds known-accepted gaps, one
 # `check_id:item` per line (e.g. `dest-doc:discord`). Baselined items
@@ -238,6 +240,31 @@ while IFS=$'\t' read -r item message; do
     [ -z "$item" ] && continue
     report "cli-mcp" "$item" "$message"
 done < "$parity_out"
+
+# ---------------------------------------------------------------------------
+# Check 10: every registered destination declares its `drt plan` coverage in
+# drt/engine/plan_coverage.py (#1223), and the generated coverage page is
+# current. A destination that cannot be planned says so with a reason; what it
+# may not do is stay silent. tests/unit/test_plan_coverage.py keeps each
+# declaration in line with the real code paths.
+# ---------------------------------------------------------------------------
+PLAN_COVERAGE_FILE="drt/engine/plan_coverage.py"
+if [ ! -f "$PLAN_COVERAGE_FILE" ]; then
+    echo "ERROR: expected file not found: $PLAN_COVERAGE_FILE" >&2
+    exit 2
+fi
+declared_plan=$(PYTHONPATH="$REPO_ROOT" python3 -c 'from drt.engine.plan_coverage import PLAN_COVERAGE; print("\n".join(sorted(PLAN_COVERAGE)))') || {
+    echo "ERROR: could not import $PLAN_COVERAGE_FILE" >&2
+    exit 2
+}
+for dest in $destinations; do
+    if ! echo "$declared_plan" | grep -qx -- "$dest"; then
+        report "plan-coverage" "$dest" "no entry in $PLAN_COVERAGE_FILE (declare its drt plan status)"
+    fi
+done
+if ! PYTHONPATH="$REPO_ROOT" python3 scripts/gen_plan_coverage.py --check 2>/dev/null; then
+    report "plan-coverage-doc" "stale" "docs/guides/plan-coverage.md is stale (run scripts/gen_plan_coverage.py)"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
