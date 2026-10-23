@@ -414,3 +414,26 @@ there, but two machines with separate workspaces do not see each other's claims;
 coordinating those needs a shared claim store, which is not built yet. The apply
 run gets a normal `run_id`; the claim file and `run_results.json` link it to the
 `plan_id`.
+
+### Lineage: which plan produced which run
+
+The claim file and `run_results.json` are workspace-local. The run history is the
+record that outlives an ephemeral CI runner, so `drt apply` also writes the
+`plan_id` and the `approved_by` name onto the run's history entry (an ordinary
+`drt run` leaves both empty). That makes the question "which reviewed plan did
+this run apply, and who approved it?" answerable from history alone:
+
+- `drt status --history` adds a **Plan** column (the plan id and approver) when
+  any listed run applied a plan; `--output json` and the MCP `drt_get_history`
+  tool return `plan_id`, `approved_by` and `guards` on each entry.
+- Warehouse-backed history stores them in optional `plan_id` / `approved_by`
+  columns, added on the first append like `guards` (see
+  [Warehouse-backed state](warehouse-state.md#optional-history-columns)).
+- The docs manifest (schema v4) carries `plan_id` and `guards` on each
+  `runs[]` entry. `approved_by` is a person's name, so it appears only with
+  `drt docs generate --full-labels`. See
+  [ADR 0013](../adr/0013-plan-apply-lineage.md).
+
+`approved_by` is recorded as supplied; it is an audit note, not proof of identity.
+
+A failure before the run starts (permission check, destination setup) writes no history entry, exactly like an ordinary `drt run`; the claim file (state `failed`) and `run_results.json` still carry the plan id.

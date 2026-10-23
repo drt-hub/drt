@@ -28,8 +28,8 @@ from drt.docs import (
 runner = CliRunner()
 
 
-def test_schema_version_is_3() -> None:
-    assert SCHEMA_VERSION == 3
+def test_schema_version_is_4() -> None:
+    assert SCHEMA_VERSION == 4
 
 
 def _write_project(project_dir: Path, profile: str = "bq_prod", name: str = "demo") -> None:
@@ -425,6 +425,82 @@ class TestBuildManifestRuns:
         assert manifest.syncs[0].runs[0].errors == (
             "connection to postgres://db.internal:5432/wh failed",
         )
+
+
+class TestManifestV4Lineage:
+    """Schema v4 (#1222, ADR 0013): plan_id / guards on runs; approver only with --full-labels."""
+
+    _LINEAGE = {
+        "plan_id": "sha256:abc",
+        "approved_by": "alice",
+        "guards": {"tripped": [{"guard": "max_deletes"}], "forced": True},
+    }
+
+    def _project(self, tmp_path: Path, **entry: object) -> None:
+        TestBuildManifestRuns()._project_with_history(
+            tmp_path, [_history_entry("users", "2026-05-14T00:00:00+00:00", **entry)]
+        )
+
+    def test_default_manifest_carries_plan_and_guards_but_not_the_approver(
+        self, tmp_path: Path
+    ) -> None:
+        self._project(tmp_path, **self._LINEAGE)
+
+        run = build_manifest(tmp_path, include_state=True).to_dict()["syncs"][0]["runs"][0]
+
+        assert run["plan_id"] == "sha256:abc"
+        assert run["guards"]["forced"] is True
+        assert "approved_by" not in run
+
+    def test_full_labels_adds_the_approver(self, tmp_path: Path) -> None:
+        self._project(tmp_path, **self._LINEAGE)
+
+        run = build_manifest(tmp_path, include_state=True, full_labels=True).to_dict()["syncs"][0][
+            "runs"
+        ][0]
+
+        assert run["approved_by"] == "alice"
+
+    def test_ordinary_runs_omit_every_v4_key_and_a_round_trip_keeps_it_that_way(
+        self, tmp_path: Path
+    ) -> None:
+        self._project(tmp_path)
+
+        data = build_manifest(tmp_path, include_state=True).to_dict()
+        run = data["syncs"][0]["runs"][0]
+
+        assert not {"plan_id", "guards", "approved_by"} & set(run)
+        assert Manifest.from_dict(data).to_dict() == data
+
+    def test_a_v3_manifest_without_the_keys_still_loads(self) -> None:
+        v3 = {
+            "schema_version": 3,
+            "drt_version": "1.1.0",
+            "syncs": [
+                {
+                    "name": "users",
+                    "source": "s",
+                    "destination": "d",
+                    "mode": "upsert",
+                    "runs": [
+                        {
+                            "started_at": "t0",
+                            "completed_at": "t1",
+                            "duration_seconds": 1.0,
+                            "status": "success",
+                            "records_synced": 1,
+                            "records_failed": 0,
+                            "errors": [],
+                            "cursor_value_used": None,
+                        }
+                    ],
+                }
+            ],
+        }
+
+        run = Manifest.from_dict(v3).syncs[0].runs[0]
+
+        assert (run.plan_id, run.guards, run.approved_by) == (None, None, None)
 
 
 class TestBuildManifestFields:

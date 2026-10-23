@@ -14,7 +14,8 @@ escape hatch of #695 / #960). So a new field is handled as an *optional column*:
   it. History is best-effort by contract; a missing optional column must never
   fail the sync it records, nor break ``drt status --history``.
 
-Values are stored as text (JSON for structured fields), the one type every
+Values are stored as text (JSON for structured fields such as ``guards``, plain
+text for scalar ones such as ``approved_by``), the one type every
 warehouse here treats the same way.
 """
 
@@ -30,7 +31,11 @@ from drt.state.history import HistoryEntry
 logger = logging.getLogger(__name__)
 
 # Order matters: it is the order of the columns appended to INSERT / SELECT.
-OPTIONAL_HISTORY_COLUMNS: tuple[str, ...] = ("guards",)
+OPTIONAL_HISTORY_COLUMNS: tuple[str, ...] = ("guards", "plan_id", "approved_by")
+
+# Only structured fields are JSON text; scalar fields are stored as plain text so
+# they stay queryable (``WHERE approved_by = 'alice'``).
+_JSON_COLUMNS = frozenset({"guards"})
 
 
 def encode_optional(entry: HistoryEntry, present: Sequence[str]) -> list[str | None]:
@@ -38,7 +43,12 @@ def encode_optional(entry: HistoryEntry, present: Sequence[str]) -> list[str | N
     cells: list[str | None] = []
     for name in present:
         value = getattr(entry, name, None)
-        cells.append(None if value is None else json.dumps(value, default=str))
+        if value is None:
+            cells.append(None)
+        elif name in _JSON_COLUMNS:
+            cells.append(json.dumps(value, default=str))
+        else:
+            cells.append(str(value))
     return cells
 
 
@@ -48,7 +58,9 @@ def decode_optional(present: Sequence[str], cells: Sequence[Any]) -> dict[str, A
     for name, cell in zip(present, cells, strict=True):
         if cell is None or cell == "":
             continue
-        if isinstance(cell, str):
+        if name not in _JSON_COLUMNS:
+            kwargs[name] = str(cell)
+        elif isinstance(cell, str):
             try:
                 kwargs[name] = json.loads(cell)
             except ValueError:

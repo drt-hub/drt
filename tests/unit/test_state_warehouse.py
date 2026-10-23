@@ -130,6 +130,9 @@ class TestPostgresWarehouseStateStore:
         assert not any("CREATE TABLE" in sql for sql in executed)
 
 
+_OPTIONAL = ("guards", "plan_id", "approved_by")
+
+
 class TestPostgresWarehouseHistoryStore:
     def test_read_returns_empty_before_any_table_exists(self) -> None:
         conn = _undefined_table_conn()
@@ -217,14 +220,16 @@ class TestPostgresWarehouseHistoryStore:
         )
 
     def test_append_writes_guards_json_when_the_column_exists(self) -> None:
-        conn = self._history_conn([*self._BASE_COLUMNS, "guards"])
+        conn = self._history_conn([*self._BASE_COLUMNS, *_OPTIONAL])
         guards = {"forced": True, "tripped": [{"guard": "max_deletes"}]}
 
-        self._append(conn, self._entry(guards=guards))
+        self._append(conn, self._entry(guards=guards, plan_id="sha256:abc", approved_by="alice"))
 
         sql, params = self._insert(conn)
-        assert ", guards)" in sql and len(params) == 13
-        assert json.loads(params[-1]) == guards
+        assert ", guards, plan_id, approved_by)" in sql and len(params) == 15
+        assert json.loads(params[-3]) == guards
+        assert params[-2] == "sha256:abc"  # scalar columns are plain, queryable text
+        assert params[-1] == "alice"
         assert not any("ALTER TABLE" in s for s, _ in conn.cursor.return_value.statements)
 
     def test_append_adds_the_missing_column_to_a_legacy_table_once(self) -> None:
@@ -234,21 +239,21 @@ class TestPostgresWarehouseHistoryStore:
 
         statements = [s for s, _ in conn.cursor.return_value.statements]
         alters = [s for s in statements if "ALTER TABLE" in s]
-        assert (
-            len(alters) == 1 and "ADD COLUMN IF NOT EXISTS" in alters[0] and "guards" in alters[0]
-        )
+        assert len(alters) == 3 and all("ADD COLUMN IF NOT EXISTS" in a for a in alters)
+        for column in _OPTIONAL:
+            assert any(column in a for a in alters)
         assert statements.index(alters[0]) < next(
             i for i, s in enumerate(statements) if "INSERT" in s
         )
         _sql, params = self._insert(conn)
-        assert len(params) == 13
+        assert len(params) == 15
 
     def test_append_stores_null_when_the_entry_has_no_guards(self) -> None:
-        conn = self._history_conn([*self._BASE_COLUMNS, "guards"])
+        conn = self._history_conn([*self._BASE_COLUMNS, *_OPTIONAL])
 
         self._append(conn, self._entry())
 
-        assert self._insert(conn)[1][-1] is None
+        assert self._insert(conn)[1][-3:] == (None, None, None)
 
     def test_append_falls_back_to_the_legacy_insert_when_alter_is_refused(
         self, caplog: pytest.LogCaptureFixture

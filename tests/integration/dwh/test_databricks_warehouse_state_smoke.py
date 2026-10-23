@@ -444,6 +444,8 @@ def test_history_round_trips_guards_and_the_column_exists_afterwards() -> None:
             records_synced=1,
             records_failed=0,
             guards=guards,
+            plan_id="sha256:smoke",
+            approved_by="smoke-user",
         )
     )
 
@@ -458,6 +460,7 @@ def test_history_round_trips_guards_and_the_column_exists_afterwards() -> None:
         assert "guards" in {row[0] for row in cur.fetchall()}
         entries = DatabricksWarehouseHistoryStore(profile).read(sync_name)
         assert [e.guards for e in entries] == [guards]
+        assert [(e.plan_id, e.approved_by) for e in entries] == [("sha256:smoke", "smoke-user")]
         cur.execute(
             f"DELETE FROM {profile.catalog}.{profile.managed_schema}._drt_history "
             "WHERE sync_name = ?",

@@ -105,13 +105,41 @@ def test_a_successful_add_is_reported_present_and_listing_failure_means_legacy(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     added: list[str] = []
-    assert resolve_optional_columns(lambda: ["sync_name"], added.append, table="t") == ("guards",)
-    assert added == ["guards"]
+    expected = ("guards", "plan_id", "approved_by")
+    assert resolve_optional_columns(lambda: ["sync_name"], added.append, table="t") == expected
+    assert added == list(expected)
 
     def broken() -> list[str]:
         raise RuntimeError("no information_schema access")
 
     with caplog.at_level("WARNING"):
         assert resolve_optional_columns(broken, added.append, table="t") == ()
-    assert added == ["guards"]  # nothing was altered when the probe itself failed
+    assert added == list(expected)  # nothing was altered when the probe itself failed
     assert "could not inspect columns" in caplog.text
+
+
+def test_scalar_columns_are_plain_text_and_guards_stay_json() -> None:
+    entry = HistoryEntry(
+        sync_name="s",
+        started_at="t0",
+        completed_at="t1",
+        duration_seconds=1.0,
+        status="success",
+        records_synced=1,
+        records_failed=0,
+        guards={"forced": True, "tripped": []},
+        plan_id="sha256:abc",
+        approved_by="alice",
+    )
+    present = ("guards", "plan_id", "approved_by")
+
+    cells = encode_optional(entry, present)
+
+    assert cells == ['{"forced": true, "tripped": []}', "sha256:abc", "alice"]
+    assert decode_optional(present, cells) == {
+        "guards": {"forced": True, "tripped": []},
+        "plan_id": "sha256:abc",
+        "approved_by": "alice",
+    }
+    # Plain text that merely looks like JSON stays a string for a scalar column.
+    assert decode_optional(("approved_by",), ["123"]) == {"approved_by": "123"}

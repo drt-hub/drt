@@ -319,9 +319,12 @@ def test_history_adds_the_guards_column_to_a_legacy_table_and_round_trips_it(
         records_synced=1,
         records_failed=0,
         guards=guards,
+        plan_id="sha256:smoke",
+        approved_by="smoke-user",
     )
     history.append(entry)
     assert "guards" in {f.name for f in client.get_table(table_id).schema}
 
     stored = BigQueryWarehouseHistoryStore(warehouse_profile).read(sync_name)
     assert len(stored) == 1 and json.loads(json.dumps(stored[0].guards)) == guards
+    assert (stored[0].plan_id, stored[0].approved_by) == ("sha256:smoke", "smoke-user")

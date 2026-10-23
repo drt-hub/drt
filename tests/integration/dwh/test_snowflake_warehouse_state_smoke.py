@@ -421,7 +421,8 @@ def test_history_adds_the_guards_column_to_a_legacy_table_and_round_trips_it() -
     conn = _admin_connect(creds)
     try:
         cur = conn.cursor()
-        cur.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS guards")
+        for column in ("guards", "plan_id", "approved_by"):
+            cur.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}")
         cur.execute(
             f"SELECT COUNT(*) FROM {profile.database}.information_schema.columns "
             "WHERE table_schema = %s AND table_name = '_DRT_HISTORY' AND column_name = 'GUARDS'",
@@ -442,6 +443,8 @@ def test_history_adds_the_guards_column_to_a_legacy_table_and_round_trips_it() -
                 records_synced=1,
                 records_failed=0,
                 guards=guards,
+                plan_id="sha256:smoke",
+                approved_by="smoke-user",
             )
         )
         cur.execute(
@@ -452,6 +455,8 @@ def test_history_adds_the_guards_column_to_a_legacy_table_and_round_trips_it() -
         assert cur.fetchone() == (1,)
         entries = SnowflakeWarehouseHistoryStore(profile).read(sync_name)
         assert entries[0].guards == guards and entries[1].guards is None
+        assert (entries[0].plan_id, entries[0].approved_by) == ("sha256:smoke", "smoke-user")
+        assert (entries[1].plan_id, entries[1].approved_by) == (None, None)
         cur.execute(f"DELETE FROM {table} WHERE sync_name = %s", (sync_name,))
     finally:
         conn.close()
