@@ -23,6 +23,7 @@ from drt.cli._helpers import (
     resolve_profile_name,
 )
 from drt.config.models import SyncConfig
+from drt.engine.diff import DiffResult
 from drt.engine.plan import Plan, build_plan, config_hash, hash_value, unsupported_reason
 
 
@@ -173,47 +174,52 @@ def compute_plan(
     sync = matches[0]
 
     blocker = unsupported_reason(sync)
-    if blocker is not None:
-        raise PlanCliError(f"Plan unavailable for '{sync.name}': {blocker}.")
-
     state_bundle = build_state_bundle(project, project_dir)
-    if preflight is not None:
-        # Cheap checks that must run before the (possibly expensive) extraction.
-        preflight(project, state_bundle, sync)
-    try:
-        result = run_sync(
-            sync,
-            get_source(profile),
-            get_destination(sync),
-            profile,
-            project_dir,
-            True,
-            state_bundle.state,
-            watermark_storage=get_watermark_storage(sync, project_dir),
-            cursor_value_override=cursor_value if sync.sync.mode == "incremental" else None,
-            compute_diff=True,
-            # Not a sample: a plan needs every changed key.
-            diff_limit=sys.maxsize,
-            vars=project_vars,
-            query_tagging=project.query_tagging,
-        )
-    except Exception as e:
-        raise PlanCliError(f"Could not compute a plan for '{sync_name}': {e}") from e
+    if blocker is not None:
+        # Known-unplannable is a result, not an error: `plan --all` records it as
+        # unavailable and carries on, and MCP answers `available: false`.
+        diff = DiffResult(supported=False, fallback_reason=blocker)
+        cursor_value_used = None
+    else:
+        if preflight is not None:
+            # Cheap checks that must run before the (possibly expensive) extraction.
+            preflight(project, state_bundle, sync)
+        try:
+            result = run_sync(
+                sync,
+                get_source(profile),
+                get_destination(sync),
+                profile,
+                project_dir,
+                True,
+                state_bundle.state,
+                watermark_storage=get_watermark_storage(sync, project_dir),
+                cursor_value_override=cursor_value if sync.sync.mode == "incremental" else None,
+                compute_diff=True,
+                # Not a sample: a plan needs every changed key.
+                diff_limit=sys.maxsize,
+                vars=project_vars,
+                query_tagging=project.query_tagging,
+            )
+        except Exception as e:
+            raise PlanCliError(f"Could not compute a plan for '{sync_name}': {e}") from e
 
-    if result.diff is None:
-        raise PlanCliError(f"No diff was produced for '{sync_name}'.")
-    if result.failed or result.interrupted:
-        # A diff over a partial extraction would read as "nothing else changes".
-        raise PlanCliError(
-            f"Plan unavailable for '{sync_name}': extraction did not complete "
-            f"({result.failed} failed row(s)"
-            f"{', interrupted' if result.interrupted else ''})."
-        )
+        if result.diff is None:
+            raise PlanCliError(f"No diff was produced for '{sync_name}'.")
+        if result.failed or result.interrupted:
+            # A diff over a partial extraction would read as "nothing else changes".
+            raise PlanCliError(
+                f"Plan unavailable for '{sync_name}': extraction did not complete "
+                f"({result.failed} failed row(s)"
+                f"{', interrupted' if result.interrupted else ''})."
+            )
+        diff = result.diff
+        cursor_value_used = result.cursor_value_used
 
     plan_key = load_plan_key(project_dir)
     destination = sync.destination
     plan = build_plan(
-        result.diff,
+        diff,
         sync_name=sync.name,
         sync_mode=sync.sync.mode,
         match_policy=sync.sync.match_policy,
@@ -227,11 +233,9 @@ def compute_plan(
         redact_keys=redact_keys,
         exclude_columns=_engine_written_columns(sync),
         guards=sync.sync.guards,
-        cursor_value=result.cursor_value_used,
+        cursor_value=cursor_value_used,
     )
-    return PlanContext(
-        plan, sync, project, profile, state_bundle, project_vars, result.cursor_value_used
-    )
+    return PlanContext(plan, sync, project, profile, state_bundle, project_vars, cursor_value_used)
 
 
 def parse_vars_option(vars_raw: str | None) -> dict[str, Any] | None:

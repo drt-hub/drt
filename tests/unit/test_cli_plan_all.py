@@ -431,3 +431,24 @@ def test_plan_files_are_private(project: Path, world: _World) -> None:
 
     for path in (project / "plans").glob("*.json"):
         assert stat.S_IMODE(path.stat().st_mode) == 0o600, path.name
+
+
+def test_a_known_unplannable_sync_is_unavailable_not_an_error_in_plan_all(
+    project: Path, world: _World
+) -> None:
+    """``incremental_strategy: diff`` writes scratch tables, so it is blocked up front;
+    that must read as *unavailable* (exit 0, manifest entry), not abort the CI job."""
+    diff_sync = {
+        **_sync("c_diff", "diffed"),
+        "sync": {"mode": "upsert", "incremental_strategy": "diff", "diff": {}},
+    }
+    (project / "syncs" / "c_diff.yml").write_text(yaml.dump(diff_sync))
+
+    result = runner.invoke(app, ["plan", "--all", "--out-dir", "plans", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    documents = json.loads(result.output)["plans"]
+    blocked = next(d for d in documents if d["sync"]["name"] == "c_diff")
+    assert blocked["status"]["available"] is False
+    assert "incremental_strategy: diff" in blocked["status"]["reason"]
+    assert not any("c_diff" in w for w in world.writes)

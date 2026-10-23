@@ -239,7 +239,7 @@ Released as **v1.1.0** on 2026-10-06. See [CHANGELOG.md](CHANGELOG.md#110---2026
 
 ---
 
-## v1.2 — Reviewable syncs
+## v1.2 — Reviewable syncs ✅ Shipped 2026-10-21
 
 **Theme: see exactly what a sync will do, approve it, then let it run.** v1.1 made every capability work on every warehouse. v1.2 makes a sync reviewable *before* it writes. `drt run --dry-run --diff` previews changes today, but the preview is ephemeral, capped at `diff_limit` samples, and nothing connects "what I reviewed" to "what ran". Mirror deletes and bulk updates are one-way doors; the review step is the highest-leverage safety improvement left in reverse ETL, and it fits drt's positioning ([ADR 0011](docs/adr/0011-subtraction-positioning-vs-reverse-etl.md): no UI; [ADR 0004](docs/adr/0004-streaming-and-event-triggered-syncs.md): no daemon) — the review surfaces are CI, Git and MCP, not a console.
 
@@ -248,13 +248,15 @@ drt plan <sync> --out plan.json     # compute + persist a reviewable change set
 drt apply plan.json                 # execute only if the world still matches
 ```
 
+Released as **v1.2.0** on 2026-10-21. See [CHANGELOG.md](CHANGELOG.md#120---2026-10-21) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v1.2.0) for the full feature list.
+
 **Epic: [#1227](https://github.com/drt-hub/drt/issues/1227) — `drt plan` / `drt apply`, built as a full feature, not a minimal one.** Design principles: the plan is a versioned, deterministic, redacted artifact (keys and hashes, `sync.mask` honoured); apply is guarded by verify-by-replan and aborts on drift; destinations that cannot answer "what exists today" report *plan unavailable, with a reason* rather than a silent partial plan; the capability Protocol is additive (ADR 0007).
 
 | Order | Issue | Scope |
 |---|---|---|
 | 1 ✅ | [#1216](https://github.com/drt-hub/drt/issues/1216) | `drt plan` — full key-level change set, `plan.json` schema, `--detailed-exitcode` |
 | 2 ✅ | [#1217](https://github.com/drt-hub/drt/issues/1217) | `drt apply` — verify-by-replan, single-use plans, drift report |
-| 3 | [#1218](https://github.com/drt-hub/drt/issues/1218) | Change guards — `max_deletes` / percentage thresholds at plan, apply and run. **Plan/apply half shipped; run-time enforcement before the destructive step is the remaining v1.2 item** |
+| 3 ✅ | [#1218](https://github.com/drt-hub/drt/issues/1218) | Change guards — `max_deletes` / percentage thresholds at plan, apply **and run**, on every mirror/replace destination (PostgreSQL, MySQL, Snowflake, Databricks, BigQuery, ClickHouse). Transactional destinations roll a refused DELETE back; the others count first and refuse before deleting |
 | 4 ✅ | [#1219](https://github.com/drt-hub/drt/issues/1219) | PR review workflow — plan comment on the pull request, apply on merge |
 | 5 ✅ | [#1220](https://github.com/drt-hub/drt/issues/1220) | MCP `drt_plan` / `drt_apply` with an approval record |
 | ✅ | [#1238](https://github.com/drt-hub/drt/issues/1238) | `write_policy: fill_empty` — write a column only when the destination value is empty (PostgreSQL, MySQL, Snowflake, Databricks, BigQuery, HubSpot) |

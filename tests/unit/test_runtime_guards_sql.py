@@ -784,3 +784,172 @@ def test_base_guard_sql_hooks_are_explicit_dialect_seams() -> None:
         base._build_swap_delete_count("t", "t_shadow", ["id"])
     with pytest.raises(NotImplementedError):
         base._build_drop_table("t")
+
+
+@pytest.mark.parametrize("bad", [None, -1, "7", 7.5, True])
+def test_unusable_rowcount_rolls_back_explicitly_and_never_reads_as_a_count(bad: Any) -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=bad)  # type: ignore[arg-type]
+
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(RuntimeError, match="could not determine"),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
+
+
+def test_unusable_rowcount_with_failed_rollback_is_an_uncertain_outcome() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=None)  # type: ignore[arg-type]
+    conn.rollback.side_effect = RuntimeError("rollback failed")
+
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(GuardOutcomeUncertain) as raised,
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    assert "rollback failed" in str(raised.value)
+
+
+def test_interrupt_after_the_delete_rolls_back_before_propagating() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=1)
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        patch.object(MySQLDestination, "_affected_rows", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
+
+
+def test_uncertain_outcome_names_the_original_non_guard_failure() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=None)  # type: ignore[arg-type]
+    conn.rollback.side_effect = RuntimeError("rollback failed")
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(GuardOutcomeUncertain) as raised,
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+    assert "could not determine how many rows" in str(raised.value)
+    assert isinstance(raised.value.original_error, RuntimeError)
+
+
+def test_interrupt_during_the_delete_itself_rolls_back_before_propagating() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,)]
+    options = SyncOptions(mode="mirror", guards={"max_deletes": 1000})  # type: ignore[arg-type]
+    conn = _conn(5, rowcount=1)
+    cur = conn.cursor.return_value
+    original = cur.execute.side_effect
+
+    def execute(statement: Any, *args: Any) -> Any:
+        if str(statement).startswith("DELETE"):
+            raise KeyboardInterrupt
+        return original(statement, *args) if original else None
+
+    cur.execute.side_effect = execute
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
+
+
+def _interrupt_on_delete(conn: MagicMock) -> None:
+    """Make the guarded ``DELETE`` raise ``KeyboardInterrupt`` after it was sent."""
+    cur = conn.cursor.return_value
+    original = cur.execute.side_effect
+
+    def execute(statement: Any, *args: Any) -> Any:
+        if str(statement).startswith("DELETE FROM"):
+            raise KeyboardInterrupt
+        return original(statement, *args) if original else None
+
+    cur.execute.side_effect = execute
+
+
+def test_interrupt_during_the_diff_mirror_delete_rolls_back_before_propagating() -> None:
+    destination = MySQLDestination()
+    options = SyncOptions(
+        mode="mirror",
+        incremental_strategy="diff",
+        diff={},
+        mirror={"strategy": "diff"},
+        guards={"max_deletes": 1000},
+    )
+    options._diff_removed_keys = [{"id": 1}]
+    conn = _conn(rowcount=1)
+    _interrupt_on_delete(conn)
+
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
+
+
+def test_interrupt_during_the_tracked_mirror_delete_rolls_back_before_propagating() -> None:
+    destination = MySQLDestination()
+    destination._mirror_keys = [(1,), (2,)]
+    options = SyncOptions(
+        mode="mirror",
+        mirror={"strategy": "tracked"},
+        guards={"max_deletes": 1000},
+    )
+    options._sync_name = "guarded"
+    conn = MagicMock()
+    cur = conn.cursor.return_value
+    cur.rowcount = 2
+
+    def fetchone() -> tuple[Any, ...] | None:
+        statement = str(cur.execute.call_args.args[0])
+        if "SELECT engine FROM information_schema.tables" in statement:
+            return ("InnoDB",)
+        if "information_schema.tables" in statement or "LIMIT 1" in statement:
+            return (1,)
+        if "COUNT(*)" in statement and "NOT EXISTS" in statement:
+            return (2,)
+        if "COUNT(*)" in statement:
+            return (4,)
+        return None
+
+    def fetchall() -> list[tuple[str, str]]:
+        statement = str(cur.execute.call_args.args[0])
+        if "SELECT s.key_hash" in statement:
+            return [("h3", json.dumps([3])), ("h4", json.dumps([4]))]
+        return []
+
+    cur.fetchone.side_effect = fetchone
+    cur.fetchall.side_effect = fetchall
+    _interrupt_on_delete(conn)
+
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=conn),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        destination.finalize_sync(_mysql_config(), options)
+
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()

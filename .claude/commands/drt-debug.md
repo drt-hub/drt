@@ -98,7 +98,7 @@ Debug a failing drt sync.
 - **Fix**: Configure the sync's `alerts.on_failure` channels — Slack / webhook notifications fire when the run hits a hard failure.
 
 ### `Change guards tripped` (v1.2)
-- **Cause**: `sync.guards` (`max_deletes` / `max_delete_pct`, plus `max_creates` / `max_updates_pct` in `drt plan` / `drt apply`) refused a run that would change more rows than allowed. This is the guard working, not a bug: nothing was deleted or swapped.
+- **Cause**: `sync.guards` (`max_deletes` / `max_delete_pct`, plus `max_creates` / `max_updates_pct` in `drt plan` / `drt apply`) refused a run that would change more rows than allowed. This is the guard working, not a bug. For a plain trip nothing was deleted or swapped; the two variants below say otherwise, so read the full message.
 - **Fix**: first ask *why* the number is larger than usual (empty or partial source, a changed model, a wrong `mirror.scope`). If the change is genuinely intended, review it with `drt plan`, then `drt apply --force-guards` (a human decision; recorded in the run results), or raise the limit in the YAML. Never add `--force-guards` to an automated job.
 - **A percentage trip with no baseline**: `mirror.strategy: diff` reports no denominator, so `max_delete_pct` fails closed — use `max_deletes` there.
 - **`...but rollback failed; the destination outcome is uncertain`** (Postgres/MySQL/Snowflake): the guard tripped but the rollback of the refused DELETE failed — check the target table's row count before re-running.

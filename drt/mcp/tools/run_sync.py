@@ -126,7 +126,7 @@ def run_sync(
             force_guards=force_guards,
         )
     except Exception as exc:
-        from drt.engine.guards import GuardTripped
+        from drt.engine.guards import GuardTripped, guards_outcome_of
 
         if not isinstance(exc, GuardTripped):
             raise
@@ -136,10 +136,7 @@ def run_sync(
             "success": 0,
             "failed": 1,
             "errors": [str(exc)],
-            "guards": {
-                "tripped": [trip.to_dict() for trip in exc.trips],
-                "forced": False,
-            },
+            "guards": guards_outcome_of(exc),
         }
 
     response: dict[str, Any] = {

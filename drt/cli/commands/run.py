@@ -298,13 +298,10 @@ def _run_one(
                 # re-raising still carry the correct one.
                 "run_id": ctx.run_id,
             }
-            from drt.engine.guards import GuardTripped
+            from drt.engine.guards import GuardTripped, guards_outcome_of
 
             if isinstance(e, GuardTripped):
-                entry["guards"] = {
-                    "tripped": [trip.to_dict() for trip in e.trips],
-                    "forced": False,
-                }
+                entry["guards"] = guards_outcome_of(e)
             else:
                 forced_outcome = getattr(e, "_drt_guards", None)
                 if forced_outcome is not None:

@@ -543,13 +543,10 @@ def run_sync(
 
                 guards_outcome: dict[str, Any] | None = total_result.guards
                 if raised is not None:
-                    from drt.engine.guards import GuardTripped
+                    from drt.engine.guards import GuardTripped, guards_outcome_of
 
                     if isinstance(raised, GuardTripped):
-                        guards_outcome = {
-                            "tripped": [trip.to_dict() for trip in raised.trips],
-                            "forced": False,
-                        }
+                        guards_outcome = guards_outcome_of(raised)
 
                 history_manager.append(
                     HistoryEntry(

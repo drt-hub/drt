@@ -200,6 +200,29 @@ def test_unsupported_reasons_are_reported_before_anything_runs() -> None:
     assert unsupported_reason(_Sync(["id"], metadata_columns=meta)) is None
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"mode": "upsert", "incremental_strategy": "diff", "diff": {}},
+        {
+            "mode": "mirror",
+            "incremental_strategy": "diff",
+            "diff": {},
+            "mirror": {"strategy": "diff"},
+        },
+    ],
+)
+def test_incremental_diff_is_blocked_for_every_valid_mode(options: dict[str, Any]) -> None:
+    """The only modes that validate with ``incremental_strategy: diff`` are upsert and
+    mirror, never ``incremental``; the blocker must fire for those, because snapshot
+    extraction writes scratch tables and a plan must stay read-only."""
+    from drt.config.models import SyncOptions
+
+    reason = unsupported_reason(type("S", (), {"sync": SyncOptions(**options)})())
+
+    assert reason is not None and "incremental_strategy: diff" in reason
+
+
 def test_plan_conforms_to_its_published_json_schema() -> None:
     import jsonschema
 
