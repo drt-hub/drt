@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Forced guard overrides are now recorded in warehouse-backed history** ([#1264](https://github.com/drt-hub/drt/issues/1264), follow-up to [#1218](https://github.com/drt-hub/drt/issues/1218)): the four warehouse `_drt_history` stores (PostgreSQL, Snowflake, Databricks, BigQuery) gain an optional, additive `guards` column (JSON text). Existing tables are migrated in place on the first *append* (`ALTER TABLE ... ADD COLUMN`, `IF NOT EXISTS` where the warehouse has it); a read never alters a table, rows written earlier read back as no overrides, and a role that cannot `ALTER` (the pre-provisioned-table escape hatch) keeps working: drt logs one warning and writes the legacy columns only, so history stays best-effort and never fails a sync. The mechanism is a shared `drt/state/_history_columns.py` that later `HistoryEntry` fields reuse. Verified against a real Postgres container (legacy table migrated; table with no `ALTER` privilege), and added to the Snowflake, BigQuery and Databricks live smokes. Local and object-store history already stored `guards`.
+
 ## [1.2.1] - 2026-10-23
 
 ### Fixed

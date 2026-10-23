@@ -30,6 +30,12 @@ from typing import Any
 
 from drt.config.credentials import BigQueryProfile
 from drt.sources.bigquery import BigQuerySource
+from drt.state._history_columns import (
+    OPTIONAL_HISTORY_COLUMNS,
+    decode_optional,
+    encode_optional,
+    resolve_optional_columns,
+)
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
@@ -265,6 +271,36 @@ class BigQueryWarehouseHistoryStore:
 
     def __init__(self, profile: BigQueryProfile) -> None:
         self._profile = profile
+        # Optional additive columns (#1264) present on the table; resolved lazily.
+        self._optional: tuple[str, ...] | None = None
+        self._alter_tried = False
+
+    def _optional_columns(self, client: Any, *, allow_alter: bool) -> tuple[str, ...]:
+        """Optional history columns this table has; an append adds missing ones."""
+        complete = self._optional is not None and len(self._optional) == len(
+            OPTIONAL_HISTORY_COLUMNS
+        )
+        if self._optional is not None and (not allow_alter or self._alter_tried or complete):
+            return self._optional
+
+        def list_columns() -> list[str]:
+            table = client.get_table(_table_id(self._profile, _HISTORY_TABLE))
+            return [field.name for field in table.schema]
+
+        def add_column(name: str) -> None:
+            _query(
+                client,
+                f"ALTER TABLE {_qualified(self._profile, _HISTORY_TABLE)} "
+                f"ADD COLUMN IF NOT EXISTS {name} STRING",
+            )
+
+        self._optional = resolve_optional_columns(
+            list_columns,
+            add_column if allow_alter else None,
+            table=_table_id(self._profile, _HISTORY_TABLE),
+        )
+        self._alter_tried = self._alter_tried or allow_alter
+        return self._optional
 
     def _ensure_table(self, client: Any) -> None:
         _ensure_table_exists(client, self._profile, _HISTORY_TABLE, _HISTORY_SCHEMA)
@@ -274,14 +310,18 @@ class BigQueryWarehouseHistoryStore:
         try:
             client = _connect(self._profile)
             self._ensure_table(client)
+            present = self._optional_columns(client, allow_alter=True)
             _query(
                 client,
                 f"INSERT INTO {_qualified(self._profile, _HISTORY_TABLE)} "
                 "(sync_name, started_at, completed_at, duration_seconds, status, "
                 "records_synced, records_failed, errors, cursor_value_used, dry_run, "
-                "run_id, sync_run_id) VALUES (@sync_name, @started_at, @completed_at, "
+                "run_id, sync_run_id" + "".join(f", {name}" for name in present) + ") "
+                "VALUES (@sync_name, @started_at, @completed_at, "
                 "@duration_seconds, @status, @records_synced, @records_failed, @errors, "
-                "@cursor_value_used, @dry_run, @run_id, @sync_run_id)",
+                "@cursor_value_used, @dry_run, @run_id, @sync_run_id"
+                + "".join(f", @{name}" for name in present)
+                + ")",
                 [
                     _scalar("sync_name", "STRING", entry.sync_name),
                     _scalar("started_at", "STRING", entry.started_at),
@@ -295,6 +335,10 @@ class BigQueryWarehouseHistoryStore:
                     _scalar("dry_run", "BOOL", entry.dry_run),
                     _scalar("run_id", "STRING", entry.run_id),
                     _scalar("sync_run_id", "STRING", entry.sync_run_id),
+                    *(
+                        _scalar(name, "STRING", cell)
+                        for name, cell in zip(present, encode_optional(entry, present), strict=True)
+                    ),
                 ],
             )
         except Exception as exc:  # noqa: BLE001 - best-effort, see Protocol docstring
@@ -305,10 +349,11 @@ class BigQueryWarehouseHistoryStore:
             return []
         client = _connect(self._profile)
         table = _qualified(self._profile, _HISTORY_TABLE)
+        present = self._optional_columns(client, allow_alter=False)
         columns = (
             "sync_name, started_at, completed_at, duration_seconds, status, "
             "records_synced, records_failed, errors, cursor_value_used, dry_run, "
-            "run_id, sync_run_id"
+            "run_id, sync_run_id" + "".join(f", {name}" for name in present)
         )
         parameters = [_scalar("limit", "INT64", limit)]
         if sync_name is None:
@@ -319,7 +364,7 @@ class BigQueryWarehouseHistoryStore:
                 "ORDER BY started_at DESC LIMIT @limit"
             )
             parameters.insert(0, _scalar("sync_name", "STRING", sync_name))
-        return [_row_to_history_entry(row) for row in _query(client, sql, parameters)]
+        return [_row_to_history_entry(row, present) for row in _query(client, sql, parameters)]
 
     def prune(self, sync_name: str, retention_days: int) -> int:
         if not _table_exists(self._profile, _HISTORY_TABLE):
@@ -349,7 +394,7 @@ class BigQueryWarehouseHistoryStore:
         return count
 
 
-def _row_to_history_entry(row: Sequence[Any]) -> HistoryEntry:
+def _row_to_history_entry(row: Sequence[Any], optional: tuple[str, ...] = ()) -> HistoryEntry:
     (
         sync_name,
         started_at,
@@ -363,8 +408,10 @@ def _row_to_history_entry(row: Sequence[Any]) -> HistoryEntry:
         dry_run,
         run_id,
         sync_run_id,
+        *optional_cells,
     ) = row
     return HistoryEntry(
+        **decode_optional(optional, optional_cells),
         sync_name=sync_name,
         started_at=started_at,
         completed_at=completed_at,
