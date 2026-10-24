@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Scheduled container deployment scaffolds** ([#1225](https://github.com/drt-hub/drt/issues/1225)): `drt deploy cloud-run-job` writes a connector-aware Dockerfile, Cloud Run Job YAML with Secret Manager references, and a Cloud Scheduler command; `drt deploy k8s-cronjob` writes a hardened `batch/v1` CronJob with resource requests, a bounded runtime, non-overlapping runs, read-only-root execution, and Kubernetes Secret references. Both apply validated `--schedule` / `--select` values, generate deterministic offline output, and refuse overwrites without `--force`. `docs/guides/scheduling.md` orders the supported scheduling choices without changing ADR 0004's daemon-free posture.
+
 ## [1.2.1] - 2026-10-23
 
 ### Fixed

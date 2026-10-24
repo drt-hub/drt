@@ -221,10 +221,16 @@ drt serve                   # start HTTP webhook endpoint
 drt docs generate --format mermaid  # print project DAG as Mermaid
 drt docs generate --format dbt-exposures  # print dbt exposure YAML for ref() syncs
 drt deploy github-actions   # scaffold a scheduled sync workflow (drt-action + secrets wired)
+drt deploy cloud-run-job --schedule "40 3 * * *"  # Dockerfile + Cloud Run/Scheduler specs
+drt deploy k8s-cronjob --schedule "40 3 * * *"    # hardened batch/v1 CronJob manifest
 drt mcp run                 # start MCP server (requires drt-core[mcp])
 drt --install-completion    # install shell completion (bash/zsh/fish)
 drt --show-completion       # show completion script
 ```
+
+See the [scheduling decision guide](docs/guides/scheduling.md) before choosing
+between warehouse-native scheduling, Dagster sensors, `drt serve`, or a deploy
+scaffold.
 
 ### Visualize your syncs
 
