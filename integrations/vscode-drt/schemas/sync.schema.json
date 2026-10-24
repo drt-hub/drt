@@ -3371,6 +3371,7 @@
       "type": "object"
     },
     "OnStaleConfig": {
+      "additionalProperties": false,
       "description": "``alerts.on_stale`` (#1224) \u2014 sync-level freshness, judged from run history.\n\nUnlike ``on_failure`` / ``on_degraded`` this is not evaluated while a run is\nhappening: a sync that silently stopped running never fires those. It is\nevaluated by whoever calls ``drt status --check`` (cron, CI, ``drt serve``);\ndrt stays daemon-free (ADR 0004). It measures the *sync's* last successful\nrun, so it works for every destination, including SaaS and file ones.",
       "properties": {
         "max_age": {

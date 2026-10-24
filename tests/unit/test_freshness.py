@@ -98,7 +98,7 @@ def test_a_sync_that_never_succeeded_follows_never_run(
 
     assert (verdict.state, verdict.severity) == ("never_run", severity)
     assert has_failure([verdict]) is fails
-    assert "no successful run" in verdict.message()
+    assert "no run on record" in verdict.message()
 
 
 def test_stored_state_is_the_fallback_when_history_has_no_success(tmp_path: Path) -> None:
@@ -195,12 +195,34 @@ def test_check_json_and_select(project: Path) -> None:
     assert weekly.exit_code == 0 and json.loads(weekly.output)["ok"] is True
 
 
-def test_nothing_configured_is_reported_not_silently_green(project: Path) -> None:
+def test_nothing_monitored_fails_closed_instead_of_reporting_green(project: Path) -> None:
     _write_sync(project, "plain", None)
 
-    result = runner.invoke(app, ["status", "--check"])
+    text = runner.invoke(app, ["status", "--check"])
+    as_json = runner.invoke(app, ["status", "--check", "--output", "json"])
 
-    assert result.exit_code == 0 and "alerts.on_stale" in result.output
+    assert text.exit_code == 1 and "Nothing was checked" in text.output
+    payload = json.loads(as_json.output)
+    assert payload["ok"] is False and payload["checked"] == 0
+    assert payload["unmonitored"] == ["plain"]
+
+
+def test_unmonitored_selected_syncs_are_listed(project: Path) -> None:
+    _write_sync(project, "watched", {"max_age": "6h"})
+    _write_sync(project, "forgotten", None)
+    _history(project, "watched", 1)
+
+    result = runner.invoke(app, ["status", "--check", "--output", "json"])
+
+    payload = json.loads(result.output)
+    assert result.exit_code == 0 and payload["unmonitored"] == ["forgotten"]
+
+
+def test_check_cannot_be_combined_with_modes_it_would_silently_override(project: Path) -> None:
+    _write_sync(project, "a", {"max_age": "6h"})
+
+    for extra in (["--history"], ["--sync", "a"], ["--verbose"]):
+        assert runner.invoke(app, ["status", "--check", *extra]).exit_code == 1
 
 
 def test_notify_sends_only_for_stale_syncs(project: Path) -> None:
@@ -279,3 +301,121 @@ def test_mcp_check_filters_to_one_sync_and_rejects_an_unknown_name(project: Path
 
     assert one["ok"] is True and [s["sync"] for s in one["syncs"]] == ["daily"]
     assert "nope" in missing["error"]
+
+
+# ---------------------------------------------------------------------------
+# Hardening from the adversarial review
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_entries_never_reset_the_clock(tmp_path: Path) -> None:
+    mgr = HistoryManager(tmp_path)
+    mgr.append(_entry("orders", 20))
+    dry = _entry("orders", 1)
+    dry.dry_run = True
+    mgr.append(dry)
+
+    [verdict] = evaluate_freshness([_sync("orders")], mgr, {}, NOW)
+
+    assert verdict.state == "stale" and verdict.age_seconds == 20 * 3600
+
+
+def test_a_sync_whose_recent_runs_all_failed_is_stale_not_never_run(tmp_path: Path) -> None:
+    mgr = HistoryManager(tmp_path)
+    for i in range(3):
+        mgr.append(_entry("orders", 3 - i, status="failed"))
+
+    [verdict] = evaluate_freshness([_sync("orders", never_run="warn")], mgr, {}, NOW)
+
+    assert (verdict.state, verdict.severity) == ("stale", "error")
+    assert verdict.last_success_at is None and "no successful run" in verdict.message()
+
+
+def test_the_newest_success_is_chosen_by_completion_not_start(tmp_path: Path) -> None:
+    """Run A starts first but finishes last; history is ordered by start time."""
+    mgr = HistoryManager(tmp_path)
+    a = _entry("orders", 12)  # started 12h ago
+    a.completed_at = (NOW - timedelta(minutes=5)).isoformat()  # ...finished 5 minutes ago
+    b = _entry("orders", 3)  # started later, finished earlier
+    b.completed_at = (NOW - timedelta(hours=2, minutes=30)).isoformat()
+    mgr.append(a)
+    mgr.append(b)
+
+    [verdict] = evaluate_freshness([_sync("orders", "20m")], mgr, {}, NOW)
+
+    assert verdict.state == "fresh" and verdict.age_seconds == 300
+
+
+def test_a_success_dated_in_the_future_is_an_error_not_fresh(tmp_path: Path) -> None:
+    mgr = HistoryManager(tmp_path)
+    mgr.append(_entry("orders", -24))  # a runner whose clock is a day fast
+
+    [verdict] = evaluate_freshness([_sync("orders")], mgr, {}, NOW)
+
+    assert (verdict.state, verdict.severity) == ("clock_skew", "error")
+    assert "future" in verdict.message()
+
+
+def test_small_clock_skew_is_tolerated(tmp_path: Path) -> None:
+    mgr = HistoryManager(tmp_path)
+    mgr.append(_entry("orders", -0.02))  # ~1 minute ahead
+
+    [verdict] = evaluate_freshness([_sync("orders")], mgr, {}, NOW)
+
+    assert verdict.state == "fresh"
+
+
+def test_a_typo_in_the_policy_is_rejected_not_silently_defaulted() -> None:
+    with pytest.raises(ValidationError, match="never_runs"):
+        OnStaleConfig(max_age="6h", never_runs="error")  # type: ignore[call-arg]
+
+
+def test_a_bad_max_age_error_does_not_echo_channel_secrets() -> None:
+    secret = "https://hooks.example.invalid/SECRET-TOKEN-123"
+    with pytest.raises(ValidationError) as raised:
+        OnStaleConfig(max_age="soon", channels=[{"type": "webhook", "url": secret}])  # type: ignore[list-item]
+
+    assert "SECRET-TOKEN-123" not in str(raised.value)
+
+
+@pytest.mark.parametrize("huge", ["9" * 40 + "w", "4000d", "99999999999d"])
+def test_enormous_durations_are_a_config_error_not_a_traceback(huge: str) -> None:
+    with pytest.raises(ValueError):
+        parse_max_age(huge)
+
+
+def test_notify_context_supports_every_documented_template_variable(project: Path) -> None:
+    hook = {
+        "type": "slack",
+        "webhook_url": "https://hooks.example.invalid/x",
+        "message": "{sync_name} {error} {started_at} {rows_processed} {duration_s} {run_id}",
+    }
+    _write_sync(project, "late", {"max_age": "6h", "channels": [hook]})
+    _history(project, "late", 9)
+    sent_bodies: list[bytes] = []
+
+    class _Response:
+        def close(self) -> None:
+            return None
+
+    def fake_urlopen(request: Any, timeout: int = 10) -> _Response:
+        sent_bodies.append(request.data)
+        return _Response()
+
+    with patch("drt.alerts.slack.urllib.request.urlopen", fake_urlopen):
+        result = runner.invoke(app, ["status", "--check", "--notify"])
+
+    assert result.exit_code == 1 and sent_bodies, "the alert must actually be sent"
+    assert "late" in sent_bodies[0].decode()
+
+
+def test_the_default_slack_message_says_stale_not_failed(project: Path) -> None:
+    hook = {"type": "slack", "webhook_url": "https://hooks.example.invalid/x"}
+    _write_sync(project, "late", {"max_age": "6h", "channels": [hook]})
+    _history(project, "late", 9)
+
+    with patch("drt.alerts.dispatcher.dispatch_targets") as sent:
+        runner.invoke(app, ["status", "--check", "--notify"])
+
+    [(targets, _context)] = [call.args for call in sent.call_args_list]
+    assert "stale" in targets[0].message and "failed" not in targets[0].message

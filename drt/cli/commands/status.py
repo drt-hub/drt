@@ -65,6 +65,13 @@ def status(
     get_permission_checker().check(PermissionAction.VIEW, None)
 
     if check:
+        if history or sync_name or verbose:
+            typer.echo(
+                "drt status: --check cannot be combined with --history, --sync or --verbose "
+                "(use --select to choose syncs).",
+                err=True,
+            )
+            raise typer.Exit(1)
         _check_freshness(select=select, notify=notify, output=output)
         return
     if notify or select:
@@ -129,9 +136,16 @@ def status(
 
 
 def _check_freshness(*, select: list[str] | None, notify: bool, output: str) -> None:
-    """``drt status --check`` (#1224): exit 1 when any sync is stale."""
+    """``drt status --check`` (#1224): exit 1 when any sync is stale.
+
+    Fails closed: a check that monitors nothing (no selected sync configures
+    ``alerts.on_stale``, or there are no syncs) exits 1 rather than reporting a
+    green that means nothing. Selected syncs without ``on_stale`` are listed as
+    *unmonitored* so a partial rollout is visible.
+    """
     from drt.alerts.dispatcher import dispatch_targets
     from drt.cli._selection import SelectionError, select_syncs
+    from drt.config.models import SlackAlertConfig
     from drt.config.parser import load_project, load_syncs
     from drt.engine.freshness import evaluate_freshness, has_failure
     from drt.state.factory import build_state_bundle
@@ -141,45 +155,62 @@ def _check_freshness(*, select: list[str] | None, notify: bool, output: str) -> 
         project = load_project(project_dir)
         syncs = select_syncs(load_syncs(project_dir), select)
     except (FileNotFoundError, ValueError, SelectionError) as e:
-        typer.echo(f"drt status --check: {e}", err=True)
+        typer.echo(f"drt status --check: {type(e).__name__}: {e}", err=True)
         raise typer.Exit(1) from e
 
     bundle = build_state_bundle(project, project_dir)
     verdicts = evaluate_freshness(syncs, bundle.history, bundle.state.get_all())
+    monitored = {v.sync_name for v in verdicts}
+    unmonitored = sorted(s.name for s in syncs if s.name not in monitored)
     by_name = {s.name: s for s in syncs}
 
     if notify:
+        from drt.config.sync_options import SlackAlertConfig as _Slack
+
+        default_message = _Slack.model_fields["message"].default
         for v in verdicts:
             if v.severity == "ok":
                 continue
             config = by_name[v.sync_name].alerts.on_stale  # type: ignore[union-attr]
+            targets = [
+                # The inherited Slack default says "failed"; a stale alert should not.
+                t.model_copy(update={"message": "drt sync `{sync_name}` is stale: {error}"})
+                if isinstance(t, SlackAlertConfig) and t.message == default_message
+                else t
+                for t in config.channels  # type: ignore[union-attr]
+            ]
             dispatch_targets(
-                config.channels,  # type: ignore[union-attr]
+                targets,
                 {
+                    # The same keys every other alert provides, so any documented
+                    # template variable resolves instead of silently dropping the alert.
                     "sync_name": v.sync_name,
                     "status": v.state,
                     "error": f"{v.state.replace('_', ' ')} \u2014 {v.message()}",
+                    "rows_processed": 0,
+                    "duration_s": 0,
+                    "started_at": v.last_success_at or "",
+                    "run_id": None,
+                    "sync_run_id": None,
                     "last_success_at": v.last_success_at,
                     "age_seconds": v.age_seconds,
                     "max_age_seconds": v.max_age_seconds,
                 },
             )
 
-    failed = has_failure(verdicts)
+    nothing_monitored = not verdicts
+    failed = has_failure(verdicts) or nothing_monitored
     if output == "json":
         print(
             json.dumps(
                 {
                     "ok": not failed,
                     "checked": len(verdicts),
+                    "unmonitored": unmonitored,
                     "syncs": [v.to_dict() for v in verdicts],
                 },
                 indent=2,
             )
-        )
-    elif not verdicts:
-        console.print(
-            "[yellow]No sync selected configures alerts.on_stale; nothing to check.[/yellow]"
         )
     else:
         from rich.markup import escape
@@ -187,7 +218,17 @@ def _check_freshness(*, select: list[str] | None, notify: bool, output: str) -> 
         for v in verdicts:
             colour = {"ok": "green", "warn": "yellow", "error": "red"}[v.severity]
             console.print(
-                f"[{colour}]{v.state:<9}[/{colour}] {escape(v.sync_name)} \u2014 {v.message()}"
+                f"[{colour}]{v.state:<10}[/{colour}] {escape(v.sync_name)} \u2014 {v.message()}"
+            )
+        if unmonitored:
+            console.print(
+                "[yellow]Not monitored (no alerts.on_stale): "
+                + ", ".join(escape(n) for n in unmonitored)
+                + "[/yellow]"
+            )
+        if nothing_monitored:
+            console.print(
+                "[red]Nothing was checked: no selected sync configures alerts.on_stale.[/red]"
             )
     if failed:
         raise typer.Exit(1)

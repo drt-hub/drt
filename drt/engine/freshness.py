@@ -6,27 +6,40 @@ object-store or warehouse-backed), so it works for every destination. Nothing
 here runs on a timer; whoever calls it (cron, CI, ``drt serve``) decides when
 (ADR 0004: drt stays daemon-free).
 
-A run counts as fresh only when its status is ``success``. ``partial`` and
-``failed`` runs do not reset the clock, because the destination did not receive
-the full data. When history has no successful entry (e.g. history is disabled)
-the sync's stored state is used as a fallback.
+Design rules, each closing a way a watchdog could go quietly green:
+
+* Only a ``success`` entry resets the clock, never a ``dry_run`` one. ``partial``
+  and ``failed`` runs do not, because the destination did not receive the full data.
+* The newest success is chosen by **completion** time, not by history order (history
+  is ordered by start time, and runs can overlap).
+* A sync that has run but has no success in the inspected window is **stale**, not
+  ``never_run``: ``never_run`` means there is no run on record at all.
+* A last success in the future (clock skew) is an error, never "fresh".
+* When history holds no success at all (e.g. history is disabled) the sync's stored
+  state is used; that records the run's *start* time, so ``max_age`` should exceed
+  the run's duration in that setup.
+
+Known limit: a run interrupted gracefully (SIGTERM) after delivering part of the
+data is recorded with status ``success`` and cannot be told apart here.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from drt.config.duration import parse_max_age
 
-FreshnessState = Literal["fresh", "stale", "never_run"]
+FreshnessState = Literal["fresh", "stale", "never_run", "clock_skew"]
 Severity = Literal["ok", "warn", "error"]
 
-# How far back to look for the last success. Retention prunes history anyway; a
-# sync with no success in this window is judged on its stored state instead.
+# How many recent runs to inspect for the last success. Retention prunes history
+# anyway; a sync whose recent runs hold no success is reported stale, not green.
 _HISTORY_WINDOW = 200
+# A last success this far in the future is clock skew, not "just now".
+_MAX_FUTURE_SKEW = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -51,7 +64,11 @@ class FreshnessVerdict:
     def message(self) -> str:
         limit = _human(self.max_age_seconds)
         if self.state == "never_run":
-            return f"has no successful run on record (max_age {limit})"
+            return f"has no run on record (max_age {limit})"
+        if self.state == "clock_skew":
+            return f"last success is dated {self.last_success_at}, in the future (clock skew?)"
+        if self.last_success_at is None:
+            return f"no successful run among its recent runs (max_age {limit})"
         assert self.age_seconds is not None
         return f"last succeeded {_human(self.age_seconds)} ago (max_age {limit})"
 
@@ -73,17 +90,23 @@ def _parse_time(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _last_success(sync_name: str, history: Any, state: Any) -> datetime | None:
+def _last_success(sync_name: str, history: Any, stored: Any) -> tuple[datetime | None, bool]:
+    """``(newest success time, whether the sync has any run on record)``."""
+    seen_run = False
+    best: datetime | None = None
     if history is not None:
         for entry in history.read(sync_name, limit=_HISTORY_WINDOW):
-            if entry.status == "success":
-                when = _parse_time(entry.completed_at) or _parse_time(entry.started_at)
-                if when is not None:
-                    return when
-    stored = state.get(sync_name) if state is not None else None
-    if stored is not None and stored.status == "success":
-        return _parse_time(stored.last_run_at)
-    return None
+            seen_run = True
+            if entry.status != "success" or getattr(entry, "dry_run", False):
+                continue
+            when = _parse_time(entry.completed_at) or _parse_time(entry.started_at)
+            if when is not None and (best is None or when > best):
+                best = when
+    if best is None and stored is not None:
+        seen_run = True
+        if stored.status == "success":
+            best = _parse_time(stored.last_run_at)
+    return best, seen_run
 
 
 def evaluate_freshness(
@@ -100,10 +123,20 @@ def evaluate_freshness(
         if config is None:
             continue
         limit = int(parse_max_age(config.max_age).total_seconds())
-        last = _last_success(sync.name, history, states)
+        last, seen_run = _last_success(
+            sync.name, history, states.get(sync.name) if states is not None else None
+        )
         if last is None:
+            if seen_run:  # it ran, but nothing succeeded recently: that is stale
+                verdicts.append(FreshnessVerdict(sync.name, "stale", "error", limit, None, None))
+            else:
+                verdicts.append(
+                    FreshnessVerdict(sync.name, "never_run", config.never_run, limit, None, None)
+                )
+            continue
+        if last - moment > _MAX_FUTURE_SKEW:
             verdicts.append(
-                FreshnessVerdict(sync.name, "never_run", config.never_run, limit, None, None)
+                FreshnessVerdict(sync.name, "clock_skew", "error", limit, last.isoformat(), None)
             )
             continue
         age = max(int((moment - last).total_seconds()), 0)
@@ -122,5 +155,5 @@ def evaluate_freshness(
 
 
 def has_failure(verdicts: Iterable[FreshnessVerdict]) -> bool:
-    """True when any verdict is an error (a stale sync, or never-run with ``never_run: error``)."""
+    """True when any verdict is an error (stale, clock skew, or ``never_run: error``)."""
     return any(v.severity == "error" for v in verdicts)

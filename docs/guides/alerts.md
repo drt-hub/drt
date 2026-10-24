@@ -186,16 +186,30 @@ Rules:
 
 - **Read-only, evaluated by the caller.** drt has no daemon (ADR 0004): cron, CI or
   `drt serve` calls `drt status --check` on whatever cadence you choose.
-- **Only a `success` run resets the clock.** `partial` and `failed` runs do not,
-  because the destination did not receive the full data.
+- **Only a `success` run resets the clock** (never a dry run). `partial` and `failed`
+  runs do not, because the destination did not receive the full data. The newest
+  success is picked by completion time, so overlapping runs are judged correctly.
+- **A sync that ran but has no success in its recent runs is `stale`**, not `never_run`.
+  `never_run` means no run is on record at all. A last success dated in the future
+  (a runner with a fast clock) is a `clock_skew` error, never "fresh".
+- **It fails closed.** If no selected sync configures `on_stale`, or there are no syncs,
+  the check exits 1 ("Nothing was checked") instead of reporting a meaningless green.
+  Selected syncs without `on_stale` are listed as *not monitored* (`unmonitored` in JSON).
 - It reads run history (local, GCS/S3 or warehouse-backed); if history holds no
-  success it falls back to the sync's stored state.
-- `--notify` is explicit so a local check never posts to Slack by surprise. Without
-  channels, use the exit code or the JSON in your own pipeline.
-- A project where **no** selected sync configures `on_stale` prints a notice and exits
-  0; to make that a failure, check the JSON `checked` count.
+  success it falls back to the sync's stored state, which records the run's *start*
+  time, so keep `max_age` longer than the run's duration if you disable history.
+- Unknown keys under `on_stale` (for example `never_runs`) are rejected, so a typo cannot
+  quietly weaken the policy.
+- `--notify` is explicit so a local check never posts to Slack by surprise, and it posts
+  on **every** invocation for every non-OK sync: the watchdog's schedule is your alert
+  cadence (an hourly watchdog posts hourly throughout an outage). The default Slack
+  message reads "is stale". Custom messages can use the same variables as other alerts
+  (`{sync_name}`, `{error}`, `{started_at}`, ...).
+- `--check` cannot be combined with `--history`, `--sync` or `--verbose`.
 - MCP: `drt_get_status(check=True)` returns the same verdict (it never posts to a
   channel).
+- **Known limit:** a run interrupted gracefully (SIGTERM) after part of the data is
+  recorded as `success` and counts as fresh; history does not yet record interruption.
 
 ### A scheduled freshness watchdog (GitHub Actions)
 
@@ -220,6 +234,9 @@ jobs:
           # plus the credentials of your state backend (history must be readable here)
         run: drt status --check --notify
 ```
+
+`drt status --check` already exits 1 when nothing is monitored, so an empty or mistyped
+configuration fails the job instead of passing silently.
 
 History must be readable from the runner: use a remote state backend
 ([remote state](remote-state.md), [warehouse-backed state](warehouse-state.md)); a fresh

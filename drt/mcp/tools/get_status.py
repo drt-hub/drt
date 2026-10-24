@@ -31,9 +31,12 @@ def get_status(
             if not syncs:
                 return {"error": f"No sync named '{sync_name}'."}
         verdicts = evaluate_freshness(syncs, bundle.history, states)
+        monitored = {v.sync_name for v in verdicts}
         return {
-            "ok": not has_failure(verdicts),
+            # Fails closed: a check that monitored nothing is not "ok".
+            "ok": bool(verdicts) and not has_failure(verdicts),
             "checked": len(verdicts),
+            "unmonitored": sorted(s.name for s in syncs if s.name not in monitored),
             "syncs": [v.to_dict() for v in verdicts],
         }
 
