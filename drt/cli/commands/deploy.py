@@ -71,6 +71,8 @@ _SELECT_PATTERN = re.compile(r"[A-Za-z0-9_./:*?\[\]-]+")
 _SELECT_METHODS = {"tag", "destination"}
 _STATE_SELECTORS = {"state:modified", "state:new"}
 _EXTRAS = re.compile(r"[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*")
+# A PEP 440 release version (1.2.1, 1.3.0rc1, 1.2.1.post1); nothing shell- or pip-special.
+_DRT_VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc|\.post|\.dev)[0-9]+)?")
 
 
 def _collect_env_refs(node: Any, envs: set[str]) -> None:
@@ -174,6 +176,13 @@ def _validate_select(select: str) -> None:
             f"{methods}, state:modified, or state:new; quotes and whitespace are not allowed."
         )
         raise typer.Exit(code=1)
+
+
+def _validate_drt_version(version: str | None) -> None:
+    """Reject anything but a plain release version before it reaches a Docker RUN line."""
+    if version is not None and not _DRT_VERSION.fullmatch(version):
+        print_error(f'--drt-version "{version}" must be a release version such as 1.2.1.')
+        raise typer.Exit(1)
 
 
 def _validate_extras(extras: str) -> None:
@@ -516,8 +525,10 @@ def _render_apply_workflow(
     return "\n".join(lines)
 
 
-def _render_dockerfile(extras: str, has_profiles: bool) -> str:
+def _render_dockerfile(extras: str, has_profiles: bool, drt_version: str | None = None) -> str:
     spec = f"drt-core[{extras}]" if extras else "drt-core"
+    if drt_version:
+        spec += f"=={drt_version}"
     profile_note = (
         "# profiles.yml is copied to the non-root user's home below."
         if has_profiles
@@ -690,6 +701,14 @@ def deploy_cloud_run_job(
     extras: str = typer.Option(
         None, "--extras", help="Override the inferred drt-core extras (comma-separated)."
     ),
+    drt_version: str = typer.Option(
+        None,
+        "--drt-version",
+        help=(
+            "Pin the image to drt-core==VERSION (e.g. 1.2.1) for reproducible builds. "
+            "Without it the image installs the latest drt-core, like `deploy github-actions`."
+        ),
+    ),
     output_dir: Path = typer.Option(
         _DEFAULT_CLOUD_RUN_OUTPUT,
         "--output-dir",
@@ -705,10 +724,14 @@ def deploy_cloud_run_job(
     project_dir = _require_project()
     _validate_schedule(schedule)
     _validate_select(select)
+    _validate_drt_version(drt_version)
     secrets, effective_extras, has_profiles = _project_details(project_dir, extras)
 
     outputs = [
-        (output_dir / "Dockerfile", _render_dockerfile(effective_extras, has_profiles)),
+        (
+            output_dir / "Dockerfile",
+            _render_dockerfile(effective_extras, has_profiles, drt_version),
+        ),
         (output_dir / "job.yaml", _render_cloud_run_job(select, secrets)),
         (output_dir / "scheduler.sh", _render_cloud_scheduler(schedule)),
     ]

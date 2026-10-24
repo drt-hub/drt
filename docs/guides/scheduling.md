@@ -46,6 +46,11 @@ The command writes:
 - `deploy/cloud-run-job/scheduler.sh`, an offline-generated `gcloud scheduler`
   command for the UTC cron schedule.
 
+By default the image installs the latest `drt-core`, like
+`deploy github-actions`. For reproducible builds pass
+`--drt-version 1.2.1` and the Dockerfile installs `drt-core[...]==1.2.1`
+instead (re-run the command with `--force` after you upgrade drt).
+
 Replace the project, region, repository, image, and service-account
 placeholders before applying it. Create the named Secret Manager secrets
 separately and grant the Cloud Run Job service account access. The scaffold
