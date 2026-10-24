@@ -13,7 +13,10 @@ if TYPE_CHECKING:
 
 
 def get_status(
-    ctx: McpContext, sync_name: str | None = None, check: bool = False
+    ctx: McpContext,
+    sync_name: str | None = None,
+    check: bool = False,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
     from drt.state.factory import build_state_bundle
 
@@ -34,7 +37,7 @@ def get_status(
         monitored = {v.sync_name for v in verdicts}
         return {
             # Fails closed: a check that monitored nothing is not "ok".
-            "ok": bool(verdicts) and not has_failure(verdicts),
+            "ok": (bool(verdicts) or allow_empty) and not has_failure(verdicts),
             "checked": len(verdicts),
             "unmonitored": sorted(s.name for s in syncs if s.name not in monitored),
             "syncs": [v.to_dict() for v in verdicts],

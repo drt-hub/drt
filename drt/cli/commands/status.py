@@ -54,6 +54,14 @@ def status(
         "--notify",
         help="With --check: send an alert to each stale sync's alerts.on_stale.channels.",
     ),
+    allow_empty: bool = typer.Option(
+        False,
+        "--allow-empty",
+        help=(
+            "With --check: do not fail when no selected sync configures alerts.on_stale "
+            "(for rolling the watchdog out before the syncs are configured)."
+        ),
+    ),
 ) -> None:
     """Show the status of the most recent sync runs."""
     from drt.security import PermissionAction, get_permission_checker
@@ -72,10 +80,13 @@ def status(
                 err=True,
             )
             raise typer.Exit(1)
-        _check_freshness(select=select, notify=notify, output=output)
+        _check_freshness(select=select, notify=notify, output=output, allow_empty=allow_empty)
         return
-    if notify or select:
-        typer.echo("drt status: --select and --notify only apply together with --check.", err=True)
+    if notify or select or allow_empty:
+        typer.echo(
+            "drt status: --select, --notify and --allow-empty only apply together with --check.",
+            err=True,
+        )
         raise typer.Exit(1)
 
     if history:
@@ -135,12 +146,15 @@ def status(
             )
 
 
-def _check_freshness(*, select: list[str] | None, notify: bool, output: str) -> None:
+def _check_freshness(
+    *, select: list[str] | None, notify: bool, output: str, allow_empty: bool = False
+) -> None:
     """``drt status --check`` (#1224): exit 1 when any sync is stale.
 
     Fails closed: a check that monitors nothing (no selected sync configures
     ``alerts.on_stale``, or there are no syncs) exits 1 rather than reporting a
-    green that means nothing. Selected syncs without ``on_stale`` are listed as
+    green that means nothing; ``--allow-empty`` opts out while the watchdog is
+    being rolled out. Selected syncs without ``on_stale`` are listed as
     *unmonitored* so a partial rollout is visible.
     """
     from drt.alerts.dispatcher import dispatch_targets
@@ -199,7 +213,7 @@ def _check_freshness(*, select: list[str] | None, notify: bool, output: str) -> 
             )
 
     nothing_monitored = not verdicts
-    failed = has_failure(verdicts) or nothing_monitored
+    failed = has_failure(verdicts) or (nothing_monitored and not allow_empty)
     if output == "json":
         print(
             json.dumps(
@@ -227,8 +241,10 @@ def _check_freshness(*, select: list[str] | None, notify: bool, output: str) -> 
                 + "[/yellow]"
             )
         if nothing_monitored:
+            colour = "yellow" if allow_empty else "red"
             console.print(
-                "[red]Nothing was checked: no selected sync configures alerts.on_stale.[/red]"
+                f"[{colour}]Nothing was checked: no selected sync configures "
+                f"alerts.on_stale.[/{colour}]"
             )
     if failed:
         raise typer.Exit(1)

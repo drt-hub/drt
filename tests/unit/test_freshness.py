@@ -459,3 +459,41 @@ def test_an_older_state_success_does_not_override_a_newer_history_success(tmp_pa
     [verdict] = evaluate_freshness([_sync("orders")], mgr, states, NOW)
 
     assert verdict.state == "fresh" and verdict.age_seconds == 3600
+
+
+def test_allow_empty_turns_nothing_monitored_into_a_warning(project: Path) -> None:
+    _write_sync(project, "plain", None)
+
+    text = runner.invoke(app, ["status", "--check", "--allow-empty"])
+    as_json = runner.invoke(app, ["status", "--check", "--allow-empty", "--output", "json"])
+
+    assert text.exit_code == 0 and "Nothing was checked" in text.output
+    payload = json.loads(as_json.output)
+    assert as_json.exit_code == 0 and payload["ok"] is True and payload["checked"] == 0
+
+
+def test_allow_empty_never_hides_a_stale_sync(project: Path) -> None:
+    _write_sync(project, "late", {"max_age": "6h"})
+    _history(project, "late", 9)
+
+    assert runner.invoke(app, ["status", "--check", "--allow-empty"]).exit_code == 1
+
+
+def test_allow_empty_without_check_is_refused(project: Path) -> None:
+    assert runner.invoke(app, ["status", "--allow-empty"]).exit_code == 1
+
+
+def test_mcp_allow_empty_makes_an_unmonitored_project_ok(project: Path) -> None:
+    import asyncio
+
+    from drt.mcp.server import create_server
+
+    _write_sync(project, "plain", None)
+    server = create_server(project)
+
+    async def call(**kwargs: Any) -> dict[str, Any]:
+        result = await server.call_tool("drt_get_status", kwargs)
+        return result.structured_content  # type: ignore[no-any-return]
+
+    assert asyncio.run(call(check=True))["ok"] is False
+    assert asyncio.run(call(check=True, allow_empty=True))["ok"] is True

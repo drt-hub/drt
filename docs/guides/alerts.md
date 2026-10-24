@@ -195,6 +195,8 @@ Rules:
 - **It fails closed.** If no selected sync configures `on_stale`, or there are no syncs,
   the check exits 1 ("Nothing was checked") instead of reporting a meaningless green.
   Selected syncs without `on_stale` are listed as *not monitored* (`unmonitored` in JSON).
+  While rolling the watchdog out before the syncs are configured, add `--allow-empty`:
+  "nothing monitored" then exits 0 with a warning (a stale sync still exits 1).
 - It reads run history (local, GCS/S3 or warehouse-backed); if history holds no
   success it falls back to the sync's stored state, which records the run's *start*
   time, so keep `max_age` longer than the run's duration if you disable history.
