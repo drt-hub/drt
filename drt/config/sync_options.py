@@ -17,6 +17,7 @@ from pydantic import (
     PrivateAttr,
     SerializeAsAny,
     Tag,
+    field_validator,
     model_validator,
 )
 
@@ -814,8 +815,39 @@ class OnDegradedConfig(BaseModel):
     conditions: DegradedConditions = Field(default_factory=DegradedConditions)
 
 
+class OnStaleConfig(BaseModel):
+    """``alerts.on_stale`` (#1224) — sync-level freshness, judged from run history.
+
+    Unlike ``on_failure`` / ``on_degraded`` this is not evaluated while a run is
+    happening: a sync that silently stopped running never fires those. It is
+    evaluated by whoever calls ``drt status --check`` (cron, CI, ``drt serve``);
+    drt stays daemon-free (ADR 0004). It measures the *sync's* last successful
+    run, so it works for every destination, including SaaS and file ones.
+    """
+
+    # A typo in this safety policy (``never_runs: error``) must not silently fall back
+    # to the lenient default, so unknown keys are rejected.
+    model_config = ConfigDict(extra="forbid")
+
+    max_age: str  # "6h", "30m", "2d", "1w" or "6 hours"
+    never_run: Literal["warn", "error"] = "warn"  # a sync with no run on record at all
+    channels: list[AlertItem] = Field(default_factory=list)
+
+    # A field validator (not an after-model one) so a validation error carries only
+    # the offending value, never the whole block with its channel webhook URLs.
+    @field_validator("max_age")
+    @classmethod
+    def _validate_max_age(cls, value: str) -> str:
+        from drt.config.duration import parse_max_age
+
+        parse_max_age(value, field_name="alerts.on_stale.max_age")
+        return value
+
+
 class AlertsConfig(BaseModel):
     on_failure: list[AlertItem] = Field(default_factory=list)
+    # Sync-level freshness (#1224) — see OnStaleConfig.
+    on_stale: OnStaleConfig | None = None
     # Partial-degradation thresholds (#784) — see OnDegradedConfig. on_failure
     # (hard failure) is untouched.
     on_degraded: OnDegradedConfig | None = None

@@ -142,6 +142,11 @@ SELECTION_OPTIONS = frozenset({"--select", "--exclude", "--state"})
 COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
     "status": {
         "--history": "the CLI flag switches mode; MCP splits it into drt_get_history",
+        "--notify": (
+            "sends the freshness verdict to the sync's alert channels (Slack/webhook); "
+            "an agent calling drt_get_status(check=True) gets the verdict and decides "
+            "itself, so the tool never posts to a channel as a side effect (#1224)"
+        ),
     },
     "sources": {"--detailed": "drt_list_connectors always returns full detail"},
     "destinations": {"--detailed": "drt_list_connectors always returns full detail"},
