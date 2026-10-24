@@ -26,7 +26,9 @@ data is recorded with status ``success`` and cannot be told apart here.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import logging
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -164,3 +166,28 @@ def evaluate_freshness(
 def has_failure(verdicts: Iterable[FreshnessVerdict]) -> bool:
     """True when any verdict is an error (stale, clock skew, or ``never_run: error``)."""
     return any(v.severity == "error" for v in verdicts)
+
+
+@contextmanager
+def collect_unreadable_evidence() -> Iterator[list[str]]:
+    """Collect warnings the state/history stores log while they are read.
+
+    Stores deliberately degrade on a corrupt or malformed record (best-effort
+    reads), which a watchdog must not mistake for "this sync never ran". Anything
+    logged at WARNING or above under ``drt.state`` during the ``with`` block is
+    returned so the caller can fail instead of reporting green.
+    """
+    messages: list[str] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.levelno >= logging.WARNING:
+                messages.append(record.getMessage())
+
+    handler = _Collector()
+    logger = logging.getLogger("drt.state")
+    logger.addHandler(handler)
+    try:
+        yield messages
+    finally:
+        logger.removeHandler(handler)

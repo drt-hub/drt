@@ -161,7 +161,11 @@ def _check_freshness(
     from drt.cli._selection import SelectionError, select_syncs
     from drt.config.models import SlackAlertConfig
     from drt.config.parser import load_project, load_syncs
-    from drt.engine.freshness import evaluate_freshness, has_failure
+    from drt.engine.freshness import (
+        collect_unreadable_evidence,
+        evaluate_freshness,
+        has_failure,
+    )
     from drt.state.factory import build_state_bundle
 
     project_dir = Path(".")
@@ -173,7 +177,8 @@ def _check_freshness(
         raise typer.Exit(1) from e
 
     bundle = build_state_bundle(project, project_dir)
-    verdicts = evaluate_freshness(syncs, bundle.history, bundle.state.get_all())
+    with collect_unreadable_evidence() as unreadable:
+        verdicts = evaluate_freshness(syncs, bundle.history, bundle.state.get_all())
     monitored = {v.sync_name for v in verdicts}
     unmonitored = sorted(s.name for s in syncs if s.name not in monitored)
     by_name = {s.name: s for s in syncs}
@@ -213,7 +218,8 @@ def _check_freshness(
             )
 
     nothing_monitored = not verdicts
-    failed = has_failure(verdicts) or (nothing_monitored and not allow_empty)
+    # A corrupt state/history record is not "never ran": fail rather than report green.
+    failed = has_failure(verdicts) or (nothing_monitored and not allow_empty) or bool(unreadable)
     if output == "json":
         print(
             json.dumps(
@@ -221,6 +227,7 @@ def _check_freshness(
                     "ok": not failed,
                     "checked": len(verdicts),
                     "unmonitored": unmonitored,
+                    "unreadable_evidence": len(unreadable),
                     "syncs": [v.to_dict() for v in verdicts],
                 },
                 indent=2,
@@ -239,6 +246,11 @@ def _check_freshness(
                 "[yellow]Not monitored (no alerts.on_stale): "
                 + ", ".join(escape(n) for n in unmonitored)
                 + "[/yellow]"
+            )
+        if unreadable:
+            console.print(
+                f"[red]{len(unreadable)} state/history record(s) could not be read; the "
+                "verdicts above may be wrong. Fix or restore the state, then re-run.[/red]"
             )
         if nothing_monitored:
             colour = "yellow" if allow_empty else "red"

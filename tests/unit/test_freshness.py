@@ -497,3 +497,62 @@ def test_mcp_allow_empty_makes_an_unmonitored_project_ok(project: Path) -> None:
 
     assert asyncio.run(call(check=True))["ok"] is False
     assert asyncio.run(call(check=True, allow_empty=True))["ok"] is True
+
+
+def test_a_corrupt_state_file_fails_the_check_instead_of_reading_as_never_run(
+    project: Path,
+) -> None:
+    """History off + a corrupted state document must not look like 'never ran, warn'."""
+    _write_sync(project, "daily", {"max_age": "6h"})
+    (project / ".drt").mkdir(exist_ok=True)
+    (project / ".drt" / "state.json").write_text("{ this is not json")
+
+    text = runner.invoke(app, ["status", "--check"])
+    as_json = runner.invoke(app, ["status", "--check", "--output", "json"])
+
+    assert text.exit_code == 1 and "could not be read" in text.output
+    payload = json.loads(as_json.stdout)  # stdout only: the store also warns on stderr
+    assert payload["ok"] is False and payload["unreadable_evidence"] >= 1
+
+
+def test_a_malformed_history_line_fails_the_check(project: Path) -> None:
+    _write_sync(project, "daily", {"max_age": "6h"})
+    _history(project, "daily", 0.1)
+    path = project / ".drt" / "history" / "daily.jsonl"
+    path.write_text(path.read_text() + "not json at all\n")
+
+    result = runner.invoke(app, ["status", "--check", "--output", "json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["unreadable_evidence"] >= 1
+
+
+def test_allow_empty_does_not_hide_unreadable_evidence(project: Path) -> None:
+    _write_sync(project, "plain", None)
+    (project / ".drt").mkdir(exist_ok=True)
+    (project / ".drt" / "state.json").write_text("{ broken")
+
+    assert runner.invoke(app, ["status", "--check", "--allow-empty"]).exit_code == 1
+
+
+def test_mcp_flags_unreadable_evidence_and_rejects_a_dangling_allow_empty(
+    project: Path,
+) -> None:
+    import asyncio
+
+    from drt.mcp.server import create_server
+
+    _write_sync(project, "daily", {"max_age": "6h"})
+    (project / ".drt").mkdir(exist_ok=True)
+    (project / ".drt" / "state.json").write_text("{ broken")
+    server = create_server(project)
+
+    async def call(**kwargs: Any) -> dict[str, Any]:
+        result = await server.call_tool("drt_get_status", kwargs)
+        return result.structured_content  # type: ignore[no-any-return]
+
+    checked = asyncio.run(call(check=True))
+    dangling = asyncio.run(call(allow_empty=True))
+
+    assert checked["ok"] is False and checked["unreadable_evidence"] >= 1
+    assert "check=True" in dangling["error"]

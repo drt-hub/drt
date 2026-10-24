@@ -185,7 +185,7 @@ drt status --check --notify              # also send each stale sync's alert to 
 Rules:
 
 - **Read-only, evaluated by the caller.** drt has no daemon (ADR 0004): cron, CI or
-  `drt serve` calls `drt status --check` on whatever cadence you choose.
+  any scheduler calls `drt status --check` on whatever cadence you choose.
 - **Only a `success` run resets the clock** (never a dry run). `partial` and `failed`
   runs do not, because the destination did not receive the full data. The newest
   success is picked by completion time, so overlapping runs are judged correctly.
@@ -200,6 +200,10 @@ Rules:
 - It reads run history (local, GCS/S3 or warehouse-backed); if history holds no
   success it falls back to the sync's stored state, which records the run's *start*
   time, so keep `max_age` longer than the run's duration if you disable history.
+- **Unreadable evidence fails the check.** If a state or history record is corrupt or
+  malformed (the stores normally skip it with a warning), a quiet "never ran" would be
+  wrong, so `--check` exits 1 and reports how many records could not be read
+  (`unreadable_evidence` in JSON; MCP `ok` is false). `--allow-empty` does not hide it.
 - Unknown keys under `on_stale` (for example `never_runs`) are rejected, so a typo cannot
   quietly weaken the policy.
 - `--notify` is explicit so a local check never posts to Slack by surprise, and it posts

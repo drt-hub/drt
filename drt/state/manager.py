@@ -16,6 +16,7 @@ an OS-level sidecar lock so overlapping drt processes do not clobber updates.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -108,6 +109,9 @@ class LocalStateManager:
                 f"Warning: {self._state_file} is corrupted and will be reset.",
                 file=sys.stderr,
             )
+            # Also a log record, so a read-only consumer (drt status --check) can tell
+            # "no runs on record" from "the record is unreadable".
+            logging.getLogger(__name__).warning("%s is corrupted", self._state_file)
             return {}
 
     def _save_all(self, data: dict[str, Any]) -> None:
