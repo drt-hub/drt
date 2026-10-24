@@ -50,3 +50,21 @@ def parse_duration(text: str, *, field_name: str = "duration") -> timedelta:
             "Use day(s), hour(s), minute(s), second(s), or week(s)."
         )
     return timedelta(**{kwarg: value})
+
+
+_COMPACT_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
+
+
+def parse_max_age(text: str, *, field_name: str = "max_age") -> timedelta:
+    """Parse ``"6h"`` / ``"30m"`` / ``"2d"`` / ``"1w"`` or the long ``"6 hours"`` form."""
+    import re
+
+    compact = re.fullmatch(r"\s*(\d+)\s*([smhdw])\s*", text)
+    if compact:
+        value = int(compact.group(1))
+        if value <= 0:
+            raise ValueError(
+                f"Invalid {field_name} value: {compact.group(1)!r}. Must be a positive integer."
+            )
+        return timedelta(**{_COMPACT_UNITS[compact.group(2)]: value})
+    return parse_duration(text, field_name=field_name)

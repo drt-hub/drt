@@ -158,6 +158,73 @@ alerts:
 
 For URL-only secrets, prefer `webhook_url_env` / `url_env` to keep secrets out of the YAML and out of any logs that might echo it.
 
+## Staleness: a sync that stopped running (`on_stale`)
+
+`on_failure` and `on_degraded` fire while a run is happening, so they say nothing
+about a sync that **stopped running** (a deleted schedule, an expired credential on
+the scheduler, a runner that is down). `alerts.on_stale` covers that. It measures the
+sync, not the destination table, so it works for every destination, including SaaS
+and file ones:
+
+```yaml
+alerts:
+  on_stale:
+    max_age: 6h              # 30m, 6h, 2d, 1w (or "6 hours"); age of the last *successful* run
+    never_run: warn          # warn | error — a sync with no successful run on record
+    channels:                # same Slack/webhook items as on_failure; used with --notify
+      - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL, message: "drt sync `{sync_name}` is stale: {error}" }
+```
+
+```bash
+drt status --check                       # exit 1 if any sync is stale (or never_run: error)
+drt status --check --select tag:daily    # only some syncs
+drt status --check --output json         # {"ok": ..., "syncs": [{sync, state, severity, age_seconds, ...}]}
+drt status --check --notify              # also send each stale sync's alert to its channels
+```
+
+Rules:
+
+- **Read-only, evaluated by the caller.** drt has no daemon (ADR 0004): cron, CI or
+  `drt serve` calls `drt status --check` on whatever cadence you choose.
+- **Only a `success` run resets the clock.** `partial` and `failed` runs do not,
+  because the destination did not receive the full data.
+- It reads run history (local, GCS/S3 or warehouse-backed); if history holds no
+  success it falls back to the sync's stored state.
+- `--notify` is explicit so a local check never posts to Slack by surprise. Without
+  channels, use the exit code or the JSON in your own pipeline.
+- A project where **no** selected sync configures `on_stale` prints a notice and exits
+  0; to make that a failure, check the JSON `checked` count.
+- MCP: `drt_get_status(check=True)` returns the same verdict (it never posts to a
+  channel).
+
+### A scheduled freshness watchdog (GitHub Actions)
+
+```yaml
+name: drt freshness watchdog
+on:
+  schedule:
+    - cron: "17 * * * *"   # hourly
+  workflow_dispatch:
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install drt-core
+      - name: Check freshness and alert
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # plus the credentials of your state backend (history must be readable here)
+        run: drt status --check --notify
+```
+
+History must be readable from the runner: use a remote state backend
+([remote state](remote-state.md), [warehouse-backed state](warehouse-state.md)); a fresh
+checkout has no local `.drt/history`.
+
 ## Out of scope (v0.7)
 
 - On-success notifications.

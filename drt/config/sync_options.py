@@ -814,8 +814,32 @@ class OnDegradedConfig(BaseModel):
     conditions: DegradedConditions = Field(default_factory=DegradedConditions)
 
 
+class OnStaleConfig(BaseModel):
+    """``alerts.on_stale`` (#1224) — sync-level freshness, judged from run history.
+
+    Unlike ``on_failure`` / ``on_degraded`` this is not evaluated while a run is
+    happening: a sync that silently stopped running never fires those. It is
+    evaluated by whoever calls ``drt status --check`` (cron, CI, ``drt serve``);
+    drt stays daemon-free (ADR 0004). It measures the *sync's* last successful
+    run, so it works for every destination, including SaaS and file ones.
+    """
+
+    max_age: str  # "6h", "30m", "2d", "1w" or "6 hours"
+    never_run: Literal["warn", "error"] = "warn"  # a sync with no successful run yet
+    channels: list[AlertItem] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_max_age(self) -> OnStaleConfig:
+        from drt.config.duration import parse_max_age
+
+        parse_max_age(self.max_age, field_name="alerts.on_stale.max_age")
+        return self
+
+
 class AlertsConfig(BaseModel):
     on_failure: list[AlertItem] = Field(default_factory=list)
+    # Sync-level freshness (#1224) — see OnStaleConfig.
+    on_stale: OnStaleConfig | None = None
     # Partial-degradation thresholds (#784) — see OnDegradedConfig. on_failure
     # (hard failure) is untouched.
     on_degraded: OnDegradedConfig | None = None

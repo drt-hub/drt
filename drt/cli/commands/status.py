@@ -38,6 +38,22 @@ def status(
         help="Only show entries for this sync (--history mode only).",
     ),
     limit: int = typer.Option(20, "--limit", help="Max entries to show in --history mode."),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help=(
+            "Judge sync freshness against alerts.on_stale and exit 1 if any sync is stale "
+            "(for cron / CI). Read-only; evaluated from run history."
+        ),
+    ),
+    select: list[str] | None = typer.Option(
+        None, "--select", help="With --check: only these syncs (name, glob, tag:..., ...)."
+    ),
+    notify: bool = typer.Option(
+        False,
+        "--notify",
+        help="With --check: send an alert to each stale sync's alerts.on_stale.channels.",
+    ),
 ) -> None:
     """Show the status of the most recent sync runs."""
     from drt.security import PermissionAction, get_permission_checker
@@ -47,6 +63,13 @@ def status(
     # sync_name=None here — this checks project-wide view access; a
     # per-sync check would additionally apply once --sync narrows the read.
     get_permission_checker().check(PermissionAction.VIEW, None)
+
+    if check:
+        _check_freshness(select=select, notify=notify, output=output)
+        return
+    if notify or select:
+        typer.echo("drt status: --select and --notify only apply together with --check.", err=True)
+        raise typer.Exit(1)
 
     if history:
         _print_history(sync_name=sync_name, limit=limit, output=output)
@@ -103,6 +126,71 @@ def status(
                 f"[yellow]⚠ {name}: {dlq_depths[name]} record(s) in dead letter "
                 f"queue — run [bold]drt retry {name}[/bold] to replay.[/yellow]"
             )
+
+
+def _check_freshness(*, select: list[str] | None, notify: bool, output: str) -> None:
+    """``drt status --check`` (#1224): exit 1 when any sync is stale."""
+    from drt.alerts.dispatcher import dispatch_targets
+    from drt.cli._selection import SelectionError, select_syncs
+    from drt.config.parser import load_project, load_syncs
+    from drt.engine.freshness import evaluate_freshness, has_failure
+    from drt.state.factory import build_state_bundle
+
+    project_dir = Path(".")
+    try:
+        project = load_project(project_dir)
+        syncs = select_syncs(load_syncs(project_dir), select)
+    except (FileNotFoundError, ValueError, SelectionError) as e:
+        typer.echo(f"drt status --check: {e}", err=True)
+        raise typer.Exit(1) from e
+
+    bundle = build_state_bundle(project, project_dir)
+    verdicts = evaluate_freshness(syncs, bundle.history, bundle.state.get_all())
+    by_name = {s.name: s for s in syncs}
+
+    if notify:
+        for v in verdicts:
+            if v.severity == "ok":
+                continue
+            config = by_name[v.sync_name].alerts.on_stale  # type: ignore[union-attr]
+            dispatch_targets(
+                config.channels,  # type: ignore[union-attr]
+                {
+                    "sync_name": v.sync_name,
+                    "status": v.state,
+                    "error": f"{v.state.replace('_', ' ')} \u2014 {v.message()}",
+                    "last_success_at": v.last_success_at,
+                    "age_seconds": v.age_seconds,
+                    "max_age_seconds": v.max_age_seconds,
+                },
+            )
+
+    failed = has_failure(verdicts)
+    if output == "json":
+        print(
+            json.dumps(
+                {
+                    "ok": not failed,
+                    "checked": len(verdicts),
+                    "syncs": [v.to_dict() for v in verdicts],
+                },
+                indent=2,
+            )
+        )
+    elif not verdicts:
+        console.print(
+            "[yellow]No sync selected configures alerts.on_stale; nothing to check.[/yellow]"
+        )
+    else:
+        from rich.markup import escape
+
+        for v in verdicts:
+            colour = {"ok": "green", "warn": "yellow", "error": "red"}[v.severity]
+            console.print(
+                f"[{colour}]{v.state:<9}[/{colour}] {escape(v.sync_name)} \u2014 {v.message()}"
+            )
+    if failed:
+        raise typer.Exit(1)
 
 
 def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:

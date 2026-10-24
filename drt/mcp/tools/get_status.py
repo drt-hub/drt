@@ -12,10 +12,30 @@ if TYPE_CHECKING:
     from drt.mcp._context import McpContext
 
 
-def get_status(ctx: McpContext, sync_name: str | None = None) -> dict[str, Any]:
+def get_status(
+    ctx: McpContext, sync_name: str | None = None, check: bool = False
+) -> dict[str, Any]:
     from drt.state.factory import build_state_bundle
 
-    states = build_state_bundle(ctx.load_project_for_state(), ctx.project_dir).state.get_all()
+    bundle = build_state_bundle(ctx.load_project_for_state(), ctx.project_dir)
+    states = bundle.state.get_all()
+
+    if check:
+        # Same verdict as `drt status --check` (#1224): freshness against
+        # alerts.on_stale, read-only, from run history.
+        from drt.engine.freshness import evaluate_freshness, has_failure
+
+        syncs = ctx.load_syncs()
+        if sync_name:
+            syncs = [s for s in syncs if s.name == sync_name]
+            if not syncs:
+                return {"error": f"No sync named '{sync_name}'."}
+        verdicts = evaluate_freshness(syncs, bundle.history, states)
+        return {
+            "ok": not has_failure(verdicts),
+            "checked": len(verdicts),
+            "syncs": [v.to_dict() for v in verdicts],
+        }
 
     if sync_name:
         if sync_name not in states:
