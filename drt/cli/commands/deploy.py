@@ -1,10 +1,11 @@
-"""`drt deploy github-actions` — scaffold a scheduled sync workflow (#785).
+"""Deployment scaffolds for scheduled drt syncs (#785, #1225).
 
-Generates ``.github/workflows/drt-sync.yml`` wired to the official
-``drt-hub/drt-action``, with connector extras inferred from the project's
-profiles + sync definitions and every required secret enumerated as
-``${{ secrets.NAME }}`` — the part users otherwise transcribe by hand from
-connector docs. Prior art: ``dlt deploy github-action``.
+``github-actions`` generates a workflow wired to the official
+``drt-hub/drt-action``. ``cloud-run-job`` generates a container, Cloud Run
+Job, and Cloud Scheduler command. ``k8s-cronjob`` generates a hardened
+Kubernetes CronJob. Connector extras are inferred from the project's profiles
+and sync definitions, and required secret *names* are enumerated without ever
+reading or emitting secret values.
 
 The scanner reads YAML *raw* (no ``${VAR}`` expansion), so scaffolding works
 in a fresh checkout where none of the runtime env vars are set yet.
@@ -51,6 +52,7 @@ _TYPE_TO_EXTRA: dict[str, str] = {
     "s3": "s3",
     "snowflake": "snowflake",
     "sqlserver": "sqlserver",
+    "sqs": "sqs",
 }
 
 _ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -58,8 +60,17 @@ _ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _DEFAULT_OUTPUT = Path(".github/workflows/drt-sync.yml")
 _DEFAULT_PLAN_OUTPUT = Path(".github/workflows/drt-plan.yml")
 _DEFAULT_APPLY_OUTPUT = Path(".github/workflows/drt-apply.yml")
+_DEFAULT_CLOUD_RUN_OUTPUT = Path("deploy/cloud-run-job")
+_DEFAULT_K8S_OUTPUT = Path("deploy/k8s-cronjob.yml")
 _PLAN_KEY_SECRET = "DRT_PLAN_KEY"
 _PATHS = ('"syncs/**"', '"drt_project.yml"', '"profiles.yml"')
+
+_CRON_FIELD = r"[A-Za-z0-9*/,-]+"
+_CRON_EXPRESSION = re.compile(rf"{_CRON_FIELD}(?: {_CRON_FIELD}){{4}}")
+_SELECT_PATTERN = re.compile(r"[A-Za-z0-9_./:*?\[\]-]+")
+_SELECT_METHODS = {"tag", "destination"}
+_STATE_SELECTORS = {"state:modified", "state:new"}
+_EXTRAS = re.compile(r"[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*")
 
 
 def _collect_env_refs(node: Any, envs: set[str]) -> None:
@@ -129,6 +140,84 @@ def _scan_project(project_dir: Path) -> tuple[set[str], set[str], bool]:
     return envs, types, has_profiles
 
 
+def _validate_schedule(schedule: str) -> None:
+    """Accept a portable five-field cron expression safe to embed in artifacts."""
+    if not _CRON_EXPRESSION.fullmatch(schedule):
+        print_error(
+            f'"{schedule}" does not look like a safe 5-field cron expression '
+            '(e.g. "40 3 * * *"). Use letters, digits, *, /, comma, and hyphen only.'
+        )
+        raise typer.Exit(code=1)
+
+
+def _validate_select(select: str) -> None:
+    """Validate one selector token from drt's public selection grammar.
+
+    Generated manifests pass arguments as arrays, but rejecting quotes,
+    whitespace, and control characters as well keeps regenerate comments and
+    the Cloud Scheduler shell artifact safe by construction.
+    """
+    if select in {"*", "all"} | _STATE_SELECTORS:
+        return
+
+    method: str | None = None
+    pattern = select
+    if ":" in select:
+        method, pattern = select.split(":", 1)
+        if method not in _SELECT_METHODS:
+            pattern = ""
+
+    if not pattern or not _SELECT_PATTERN.fullmatch(pattern):
+        methods = ", ".join(f"{name}:<pattern>" for name in sorted(_SELECT_METHODS))
+        print_error(
+            f'--select "{select}" is not a safe selector. Use *, all, a sync name/glob, '
+            f"{methods}, state:modified, or state:new; quotes and whitespace are not allowed."
+        )
+        raise typer.Exit(code=1)
+
+
+def _validate_extras(extras: str) -> None:
+    """Validate a comma-separated extras list before placing it in a Docker RUN."""
+    if extras and not _EXTRAS.fullmatch(extras):
+        print_error(f'--extras "{extras}" must be a comma-separated list of package extra names.')
+        raise typer.Exit(code=1)
+
+
+def _project_details(project_dir: Path, extras: str | None) -> tuple[list[str], str, bool]:
+    """Scan a project and resolve sorted secrets plus its drt-core install spec."""
+    envs, types, has_profiles = _scan_project(project_dir)
+    inferred = ",".join(sorted({_TYPE_TO_EXTRA[t] for t in types if t in _TYPE_TO_EXTRA}))
+    effective = extras if extras is not None else inferred
+    _validate_extras(effective)
+    return sorted(envs), effective, has_profiles
+
+
+def _require_project() -> Path:
+    project_dir = Path(".")
+    if not (project_dir / "drt_project.yml").exists():
+        print_error(
+            "No drt_project.yml found in the current directory. "
+            "Run this from your drt project root (or `drt init` first)."
+        )
+        raise typer.Exit(code=1)
+    return project_dir
+
+
+def _yaml_artifact(command: str, document: dict[str, Any]) -> str:
+    """Render deterministic YAML with a regeneration header."""
+    body = yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
+    header = f"# Generated by `{command}`.\n# Regenerate with the same command plus `--force`."
+    return f"{header}\n{body}"
+
+
+def _check_outputs(paths: list[Path], force: bool) -> None:
+    """Refuse the whole scaffold before writing any of several files."""
+    for path in paths:
+        if path.exists() and not force:
+            print_error(f"{path} already exists. Re-run with --force to overwrite.")
+            raise typer.Exit(code=1)
+
+
 def _render_workflow(
     select: str,
     schedule: str | None,
@@ -159,6 +248,7 @@ def _render_workflow(
 
     lines = [
         "# Generated by `drt deploy github-actions` — review before committing.",
+        "# Regenerate with the same command plus `--force`.",
         "# Secrets below must exist in Settings → Secrets and variables → Actions.",
         "name: drt sync",
         "",
@@ -290,6 +380,7 @@ def _render_plan_workflow(
     redact = " --redact-keys" if redact_keys else ""
     lines = [
         "# Generated by `drt deploy github-actions --with-plan` — review before committing.",
+        "# Regenerate both files with the same command plus `--force`.",
         "# Plans every sync on a pull request and keeps one comment up to date.",
         "# Needs the secrets below (Settings → Secrets and variables → Actions), including",
         f"# {_PLAN_KEY_SECRET}, which must be the SAME value in drt-plan.yml and drt-apply.yml.",
@@ -349,6 +440,7 @@ def _render_apply_workflow(
 ) -> str:
     lines = [
         "# Generated by `drt deploy github-actions --with-plan` — review before committing.",
+        "# Regenerate both files with the same command plus `--force`.",
         "# On merge, applies the plan that was reviewed on the pull request, but only if",
         "# recomputing it still gives the same change set: `drt apply` writes NOTHING when the",
         "# world no longer matches, so a stale plan makes this job fail. It is a guard in front of",
@@ -424,6 +516,280 @@ def _render_apply_workflow(
     return "\n".join(lines)
 
 
+def _render_dockerfile(extras: str, has_profiles: bool) -> str:
+    spec = f"drt-core[{extras}]" if extras else "drt-core"
+    profile_note = (
+        "# profiles.yml is copied to the non-root user's home below."
+        if has_profiles
+        else "# Add profiles.yml (with *_env references, never values) before building."
+    )
+    return "\n".join(
+        [
+            "# Generated by `drt deploy cloud-run-job`.",
+            "# Regenerate with the same command plus `--force`.",
+            "FROM python:3.12-slim",
+            "",
+            "WORKDIR /app",
+            f'RUN python -m pip install --no-cache-dir "{spec}"',
+            "COPY . /app",
+            profile_note,
+            "RUN mkdir -p /home/drt/.drt /app/.drt /app/target \\",
+            "    && if [ -f profiles.yml ]; then \\",
+            "         cp profiles.yml /home/drt/.drt/profiles.yml; \\",
+            "       fi \\",
+            "    && chown -R 65532:65532 /home/drt /app/.drt /app/target",
+            "",
+            "ENV HOME=/home/drt",
+            "USER 65532:65532",
+            'ENTRYPOINT ["drt"]',
+            'CMD ["run"]',
+            "",
+        ]
+    )
+
+
+def _render_cloud_run_job(select: str, secrets: list[str]) -> str:
+    container: dict[str, Any] = {
+        "image": "REGION-docker.pkg.dev/PROJECT_ID/REPOSITORY/drt-sync:latest",
+        "args": ["run", "--select", select],
+        "resources": {"limits": {"cpu": "1", "memory": "512Mi"}},
+    }
+    if secrets:
+        container["env"] = [
+            {
+                "name": name,
+                "valueFrom": {"secretKeyRef": {"key": name, "name": "latest"}},
+            }
+            for name in secrets
+        ]
+
+    document = {
+        "apiVersion": "run.googleapis.com/v1",
+        "kind": "Job",
+        "metadata": {"name": "drt-sync"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "taskCount": 1,
+                    "template": {
+                        "spec": {
+                            "serviceAccountName": "drt-job@PROJECT_ID.iam.gserviceaccount.com",
+                            "containers": [container],
+                            "maxRetries": 1,
+                            "timeoutSeconds": "3600",
+                        }
+                    },
+                }
+            }
+        },
+    }
+    return _yaml_artifact("drt deploy cloud-run-job", document)
+
+
+def _render_cloud_scheduler(schedule: str) -> str:
+    uri = (
+        "https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/drt-sync:run"
+    )
+    return f"""#!/bin/sh
+# Generated by `drt deploy cloud-run-job`.
+# Regenerate with the same command plus `--force`.
+set -eu
+
+: "${{PROJECT_ID:?Set PROJECT_ID to the Google Cloud project id}}"
+: "${{REGION:=us-central1}}"
+: "${{SCHEDULER_SERVICE_ACCOUNT:?Set SCHEDULER_SERVICE_ACCOUNT to its email}}"
+
+gcloud scheduler jobs create http drt-sync \\
+  --project="${{PROJECT_ID}}" \\
+  --location="${{REGION}}" \\
+  --schedule='{schedule}' \\
+  --time-zone="Etc/UTC" \\
+  --uri="{uri}" \\
+  --http-method=POST \\
+  --headers="Content-Type=application/json" \\
+  --message-body="{{}}" \\
+  --oauth-service-account-email="${{SCHEDULER_SERVICE_ACCOUNT}}"
+"""
+
+
+def _render_k8s_cronjob(
+    schedule: str, select: str, image: str, secret_name: str, secrets: list[str]
+) -> str:
+    container: dict[str, Any] = {
+        "name": "drt",
+        "image": image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["drt"],
+        "args": ["run", "--select", select],
+        "resources": {
+            "requests": {"cpu": "100m", "memory": "256Mi"},
+            "limits": {"cpu": "1", "memory": "512Mi"},
+        },
+        "securityContext": {
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"]},
+        },
+        "volumeMounts": [
+            {"name": "drt-state", "mountPath": "/app/.drt"},
+            {"name": "drt-target", "mountPath": "/app/target"},
+            {"name": "tmp", "mountPath": "/tmp"},
+        ],
+    }
+    if secrets:
+        container["env"] = [
+            {
+                "name": name,
+                "valueFrom": {"secretKeyRef": {"name": secret_name, "key": name}},
+            }
+            for name in secrets
+        ]
+
+    document = {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": {"name": "drt-sync"},
+        "spec": {
+            "schedule": schedule,
+            "timeZone": "Etc/UTC",
+            "concurrencyPolicy": "Forbid",
+            "successfulJobsHistoryLimit": 1,
+            "failedJobsHistoryLimit": 3,
+            "jobTemplate": {
+                "spec": {
+                    "activeDeadlineSeconds": 3600,
+                    "backoffLimit": 1,
+                    "template": {
+                        "spec": {
+                            "restartPolicy": "Never",
+                            "securityContext": {
+                                "runAsNonRoot": True,
+                                "seccompProfile": {"type": "RuntimeDefault"},
+                            },
+                            "containers": [container],
+                            "volumes": [
+                                {"name": "drt-state", "emptyDir": {}},
+                                {"name": "drt-target", "emptyDir": {}},
+                                {"name": "tmp", "emptyDir": {}},
+                            ],
+                        }
+                    },
+                }
+            },
+        },
+    }
+    return _yaml_artifact("drt deploy k8s-cronjob", document)
+
+
+@deploy_app.command(name="cloud-run-job")
+def deploy_cloud_run_job(
+    schedule: str = typer.Option(
+        ..., "--schedule", "-s", help='Required 5-field cron schedule, e.g. "40 3 * * *".'
+    ),
+    select: str = typer.Option("*", "--select", help="One sync selector passed to drt run."),
+    extras: str = typer.Option(
+        None, "--extras", help="Override the inferred drt-core extras (comma-separated)."
+    ),
+    output_dir: Path = typer.Option(
+        _DEFAULT_CLOUD_RUN_OUTPUT,
+        "--output-dir",
+        "-o",
+        help="Directory for Dockerfile, job.yaml, and scheduler.sh.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print all scaffold files instead of writing them."
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing scaffold files."),
+) -> None:
+    """Scaffold a containerized Cloud Run Job and Cloud Scheduler trigger."""
+    project_dir = _require_project()
+    _validate_schedule(schedule)
+    _validate_select(select)
+    secrets, effective_extras, has_profiles = _project_details(project_dir, extras)
+
+    outputs = [
+        (output_dir / "Dockerfile", _render_dockerfile(effective_extras, has_profiles)),
+        (output_dir / "job.yaml", _render_cloud_run_job(select, secrets)),
+        (output_dir / "scheduler.sh", _render_cloud_scheduler(schedule)),
+    ]
+    if dry_run:
+        typer.echo("\n".join(f"# {path}\n{text}" for path, text in outputs))
+        return
+
+    _check_outputs([path for path, _ in outputs], force)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for path, content in outputs:
+        path.write_text(content, encoding="utf-8")
+        console.print(f"[green]✓ Wrote {path}[/green]")
+    (output_dir / "scheduler.sh").chmod(0o755)
+
+    console.print("\n[bold]Next steps:[/bold]")
+    console.print("  1. Replace PROJECT_ID, REGION, REPOSITORY, and service-account placeholders.")
+    if secrets:
+        console.print(
+            f"  2. Create these {len(secrets)} Secret Manager secret(s) and grant the job "
+            "service account access:"
+        )
+        for name in secrets:
+            console.print(f"       {name}")
+    else:
+        console.print("  2. No runtime environment secrets were found in the project YAML.")
+    console.print("  3. Build and push the image, replace the job, then run scheduler.sh.")
+    console.print(
+        "     Use a remote state backend for incremental syncs on ephemeral Cloud Run tasks."
+    )
+
+
+@deploy_app.command(name="k8s-cronjob")
+def deploy_k8s_cronjob(
+    schedule: str = typer.Option(
+        ..., "--schedule", "-s", help='Required 5-field cron schedule, e.g. "40 3 * * *".'
+    ),
+    select: str = typer.Option("*", "--select", help="One sync selector passed to drt run."),
+    image: str = typer.Option(
+        "YOUR_REGISTRY/drt-sync:latest", "--image", help="Container image for the CronJob."
+    ),
+    secret_name: str = typer.Option(
+        "drt-secrets", "--secret-name", help="Kubernetes Secret containing runtime env vars."
+    ),
+    output: Path = typer.Option(
+        _DEFAULT_K8S_OUTPUT, "--output", "-o", help="CronJob manifest path to write."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the manifest instead of writing it."
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing manifest."),
+) -> None:
+    """Scaffold a hardened Kubernetes CronJob for this project's syncs."""
+    project_dir = _require_project()
+    _validate_schedule(schedule)
+    _validate_select(select)
+    secrets, _, _ = _project_details(project_dir, None)
+    content = _render_k8s_cronjob(schedule, select, image, secret_name, secrets)
+
+    if dry_run:
+        typer.echo(content)
+        return
+
+    _check_outputs([output], force)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(content, encoding="utf-8")
+    console.print(f"[green]✓ Wrote {output}[/green]")
+    console.print("\n[bold]Next steps:[/bold]")
+    console.print(f"  1. Build and push {image}, with this project and its connector extras.")
+    if secrets:
+        console.print(
+            f"  2. Create Kubernetes Secret {secret_name} with these keys (values are not "
+            "written to the manifest):"
+        )
+        for name in secrets:
+            console.print(f"       {name}")
+    else:
+        console.print("  2. No runtime environment secrets were found in the project YAML.")
+    console.print(f"  3. Review and apply it: kubectl apply -f {output}")
+    console.print("     Use durable remote state; emptyDir state disappears with each Job pod.")
+
+
 @deploy_app.command(name="github-actions")
 def deploy_github_actions(
     schedule: str = typer.Option(
@@ -475,29 +841,16 @@ def deploy_github_actions(
     force: bool = typer.Option(False, "--force", help="Overwrite an existing workflow file."),
 ) -> None:
     """Scaffold a GitHub Actions workflow that runs this project's syncs."""
-    project_dir = Path(".")
-    if not (project_dir / "drt_project.yml").exists():
-        print_error(
-            "No drt_project.yml found in the current directory. "
-            "Run this from your drt project root (or `drt init` first)."
-        )
-        raise typer.Exit(code=1)
-
-    if schedule is not None and len(schedule.split()) != 5:
-        print_error(
-            f'"{schedule}" does not look like a 5-field cron expression (e.g. "40 3 * * *").'
-        )
-        raise typer.Exit(code=1)
-
-    envs, types, has_profiles = _scan_project(project_dir)
-    inferred_extras = ",".join(sorted({_TYPE_TO_EXTRA[t] for t in types if t in _TYPE_TO_EXTRA}))
-    effective_extras = extras if extras is not None else inferred_extras
-    secrets = sorted(envs)
+    project_dir = _require_project()
+    if schedule is not None:
+        _validate_schedule(schedule)
+    _validate_select(select)
+    secrets, effective_extras, has_profiles = _project_details(project_dir, extras)
 
     if with_plan:
         _scaffold_plan_loop(
             effective_extras,
-            sorted(envs | {_PLAN_KEY_SECRET}),
+            sorted(set(secrets) | {_PLAN_KEY_SECRET}),
             has_profiles,
             redact_keys,
             max_age,

@@ -100,6 +100,8 @@ UNMAPPED_COMMANDS: dict[str, str] = {
     "mcp run": "starts the MCP server itself",
     "clean": "deletes local artifacts",
     "deploy github-actions": "writes workflow files into the repo",
+    "deploy cloud-run-job": "writes container and Google Cloud scaffold files into the repo",
+    "deploy k8s-cronjob": "writes a Kubernetes manifest into the repo",
     "cloud push": "drt Cloud stub, not yet a shipped capability",
     "cloud status": "drt Cloud stub, not yet a shipped capability",
     "config set": "mutates local telemetry config",
