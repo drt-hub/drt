@@ -17,6 +17,7 @@ from drt.destinations.clickhouse import ClickHouseDestination
 from drt.destinations.databricks import DatabricksDestination
 from drt.destinations.gcs import GCSDestination
 from drt.destinations.mysql import MySQLDestination
+from drt.destinations.pipedrive import PipedriveDestination
 from drt.destinations.postgres import PostgresDestination
 from drt.destinations.s3 import S3Destination
 from drt.destinations.snowflake import SnowflakeDestination
@@ -109,6 +110,24 @@ def test_sqs_rejects_advanced_modes_before_extracting(mode: str, tmp_path: Path)
     )
     with pytest.raises(ValueError, match=rf"sync\.mode: {mode} is not supported by SQSDestination"):
         run_sync(sync, source, SQSDestination(), _profile(), tmp_path)
+    assert source.extract_called is False
+
+
+@pytest.mark.parametrize("mode", ["replace", "mirror"])
+def test_pipedrive_rejects_advanced_modes_before_extracting(mode: str, tmp_path: Path) -> None:
+    source = _CountingSource()
+    sync = SyncConfig.model_validate(
+        {
+            "name": "people_to_pipedrive",
+            "model": "SELECT 1 AS id",
+            "destination": {"type": "pipedrive"},
+            "sync": {"mode": mode},
+        }
+    )
+    with pytest.raises(
+        ValueError, match=rf"sync\.mode: {mode} is not supported by PipedriveDestination"
+    ):
+        run_sync(sync, source, PipedriveDestination(), _profile(), tmp_path)
     assert source.extract_called is False
 
 

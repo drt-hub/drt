@@ -20,6 +20,7 @@ from drt.destinations.meta_conversions import MetaConversionsDestination
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.notion import NotionDestination
 from drt.destinations.parquet import ParquetDestination
+from drt.destinations.pipedrive import PipedriveDestination
 from drt.destinations.postgres import PostgresDestination
 from drt.destinations.rest_api import RestApiDestination
 from drt.destinations.slack import SlackDestination
@@ -41,6 +42,7 @@ ALL_DESTINATIONS = [
     MySQLDestination,
     NotionDestination,
     ParquetDestination,
+    PipedriveDestination,
     PostgresDestination,
     RestApiDestination,
     SlackDestination,
@@ -68,6 +70,7 @@ NON_CONNECTION_TESTABLE_DESTINATIONS = [
     MetaConversionsDestination,
     NotionDestination,
     ParquetDestination,
+    PipedriveDestination,
     RestApiDestination,
     SlackDestination,
     SQSDestination,
