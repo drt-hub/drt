@@ -419,3 +419,43 @@ def test_the_default_slack_message_says_stale_not_failed(project: Path) -> None:
 
     [(targets, _context)] = [call.args for call in sent.call_args_list]
     assert "stale" in targets[0].message and "failed" not in targets[0].message
+
+
+def test_a_sync_with_only_dry_run_history_is_never_run(tmp_path: Path) -> None:
+    mgr = HistoryManager(tmp_path)
+    dry = _entry("orders", 1)
+    dry.dry_run = True
+    mgr.append(dry)
+
+    [verdict] = evaluate_freshness([_sync("orders", never_run="warn")], mgr, {}, NOW)
+
+    assert (verdict.state, verdict.severity) == ("never_run", "warn")
+
+
+def test_a_newer_successful_state_beats_an_older_history_success(tmp_path: Path) -> None:
+    """History appends are best-effort and can lag (or history can be switched off)."""
+    mgr = HistoryManager(tmp_path)
+    mgr.append(_entry("orders", 25))
+    states = {
+        "orders": SimpleNamespace(
+            status="success", last_run_at=(NOW - timedelta(hours=1)).isoformat()
+        )
+    }
+
+    [verdict] = evaluate_freshness([_sync("orders")], mgr, states, NOW)
+
+    assert verdict.state == "fresh" and verdict.age_seconds == 3600
+
+
+def test_an_older_state_success_does_not_override_a_newer_history_success(tmp_path: Path) -> None:
+    mgr = HistoryManager(tmp_path)
+    mgr.append(_entry("orders", 1))
+    states = {
+        "orders": SimpleNamespace(
+            status="success", last_run_at=(NOW - timedelta(hours=30)).isoformat()
+        )
+    }
+
+    [verdict] = evaluate_freshness([_sync("orders")], mgr, states, NOW)
+
+    assert verdict.state == "fresh" and verdict.age_seconds == 3600

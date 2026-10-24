@@ -15,9 +15,10 @@ Design rules, each closing a way a watchdog could go quietly green:
 * A sync that has run but has no success in the inspected window is **stale**, not
   ``never_run``: ``never_run`` means there is no run on record at all.
 * A last success in the future (clock skew) is an error, never "fresh".
-* When history holds no success at all (e.g. history is disabled) the sync's stored
-  state is used; that records the run's *start* time, so ``max_age`` should exceed
-  the run's duration in that setup.
+* The sync's stored state also counts, and the newer of its success and the newest
+  history success wins (history is best-effort and can lag or be switched off). State
+  records the run's *start* time, so ``max_age`` should exceed the run's duration
+  when history is disabled.
 
 Known limit: a run interrupted gracefully (SIGTERM) after delivering part of the
 data is recorded with status ``success`` and cannot be told apart here.
@@ -96,16 +97,22 @@ def _last_success(sync_name: str, history: Any, stored: Any) -> tuple[datetime |
     best: datetime | None = None
     if history is not None:
         for entry in history.read(sync_name, limit=_HISTORY_WINDOW):
+            if getattr(entry, "dry_run", False):
+                continue  # a dry run is not a run: it neither resets the clock nor proves one ran
             seen_run = True
-            if entry.status != "success" or getattr(entry, "dry_run", False):
+            if entry.status != "success":
                 continue
             when = _parse_time(entry.completed_at) or _parse_time(entry.started_at)
             if when is not None and (best is None or when > best):
                 best = when
-    if best is None and stored is not None:
+    if stored is not None:
         seen_run = True
         if stored.status == "success":
-            best = _parse_time(stored.last_run_at)
+            # The stored state can be newer than history (a best-effort history append
+            # failed, or history was switched off): trust whichever success is newer.
+            when = _parse_time(stored.last_run_at)
+            if when is not None and (best is None or when > best):
+                best = when
     return best, seen_run
 
 

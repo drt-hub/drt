@@ -791,7 +791,7 @@ alerts:
     - { type: webhook, url_env: PAGERDUTY_URL }   # webhook covers PagerDuty etc.
   on_stale:                        # sync-level freshness (#1224) — evaluated by `drt status --check`
     max_age: 6h                    # age of the last successful run (30m, 6h, 2d, 1w)
-    never_run: warn                # warn | error
+    never_run: warn                # warn | error — no run on record at all
     channels: []                   # used by `drt status --check --notify`
   on_degraded:                     # partial degradation (#784) — thresholds on post-sync metrics
     channels:                      # same channel types as on_failure; empty => JSON-only (CI)

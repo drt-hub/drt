@@ -830,7 +830,7 @@ class OnStaleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_age: str  # "6h", "30m", "2d", "1w" or "6 hours"
-    never_run: Literal["warn", "error"] = "warn"  # a sync with no successful run yet
+    never_run: Literal["warn", "error"] = "warn"  # a sync with no run on record at all
     channels: list[AlertItem] = Field(default_factory=list)
 
     # A field validator (not an after-model one) so a validation error carries only

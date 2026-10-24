@@ -170,7 +170,7 @@ and file ones:
 alerts:
   on_stale:
     max_age: 6h              # 30m, 6h, 2d, 1w (or "6 hours"); age of the last *successful* run
-    never_run: warn          # warn | error — a sync with no successful run on record
+    never_run: warn          # warn | error — a sync with no run on record at all
     channels:                # same Slack/webhook items as on_failure; used with --notify
       - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL, message: "drt sync `{sync_name}` is stale: {error}" }
 ```
