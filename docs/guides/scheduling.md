@@ -47,9 +47,22 @@ The command writes:
   command for the UTC cron schedule.
 
 By default the image installs the latest `drt-core`, like
-`deploy github-actions`. For reproducible builds pass
-`--drt-version 1.2.1` and the Dockerfile installs `drt-core[...]==1.2.1`
-instead (re-run the command with `--force` after you upgrade drt).
+`deploy github-actions`. Pass `--drt-version 1.2.1` to pin the Dockerfile to
+`drt-core[...]==1.2.1` (re-run the command with `--force` after you upgrade
+drt). That pins drt only: the `python:3.12-slim` base tag and drt's own
+dependencies still float, so it narrows rather than eliminates build drift.
+
+The Dockerfile copies only `drt_project.yml`, `syncs/` and (if present)
+`profiles.yml`; it never copies the whole project, so `.env`, `.drt/` and local
+state do not end up in the image. `profiles.yml` is copied as-is, so it must hold
+`*_env` references, not literal secrets. Build from the project root:
+`docker build -f deploy/cloud-run-job/Dockerfile .`. The inferred extras include
+the storage extra of a `state.backend: gcs|s3`.
+
+Scaffolds accept a plain `--select` (name, glob, `tag:`, `destination:`). The
+`state:modified` / `state:new` selectors need a baseline manifest through
+`drt run --state`, which a scheduled job does not carry, so they are refused.
+Output paths must stay inside the project and must not pass through a symlink.
 
 Replace the project, region, repository, image, and service-account
 placeholders before applying it. Create the named Secret Manager secrets
@@ -62,6 +75,9 @@ Cloud Run tasks are ephemeral. Incremental syncs must use a durable
 store.
 
 ## Kubernetes CronJob
+
+> The manifest sets `spec.timeZone` (UTC), which Kubernetes supports from 1.27 (beta in 1.25–1.26).
+> On an older cluster, delete that line and express the schedule in the controller's time zone.
 
 ```bash
 drt deploy k8s-cronjob \

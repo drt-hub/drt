@@ -13,6 +13,7 @@ in a fresh checkout where none of the runtime env vars are set yet.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,8 @@ _TYPE_TO_EXTRA: dict[str, str] = {
 }
 
 _ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_PROFILE_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 
 _DEFAULT_OUTPUT = Path(".github/workflows/drt-sync.yml")
 _DEFAULT_PLAN_OUTPUT = Path(".github/workflows/drt-plan.yml")
@@ -69,7 +72,6 @@ _CRON_FIELD = r"[A-Za-z0-9*/,-]+"
 _CRON_EXPRESSION = re.compile(rf"{_CRON_FIELD}(?: {_CRON_FIELD}){{4}}")
 _SELECT_PATTERN = re.compile(r"[A-Za-z0-9_./:*?\[\]-]+")
 _SELECT_METHODS = {"tag", "destination"}
-_STATE_SELECTORS = {"state:modified", "state:new"}
 _EXTRAS = re.compile(r"[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*")
 # A PEP 440 release version (1.2.1, 1.3.0rc1, 1.2.1.post1); nothing shell- or pip-special.
 _DRT_VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc|\.post|\.dev)[0-9]+)?")
@@ -79,7 +81,12 @@ def _collect_env_refs(node: Any, envs: set[str]) -> None:
     """Recursively collect the *values* of ``*_env`` keys (env var names)."""
     if isinstance(node, dict):
         for key, value in node.items():
-            if isinstance(key, str) and key.endswith("_env") and isinstance(value, str):
+            if (
+                isinstance(key, str)
+                and key.endswith("_env")
+                and isinstance(value, str)
+                and _ENV_NAME.fullmatch(value)  # a name only: it lands in generated YAML/shell
+            ):
                 envs.add(value)
             _collect_env_refs(value, envs)
     elif isinstance(node, list):
@@ -112,7 +119,16 @@ def _scan_project(project_dir: Path) -> tuple[set[str], set[str], bool]:
 
     project_file = project_dir / "drt_project.yml"
     if project_file.exists():
-        texts.append(project_file.read_text(encoding="utf-8"))
+        project_text = project_file.read_text(encoding="utf-8")
+        texts.append(project_text)
+        try:
+            project_data = yaml.safe_load(project_text)
+        except yaml.YAMLError:
+            project_data = None
+        state = project_data.get("state") if isinstance(project_data, dict) else None
+        backend = state.get("backend") if isinstance(state, dict) else None
+        if backend in {"gcs", "s3"}:
+            types.add(backend)  # the remote state backend needs its storage extra too
 
     # drt-action stages a repo-committed profiles.yml (its `profiles-file`
     # input, default "profiles.yml") to ~/.drt — scan it for the source
@@ -142,12 +158,49 @@ def _scan_project(project_dir: Path) -> tuple[set[str], set[str], bool]:
     return envs, types, has_profiles
 
 
+_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+_CRON_NAMES = {
+    **{m: i for i, m in enumerate(("JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC").split(), 1)},
+    **{d: i for i, d in enumerate(("SUN MON TUE WED THU FRI SAT").split())},
+}
+
+
+def _cron_field_is_valid(field: str, low: int, high: int) -> bool:
+    for part in field.split(","):
+        base, _, step = part.partition("/")
+        if step and (not step.isdigit() or int(step) < 1):
+            return False
+        if base == "*":
+            continue
+        bounds = base.split("-")
+        if len(bounds) > 2:
+            return False
+        numbers: list[int] = []
+        for token in bounds:
+            value = int(token) if token.isdigit() else _CRON_NAMES.get(token.upper())
+            if value is None:
+                return False
+            numbers.append(value)
+        if any(not low <= n <= high for n in numbers):
+            return False
+        if len(numbers) == 2 and numbers[0] > numbers[1]:
+            return False
+    return True
+
+
 def _validate_schedule(schedule: str) -> None:
-    """Accept a portable five-field cron expression safe to embed in artifacts."""
+    """Accept a valid five-field cron expression that is safe to embed in artifacts."""
     if not _CRON_EXPRESSION.fullmatch(schedule):
         print_error(
             f'"{schedule}" does not look like a safe 5-field cron expression '
             '(e.g. "40 3 * * *"). Use letters, digits, *, /, comma, and hyphen only.'
+        )
+        raise typer.Exit(code=1)
+    fields = schedule.split(" ")
+    if not all(_cron_field_is_valid(f, lo, hi) for f, (lo, hi) in zip(fields, _CRON_RANGES)):
+        print_error(
+            f'"{schedule}" is not a valid cron expression (minute 0-59, hour 0-23, '
+            "day 1-31, month 1-12 or JAN-DEC, weekday 0-7 or SUN-SAT)."
         )
         raise typer.Exit(code=1)
 
@@ -159,7 +212,7 @@ def _validate_select(select: str) -> None:
     whitespace, and control characters as well keeps regenerate comments and
     the Cloud Scheduler shell artifact safe by construction.
     """
-    if select in {"*", "all"} | _STATE_SELECTORS:
+    if select in {"*", "all"}:
         return
 
     method: str | None = None
@@ -173,7 +226,9 @@ def _validate_select(select: str) -> None:
         methods = ", ".join(f"{name}:<pattern>" for name in sorted(_SELECT_METHODS))
         print_error(
             f'--select "{select}" is not a safe selector. Use *, all, a sync name/glob, '
-            f"{methods}, state:modified, or state:new; quotes and whitespace are not allowed."
+            f"{methods}; quotes and whitespace are not allowed. "
+            "(`state:modified` / `state:new` need a baseline manifest via `drt run --state`, "
+            "which a scheduled scaffold does not carry.)"
         )
         raise typer.Exit(code=1)
 
@@ -219,8 +274,41 @@ def _yaml_artifact(command: str, document: dict[str, Any]) -> str:
     return f"{header}\n{body}"
 
 
+def _check_target_is_safe(path: Path, project_dir: Path = Path(".")) -> None:
+    """Refuse a target outside the project or reached through a symlink.
+
+    ``Path.exists()`` and ``write_text()`` both follow symlinks, so a symlinked
+    scaffold directory or file would redirect (or, with ``--force``, overwrite)
+    something outside the repository. Checked lexically from the project root.
+    """
+    root = Path(os.path.abspath(project_dir))
+    target = Path(os.path.abspath(path))
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        print_error(f"{path} is outside the project directory; refusing to write there.")
+        raise typer.Exit(code=1) from None
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            print_error(f"{current} is a symlink; refusing to write through it.")
+            raise typer.Exit(code=1)
+
+
+def _write_scaffold_file(path: Path, content: str) -> None:
+    """Create/truncate ``path`` without following a symlink at the final component."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
 def _check_outputs(paths: list[Path], force: bool) -> None:
     """Refuse the whole scaffold before writing any of several files."""
+    for path in paths:
+        _check_target_is_safe(path)
     for path in paths:
         if path.exists() and not force:
             print_error(f"{path} already exists. Re-run with --force to overwrite.")
@@ -529,25 +617,32 @@ def _render_dockerfile(extras: str, has_profiles: bool, drt_version: str | None 
     spec = f"drt-core[{extras}]" if extras else "drt-core"
     if drt_version:
         spec += f"=={drt_version}"
-    profile_note = (
-        "# profiles.yml is copied to the non-root user's home below."
+    profile_lines = (
+        [
+            "# profiles.yml is copied as-is: it must hold *_env references, never literal secrets.",
+            "COPY profiles.yml /home/drt/.drt/profiles.yml",
+        ]
         if has_profiles
-        else "# Add profiles.yml (with *_env references, never values) before building."
+        else [
+            "# No profiles.yml was found. Add one (with *_env references, never values) and a",
+            "# `COPY profiles.yml /home/drt/.drt/profiles.yml` line before building.",
+        ]
     )
     return "\n".join(
         [
             "# Generated by `drt deploy cloud-run-job`.",
             "# Regenerate with the same command plus `--force`.",
+            "# Build from the project root: docker build -f deploy/cloud-run-job/Dockerfile .",
             "FROM python:3.12-slim",
             "",
             "WORKDIR /app",
             f'RUN python -m pip install --no-cache-dir "{spec}"',
-            "COPY . /app",
-            profile_note,
+            "# Only the project definition is copied. Never `COPY . /app`: that would bake",
+            "# .env, .drt/ (local state, secrets.toml) and any inline credentials into the image.",
+            "COPY drt_project.yml /app/drt_project.yml",
+            "COPY syncs /app/syncs",
+            *profile_lines,
             "RUN mkdir -p /home/drt/.drt /app/.drt /app/target \\",
-            "    && if [ -f profiles.yml ]; then \\",
-            "         cp profiles.yml /home/drt/.drt/profiles.yml; \\",
-            "       fi \\",
             "    && chown -R 65532:65532 /home/drt /app/.drt /app/target",
             "",
             "ENV HOME=/home/drt",
@@ -569,7 +664,8 @@ def _render_cloud_run_job(select: str, secrets: list[str]) -> str:
         container["env"] = [
             {
                 "name": name,
-                "valueFrom": {"secretKeyRef": {"key": name, "name": "latest"}},
+                # Cloud Run: `name` is the Secret Manager secret, `key` its version.
+                "valueFrom": {"secretKeyRef": {"name": name, "key": "latest"}},
             }
             for name in secrets
         ]
@@ -740,9 +836,8 @@ def deploy_cloud_run_job(
         return
 
     _check_outputs([path for path, _ in outputs], force)
-    output_dir.mkdir(parents=True, exist_ok=True)
     for path, content in outputs:
-        path.write_text(content, encoding="utf-8")
+        _write_scaffold_file(path, content)
         console.print(f"[green]✓ Wrote {path}[/green]")
     (output_dir / "scheduler.sh").chmod(0o755)
 
@@ -795,8 +890,7 @@ def deploy_k8s_cronjob(
         return
 
     _check_outputs([output], force)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(content, encoding="utf-8")
+    _write_scaffold_file(output, content)
     console.print(f"[green]✓ Wrote {output}[/green]")
     console.print("\n[bold]Next steps:[/bold]")
     console.print(f"  1. Build and push {image}, with this project and its connector extras.")
@@ -868,6 +962,9 @@ def deploy_github_actions(
     if schedule is not None:
         _validate_schedule(schedule)
     _validate_select(select)
+    if profile and not _PROFILE_NAME.fullmatch(profile):
+        print_error(f'--profile "{profile}" must be a profile name (letters, digits, _ . -).')
+        raise typer.Exit(code=1)
     secrets, effective_extras, has_profiles = _project_details(project_dir, extras)
 
     if with_plan:
@@ -890,12 +987,8 @@ def deploy_github_actions(
         console.print(content)
         return
 
-    if output.exists() and not force:
-        print_error(f"{output} already exists. Re-run with --force to overwrite.")
-        raise typer.Exit(code=1)
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(content, encoding="utf-8")
+    _check_outputs([output], force)
+    _write_scaffold_file(output, content)
 
     console.print(f"[green]✓ Wrote {output}[/green]")
     console.print("\n[bold]Next steps:[/bold]")
@@ -946,13 +1039,9 @@ def _scaffold_plan_loop(
         typer.echo(f"# {plan_output}\n{plan_text}\n# {apply_output}\n{apply_text}")
         return
 
-    for path in (plan_output, apply_output):
-        if path.exists() and not force:
-            print_error(f"{path} already exists. Re-run with --force to overwrite.")
-            raise typer.Exit(code=1)
+    _check_outputs([plan_output, apply_output], force)
     for path, text in ((plan_output, plan_text), (apply_output, apply_text)):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        _write_scaffold_file(path, text)
         console.print(f"[green]✓ Wrote {path}[/green]")
 
     console.print("\n[bold]Next steps:[/bold]")
