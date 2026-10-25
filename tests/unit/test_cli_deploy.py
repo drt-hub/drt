@@ -877,7 +877,7 @@ def test_a_failure_while_staging_leaves_every_existing_file_untouched(
     real_open = os.open
     calls = {"n": 0}
 
-    def flaky_open(path: Any, flags: int, mode: int = 0o777) -> int:
+    def flaky_open(path: Any, flags: int, mode: int = 0o600) -> int:
         calls["n"] += 1
         if calls["n"] == 3:  # the third staged file cannot be created
             raise PermissionError(13, "Permission denied")
