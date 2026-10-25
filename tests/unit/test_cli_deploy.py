@@ -782,3 +782,133 @@ def test_cron_expressions_must_be_valid_not_just_safe(project: Path, schedule: s
 )
 def test_ordinary_cron_expressions_still_pass(project: Path, schedule: str) -> None:
     assert runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", schedule]).exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Second adversarial round (#1291)
+# ---------------------------------------------------------------------------
+
+
+def test_project_file_env_references_become_runtime_secrets(project: Path) -> None:
+    (project / "drt_project.yml").write_text(
+        "name: demo\nprofile: default\nstate:\n  backend: s3\n  bucket: b\n"
+        "  aws_secret_access_key_env: DRT_STATE_SECRET\n"
+    )
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    assert result.exit_code == 0, result.output
+    assert "DRT_STATE_SECRET" in (project / "deploy/cloud-run-job/job.yaml").read_text()
+    assert "s3" in (project / "deploy/cloud-run-job/Dockerfile").read_text()
+
+
+def test_literal_credentials_in_project_yaml_refuse_the_image_build(project: Path) -> None:
+    secret = "hunter2-must-not-be-printed"
+    (project / "syncs" / "leaky.yml").write_text(
+        "name: leaky\nmodel: ref('x')\ndestination:\n  type: hubspot\n  object_type: contacts\n"
+        f"  token: {secret}\nsync:\n  mode: full\n"
+    )
+
+    refused = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+    allowed = runner.invoke(
+        app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--allow-inline-secrets"]
+    )
+
+    assert refused.exit_code == 1 and "leaky.yml: destination.token" in refused.output
+    assert secret not in refused.output  # the location is named, never the value
+    assert not (project / "deploy/cloud-run-job/Dockerfile").exists() or allowed.exit_code == 0
+    assert allowed.exit_code == 0
+
+
+def test_env_references_and_provider_uris_are_not_flagged_as_inline_secrets(project: Path) -> None:
+    (project / "syncs" / "ok.yml").write_text(
+        "name: ok\nmodel: ref('x')\ndestination:\n  type: hubspot\n  object_type: contacts\n"
+        "  token: gcp-sm://projects/p/secrets/s\nsync:\n  mode: full\n"
+    )
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    assert result.exit_code == 0, result.output
+    assert "gcp-secrets" in (project / "deploy/cloud-run-job/Dockerfile").read_text()
+
+
+def test_a_hard_linked_scaffold_file_is_not_overwritten(
+    project: Path, tmp_path_factory: Any
+) -> None:
+    import os
+
+    outside = tmp_path_factory.mktemp("shared") / "shared.txt"
+    outside.write_text("keep me")
+    target = project / ".github" / "workflows" / "drt-sync.yml"
+    target.parent.mkdir(parents=True)
+    os.link(outside, target)
+
+    result = runner.invoke(app, ["deploy", "github-actions", "--force"])
+
+    assert result.exit_code == 1 and "hard link" in result.output
+    assert outside.read_text() == "keep me"
+
+
+def test_without_force_an_existing_file_is_never_truncated(project: Path) -> None:
+    target = project / ".github" / "workflows" / "drt-sync.yml"
+    target.parent.mkdir(parents=True)
+    target.write_text("mine")
+
+    result = runner.invoke(app, ["deploy", "github-actions"])
+
+    assert result.exit_code == 1 and target.read_text() == "mine"
+
+
+def test_a_directory_in_the_way_fails_before_anything_is_overwritten(project: Path) -> None:
+    root = project / "deploy" / "cloud-run-job"
+    root.mkdir(parents=True)
+    (root / "Dockerfile").write_text("old dockerfile")
+    (root / "job.yaml").mkdir()
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--force"])
+
+    assert result.exit_code == 1 and "directory" in result.output
+    assert (root / "Dockerfile").read_text() == "old dockerfile"
+
+
+def test_scheduler_script_is_executable(project: Path) -> None:
+    runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    mode = (project / "deploy/cloud-run-job/scheduler.sh").stat().st_mode & 0o777
+    assert mode == 0o755
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    ["*/ * * * *", "JAN * * * *", "* * * MON *", "* * * * JAN", "0 0 1 MON *", "*/0 * * * *"],
+)
+def test_cron_names_and_steps_are_only_valid_where_cron_allows_them(
+    project: Path, schedule: str
+) -> None:
+    assert runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", schedule]).exit_code == 1
+
+
+@pytest.mark.parametrize("image", ["", "my image", 'x"y', "img\n:latest"])
+def test_a_bad_k8s_image_reference_is_refused(project: Path, image: str) -> None:
+    result = runner.invoke(
+        app, ["deploy", "k8s-cronjob", "--schedule", "0 6 * * *", "--image", image]
+    )
+
+    assert result.exit_code == 1
+
+
+@pytest.mark.parametrize("name", ["Has_Upper", "-leading", "trailing-", "a b", "x" * 254])
+def test_a_non_dns_secret_name_is_refused(project: Path, name: str) -> None:
+    result = runner.invoke(
+        app, ["deploy", "k8s-cronjob", "--schedule", "0 6 * * *", "--secret-name", name]
+    )
+
+    assert result.exit_code == 1
+
+
+def test_a_missing_profiles_yml_is_called_out_in_the_next_steps(project: Path) -> None:
+    (project / "profiles.yml").unlink()
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    assert result.exit_code == 0 and "No profiles.yml was found" in result.output

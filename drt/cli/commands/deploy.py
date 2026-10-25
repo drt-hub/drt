@@ -56,9 +56,14 @@ _TYPE_TO_EXTRA: dict[str, str] = {
     "sqs": "sqs",
 }
 
+# Secret-provider URIs (#782) in project YAML need their provider SDK in the image.
+_URI_EXTRAS = {"gcp-sm": "gcp-secrets", "aws-sm": "aws-secrets", "vault": "vault"}
+_SECRET_URI = re.compile(r"\b(gcp-sm|aws-sm|vault)://")
 _ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9_.-]+")
+_IMAGE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
+_K8S_NAME = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
 
 _DEFAULT_OUTPUT = Path(".github/workflows/drt-sync.yml")
 _DEFAULT_PLAN_OUTPUT = Path(".github/workflows/drt-plan.yml")
@@ -125,6 +130,8 @@ def _scan_project(project_dir: Path) -> tuple[set[str], set[str], bool]:
             project_data = yaml.safe_load(project_text)
         except yaml.YAMLError:
             project_data = None
+        if isinstance(project_data, dict):
+            _collect_env_refs(project_data, envs)  # e.g. state credentials (*_env)
         state = project_data.get("state") if isinstance(project_data, dict) else None
         backend = state.get("backend") if isinstance(state, dict) else None
         if backend in {"gcs", "s3"}:
@@ -154,21 +161,24 @@ def _scan_project(project_dir: Path) -> tuple[set[str], set[str], bool]:
     # ${VAR} placeholders anywhere in the raw YAML are runtime env vars too.
     for text in texts:
         envs.update(_ENV_PLACEHOLDER.findall(text))
+        types.update(_SECRET_URI.findall(text))  # provider SDKs, mapped by _project_details
 
     return envs, types, has_profiles
 
 
 _CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
-_CRON_NAMES = {
-    **{m: i for i, m in enumerate(("JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC").split(), 1)},
-    **{d: i for i, d in enumerate(("SUN MON TUE WED THU FRI SAT").split())},
+_MONTH_NAMES = {
+    m: i for i, m in enumerate(("JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC").split(), 1)
 }
+_WEEKDAY_NAMES = {d: i for i, d in enumerate(("SUN MON TUE WED THU FRI SAT").split())}
+# Names are only valid in the month (4th) and weekday (5th) fields.
+_CRON_FIELD_NAMES: tuple[dict[str, int], ...] = ({}, {}, {}, _MONTH_NAMES, _WEEKDAY_NAMES)
 
 
-def _cron_field_is_valid(field: str, low: int, high: int) -> bool:
+def _cron_field_is_valid(field: str, low: int, high: int, names: dict[str, int]) -> bool:
     for part in field.split(","):
-        base, _, step = part.partition("/")
-        if step and (not step.isdigit() or int(step) < 1):
+        base, slash, step = part.partition("/")
+        if slash and (not step.isdigit() or int(step) < 1):
             return False
         if base == "*":
             continue
@@ -177,7 +187,7 @@ def _cron_field_is_valid(field: str, low: int, high: int) -> bool:
             return False
         numbers: list[int] = []
         for token in bounds:
-            value = int(token) if token.isdigit() else _CRON_NAMES.get(token.upper())
+            value = int(token) if token.isdigit() else names.get(token.upper())
             if value is None:
                 return False
             numbers.append(value)
@@ -186,6 +196,54 @@ def _cron_field_is_valid(field: str, low: int, high: int) -> bool:
         if len(numbers) == 2 and numbers[0] > numbers[1]:
             return False
     return True
+
+
+_SECRET_KEY = re.compile(
+    r"(?:^|_)(?:password|passwd|secret|token|api_?key|private_key|access_key|secret_key)$",
+    re.IGNORECASE,
+)
+
+
+def _walk_inline_secrets(node: Any, path: str, found: list[str]) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            here = f"{path}.{key}" if path else str(key)
+            if (
+                isinstance(key, str)
+                and _SECRET_KEY.search(key)
+                and not key.endswith("_env")
+                and isinstance(value, str)
+                and value
+                and "${" not in value
+                and not _SECRET_URI.match(value)
+            ):
+                found.append(here)
+            _walk_inline_secrets(value, here, found)
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            _walk_inline_secrets(item, f"{path}[{index}]", found)
+
+
+def _find_inline_secrets(project_dir: Path) -> list[str]:
+    """``file: key.path`` of every literal credential-looking value (never the value)."""
+    files = [
+        *sorted((project_dir / "syncs").glob("*.yml")),
+        *sorted((project_dir / "syncs").glob("*.yaml")),
+        project_dir / "drt_project.yml",
+        project_dir / "profiles.yml",
+    ]
+    found: list[str] = []
+    for path in files:
+        if not path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue
+        keys: list[str] = []
+        _walk_inline_secrets(data, "", keys)
+        found += [f"{path.relative_to(project_dir)}: {key}" for key in keys]
+    return found
 
 
 def _validate_schedule(schedule: str) -> None:
@@ -197,7 +255,10 @@ def _validate_schedule(schedule: str) -> None:
         )
         raise typer.Exit(code=1)
     fields = schedule.split(" ")
-    if not all(_cron_field_is_valid(f, lo, hi) for f, (lo, hi) in zip(fields, _CRON_RANGES)):
+    if not all(
+        _cron_field_is_valid(f, lo, hi, names)
+        for f, (lo, hi), names in zip(fields, _CRON_RANGES, _CRON_FIELD_NAMES, strict=True)
+    ):
         print_error(
             f'"{schedule}" is not a valid cron expression (minute 0-59, hour 0-23, '
             "day 1-31, month 1-12 or JAN-DEC, weekday 0-7 or SUN-SAT)."
@@ -250,7 +311,12 @@ def _validate_extras(extras: str) -> None:
 def _project_details(project_dir: Path, extras: str | None) -> tuple[list[str], str, bool]:
     """Scan a project and resolve sorted secrets plus its drt-core install spec."""
     envs, types, has_profiles = _scan_project(project_dir)
-    inferred = ",".join(sorted({_TYPE_TO_EXTRA[t] for t in types if t in _TYPE_TO_EXTRA}))
+    inferred = ",".join(
+        sorted(
+            {_TYPE_TO_EXTRA[t] for t in types if t in _TYPE_TO_EXTRA}
+            | {_URI_EXTRAS[t] for t in types if t in _URI_EXTRAS}
+        )
+    )
     effective = extras if extras is not None else inferred
     _validate_extras(effective)
     return sorted(envs), effective, has_profiles
@@ -296,11 +362,36 @@ def _check_target_is_safe(path: Path, project_dir: Path = Path(".")) -> None:
             raise typer.Exit(code=1)
 
 
-def _write_scaffold_file(path: Path, content: str) -> None:
-    """Create/truncate ``path`` without following a symlink at the final component."""
+def _write_scaffold_file(
+    path: Path, content: str, *, force: bool = False, mode: int = 0o644
+) -> None:
+    """Write ``path`` atomically-enough: never through a symlink, never over a hard link.
+
+    Without ``--force`` the file is created exclusively (``O_EXCL``), so a file that
+    appears between the check and the write is not truncated. The mode is applied on
+    the descriptor, not by a later path-based ``chmod``.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o644)
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    # Never O_TRUNC at open: the hard-link check must run before any byte is destroyed.
+    flags |= 0 if force else os.O_EXCL
+    try:
+        fd = os.open(path, flags, mode)
+    except FileExistsError:
+        print_error(f"{path} already exists. Re-run with --force to overwrite.")
+        raise typer.Exit(code=1) from None
+    except OSError as exc:  # e.g. ELOOP from O_NOFOLLOW, EISDIR
+        print_error(f"Cannot write {path}: {exc.strerror or exc}.")
+        raise typer.Exit(code=1) from exc
+    try:
+        if os.fstat(fd).st_nlink > 1:  # a hard link would modify a file shared elsewhere
+            os.close(fd)
+            print_error(f"{path} has other hard links; refusing to overwrite it.")
+            raise typer.Exit(code=1)
+        os.fchmod(fd, mode)
+        os.ftruncate(fd, 0)
+    except typer.Exit:
+        raise
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(content)
 
@@ -310,6 +401,9 @@ def _check_outputs(paths: list[Path], force: bool) -> None:
     for path in paths:
         _check_target_is_safe(path)
     for path in paths:
+        if path.is_dir():
+            print_error(f"{path} is a directory; refusing to replace it.")
+            raise typer.Exit(code=1)
         if path.exists() and not force:
             print_error(f"{path} already exists. Re-run with --force to overwrite.")
             raise typer.Exit(code=1)
@@ -815,12 +909,30 @@ def deploy_cloud_run_job(
         False, "--dry-run", help="Print all scaffold files instead of writing them."
     ),
     force: bool = typer.Option(False, "--force", help="Overwrite existing scaffold files."),
+    allow_inline_secrets: bool = typer.Option(
+        False,
+        "--allow-inline-secrets",
+        help=(
+            "Build the image even though project YAML contains literal credentials "
+            "(they would be baked into an image layer). Prefer *_env references."
+        ),
+    ),
 ) -> None:
     """Scaffold a containerized Cloud Run Job and Cloud Scheduler trigger."""
     project_dir = _require_project()
     _validate_schedule(schedule)
     _validate_select(select)
     _validate_drt_version(drt_version)
+    inline = _find_inline_secrets(project_dir)
+    if inline and not allow_inline_secrets:
+        print_error(
+            "The image would bake literal credentials from the project YAML into a layer:\n  "
+            + "\n  ".join(inline[:10])
+            + ("\n  ..." if len(inline) > 10 else "")
+            + "\nMove them to *_env references (or a secret provider URI), or pass "
+            "--allow-inline-secrets to accept that."
+        )
+        raise typer.Exit(code=1)
     secrets, effective_extras, has_profiles = _project_details(project_dir, extras)
 
     outputs = [
@@ -837,9 +949,10 @@ def deploy_cloud_run_job(
 
     _check_outputs([path for path, _ in outputs], force)
     for path, content in outputs:
-        _write_scaffold_file(path, content)
+        _write_scaffold_file(
+            path, content, force=force, mode=0o755 if path.name == "scheduler.sh" else 0o644
+        )
         console.print(f"[green]✓ Wrote {path}[/green]")
-    (output_dir / "scheduler.sh").chmod(0o755)
 
     console.print("\n[bold]Next steps:[/bold]")
     console.print("  1. Replace PROJECT_ID, REGION, REPOSITORY, and service-account placeholders.")
@@ -852,6 +965,11 @@ def deploy_cloud_run_job(
             console.print(f"       {name}")
     else:
         console.print("  2. No runtime environment secrets were found in the project YAML.")
+    if not has_profiles:
+        console.print(
+            "  !  No profiles.yml was found: add one (with *_env references) and the matching "
+            "COPY line in the Dockerfile, or the image cannot connect."
+        )
     console.print("  3. Build and push the image, replace the job, then run scheduler.sh.")
     console.print(
         "     Use a remote state backend for incremental syncs on ephemeral Cloud Run tasks."
@@ -882,6 +1000,12 @@ def deploy_k8s_cronjob(
     project_dir = _require_project()
     _validate_schedule(schedule)
     _validate_select(select)
+    if not _IMAGE_REF.fullmatch(image):
+        print_error(f'--image "{image}" must be a container image reference without whitespace.')
+        raise typer.Exit(code=1)
+    if len(secret_name) > 253 or not _K8S_NAME.fullmatch(secret_name):
+        print_error(f'--secret-name "{secret_name}" must be a valid Kubernetes name (DNS-1123).')
+        raise typer.Exit(code=1)
     secrets, _, _ = _project_details(project_dir, None)
     content = _render_k8s_cronjob(schedule, select, image, secret_name, secrets)
 
@@ -890,7 +1014,7 @@ def deploy_k8s_cronjob(
         return
 
     _check_outputs([output], force)
-    _write_scaffold_file(output, content)
+    _write_scaffold_file(output, content, force=force)
     console.print(f"[green]✓ Wrote {output}[/green]")
     console.print("\n[bold]Next steps:[/bold]")
     console.print(f"  1. Build and push {image}, with this project and its connector extras.")
@@ -988,7 +1112,7 @@ def deploy_github_actions(
         return
 
     _check_outputs([output], force)
-    _write_scaffold_file(output, content)
+    _write_scaffold_file(output, content, force=force)
 
     console.print(f"[green]✓ Wrote {output}[/green]")
     console.print("\n[bold]Next steps:[/bold]")
@@ -1041,7 +1165,7 @@ def _scaffold_plan_loop(
 
     _check_outputs([plan_output, apply_output], force)
     for path, text in ((plan_output, plan_text), (apply_output, apply_text)):
-        _write_scaffold_file(path, text)
+        _write_scaffold_file(path, text, force=force)
         console.print(f"[green]✓ Wrote {path}[/green]")
 
     console.print("\n[bold]Next steps:[/bold]")

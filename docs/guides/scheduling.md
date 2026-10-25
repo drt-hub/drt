@@ -55,14 +55,20 @@ dependencies still float, so it narrows rather than eliminates build drift.
 The Dockerfile copies only `drt_project.yml`, `syncs/` and (if present)
 `profiles.yml`; it never copies the whole project, so `.env`, `.drt/` and local
 state do not end up in the image. `profiles.yml` is copied as-is, so it must hold
-`*_env` references, not literal secrets. Build from the project root:
+`*_env` references, not literal secrets: the command **refuses to scaffold** when
+`syncs/`, `drt_project.yml` or `profiles.yml` contain literal credentials (a
+`password`, `token`, `api_key`... that is not an `*_env` reference, `${VAR}` or a
+`gcp-sm://` / `aws-sm://` / `vault://` URI), naming the location and never the value;
+`--allow-inline-secrets` overrides that knowingly. Project-level `*_env` references
+(for example remote-state credentials) become runtime secrets, and provider URIs add
+`gcp-secrets` / `aws-secrets` / `vault` to the extras. Build from the project root:
 `docker build -f deploy/cloud-run-job/Dockerfile .`. The inferred extras include
 the storage extra of a `state.backend: gcs|s3`.
 
 Scaffolds accept a plain `--select` (name, glob, `tag:`, `destination:`). The
 `state:modified` / `state:new` selectors need a baseline manifest through
 `drt run --state`, which a scheduled job does not carry, so they are refused.
-Output paths must stay inside the project and must not pass through a symlink.
+Output paths must stay inside the project and must not pass through a symlink; files are created exclusively (`O_EXCL`) unless `--force`, and a hard-linked target is never overwritten. Cron expressions are range-checked, and `--image` / `--secret-name` are validated. A concurrent attacker who can swap a parent directory for a symlink between the check and the write is out of scope.
 
 Replace the project, region, repository, image, and service-account
 placeholders before applying it. Create the named Secret Manager secrets
