@@ -810,14 +810,15 @@ def test_literal_credentials_in_project_yaml_refuse_the_image_build(project: Pat
     )
 
     refused = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
-    allowed = runner.invoke(
-        app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--allow-inline-secrets"]
-    )
 
     assert refused.exit_code == 1 and "leaky.yml: destination.token" in refused.output
     assert secret not in refused.output  # the location is named, never the value
-    assert not (project / "deploy/cloud-run-job/Dockerfile").exists() or allowed.exit_code == 0
-    assert allowed.exit_code == 0
+    assert not (project / "deploy").exists()  # a refusal writes nothing at all
+
+    allowed = runner.invoke(
+        app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--allow-inline-secrets"]
+    )
+    assert allowed.exit_code == 0 and (project / "deploy/cloud-run-job/Dockerfile").exists()
 
 
 def test_env_references_and_provider_uris_are_not_flagged_as_inline_secrets(project: Path) -> None:
@@ -832,9 +833,10 @@ def test_env_references_and_provider_uris_are_not_flagged_as_inline_secrets(proj
     assert "gcp-secrets" in (project / "deploy/cloud-run-job/Dockerfile").read_text()
 
 
-def test_a_hard_linked_scaffold_file_is_not_overwritten(
+def test_a_hard_linked_scaffold_file_is_replaced_not_modified(
     project: Path, tmp_path_factory: Any
 ) -> None:
+    """The file is swapped for a fresh one, so the other name of the shared inode is untouched."""
     import os
 
     outside = tmp_path_factory.mktemp("shared") / "shared.txt"
@@ -845,8 +847,89 @@ def test_a_hard_linked_scaffold_file_is_not_overwritten(
 
     result = runner.invoke(app, ["deploy", "github-actions", "--force"])
 
-    assert result.exit_code == 1 and "hard link" in result.output
+    assert result.exit_code == 0, result.output
     assert outside.read_text() == "keep me"
+    assert "drt sync" in target.read_text() and target.stat().st_nlink == 1
+
+
+def test_a_fifo_in_the_way_never_hangs_the_command(project: Path) -> None:
+    import os
+
+    target = project / ".github" / "workflows" / "drt-sync.yml"
+    target.parent.mkdir(parents=True)
+    os.mkfifo(target)
+
+    result = runner.invoke(app, ["deploy", "github-actions", "--force"])
+
+    assert result.exit_code == 0, result.output  # replaced by a regular file, never opened
+    assert target.is_file() and not target.is_fifo()
+
+
+def test_a_failure_while_staging_leaves_every_existing_file_untouched(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    root = project / "deploy" / "cloud-run-job"
+    root.mkdir(parents=True)
+    for name in ("Dockerfile", "job.yaml", "scheduler.sh"):
+        (root / name).write_text(f"old {name}")
+    real_open = os.open
+    calls = {"n": 0}
+
+    def flaky_open(path: Any, flags: int, mode: int = 0o777) -> int:
+        calls["n"] += 1
+        if calls["n"] == 3:  # the third staged file cannot be created
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr("drt.cli.commands.deploy.os.open", flaky_open)
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--force"])
+
+    assert result.exit_code == 1
+    for name in ("Dockerfile", "job.yaml", "scheduler.sh"):
+        assert (root / name).read_text() == f"old {name}"
+    assert not list(root.glob(".*.tmp"))
+
+
+def test_without_force_a_file_that_appears_late_is_not_clobbered(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    target = project / ".github" / "workflows" / "drt-sync.yml"
+    real_link = os.link
+
+    def racing_link(src: Any, dst: Any, **kw: Any) -> None:
+        Path(dst).write_text("appeared after the check")
+        real_link(src, dst, **kw)
+
+    monkeypatch.setattr("drt.cli.commands.deploy.os.link", racing_link)
+
+    result = runner.invoke(app, ["deploy", "github-actions"])
+
+    assert result.exit_code == 1 and target.read_text() == "appeared after the check"
+
+
+def test_an_unwritable_parent_is_a_clean_error_not_a_traceback(project: Path) -> None:
+    import os
+
+    locked = project / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        if os.access(locked, os.W_OK):  # running as root: nothing to prove
+            pytest.skip("directory permissions are not enforced for this user")
+        result = runner.invoke(
+            app,
+            ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--output-dir", "locked/new"],
+        )
+    finally:
+        locked.chmod(0o700)
+
+    assert result.exit_code == 1 and "Cannot create" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_without_force_an_existing_file_is_never_truncated(project: Path) -> None:
@@ -912,3 +995,51 @@ def test_a_missing_profiles_yml_is_called_out_in_the_next_steps(project: Path) -
     result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
 
     assert result.exit_code == 0 and "No profiles.yml was found" in result.output
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "  auth:\n    type: api_key\n    value: sk-live-abc\n",
+        "  headers:\n    Authorization: Bearer abc123\n",
+        "  webhook_url: https://hooks.example.invalid/T000/B000/XXXX\n",
+        "  password: hunter2-${REGION}\n",
+    ],
+)
+def test_more_literal_credential_shapes_are_caught(project: Path, snippet: str) -> None:
+    (project / "syncs" / "leaky.yml").write_text(
+        "name: leaky\nmodel: ref('x')\ndestination:\n  type: rest_api\n  url: https://x.invalid\n"
+        + snippet
+        + "sync:\n  mode: full\n"
+    )
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    assert result.exit_code == 1 and "leaky.yml" in result.output
+
+
+def test_data_fields_named_like_credentials_are_not_flagged(project: Path) -> None:
+    (project / "syncs" / "ok.yml").write_text(
+        "name: ok\nmodel: ref('x')\ndestination:\n  type: rest_api\n  url: https://x.invalid\n"
+        "sync:\n  mode: full\n  mask:\n    token: hash\n"
+    )
+
+    assert runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"]).exit_code == 0
+
+
+@pytest.mark.parametrize("image", ["repo:", "a//b", "img:", "x@", "a:b:c:", "/abs"])
+def test_malformed_image_references_are_refused(project: Path, image: str) -> None:
+    result = runner.invoke(
+        app, ["deploy", "k8s-cronjob", "--schedule", "0 6 * * *", "--image", image]
+    )
+
+    assert result.exit_code == 1
+
+
+@pytest.mark.parametrize("name", ["a" * 64, "ok." + "b" * 64, "a..b"])
+def test_secret_names_obey_the_63_character_label_limit(project: Path, name: str) -> None:
+    result = runner.invoke(
+        app, ["deploy", "k8s-cronjob", "--schedule", "0 6 * * *", "--secret-name", name]
+    )
+
+    assert result.exit_code == 1

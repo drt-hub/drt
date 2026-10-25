@@ -62,8 +62,9 @@ _SECRET_URI = re.compile(r"\b(gcp-sm|aws-sm|vault)://")
 _ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9_.-]+")
-_IMAGE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
-_K8S_NAME = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
+_IMAGE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:[:/@][A-Za-z0-9][A-Za-z0-9._-]*)*")
+# DNS-1123 subdomain: dot-separated labels of at most 63 characters.
+_K8S_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 
 _DEFAULT_OUTPUT = Path(".github/workflows/drt-sync.yml")
 _DEFAULT_PLAN_OUTPUT = Path(".github/workflows/drt-plan.yml")
@@ -199,24 +200,34 @@ def _cron_field_is_valid(field: str, low: int, high: int, names: dict[str, int])
 
 
 _SECRET_KEY = re.compile(
-    r"(?:^|_)(?:password|passwd|secret|token|api_?key|private_key|access_key|secret_key)$",
+    r"(?:^|_|-)(?:password|passwd|secret|token|api_?key|private_key|access_key|secret_key"
+    r"|authorization|webhook_url)$",
     re.IGNORECASE,
 )
+# A value that is only a ${VAR} placeholder is a reference, not a literal.
+_ONLY_PLACEHOLDER = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+# Subtrees that hold data or documentation, not connection credentials.
+_NOT_CREDENTIALS = frozenset({"mask", "unit_tests", "tests", "field_mappings", "description"})
+
+
+def _is_literal_secret(key: str, value: Any, parent: dict[Any, Any]) -> bool:
+    if not isinstance(value, str) or not value or key.endswith("_env"):
+        return False
+    if _ONLY_PLACEHOLDER.fullmatch(value) or _SECRET_URI.match(value):
+        return False
+    if _SECRET_KEY.search(key):
+        return True
+    # `auth: {type: api_key, value: ...}` — the credential sits under a neutral key.
+    return key == "value" and parent.get("type") in {"api_key", "apikey", "header"}
 
 
 def _walk_inline_secrets(node: Any, path: str, found: list[str]) -> None:
     if isinstance(node, dict):
         for key, value in node.items():
             here = f"{path}.{key}" if path else str(key)
-            if (
-                isinstance(key, str)
-                and _SECRET_KEY.search(key)
-                and not key.endswith("_env")
-                and isinstance(value, str)
-                and value
-                and "${" not in value
-                and not _SECRET_URI.match(value)
-            ):
+            if key in _NOT_CREDENTIALS:
+                continue
+            if isinstance(key, str) and _is_literal_secret(key, value, node):
                 found.append(here)
             _walk_inline_secrets(value, here, found)
     elif isinstance(node, list):
@@ -362,38 +373,55 @@ def _check_target_is_safe(path: Path, project_dir: Path = Path(".")) -> None:
             raise typer.Exit(code=1)
 
 
-def _write_scaffold_file(
-    path: Path, content: str, *, force: bool = False, mode: int = 0o640
-) -> None:
-    """Write ``path`` atomically-enough: never through a symlink, never over a hard link.
+def _write_scaffold_files(items: list[tuple[Path, str, int]], *, force: bool) -> None:
+    """Write several scaffold files all-or-nothing, without ever opening an existing target.
 
-    Without ``--force`` the file is created exclusively (``O_EXCL``), so a file that
-    appears between the check and the write is not truncated. The mode is applied on
-    the descriptor, not by a later path-based ``chmod``.
+    Each file is written to a private temporary name in its own directory
+    (``O_EXCL | O_NOFOLLOW``, mode set on the descriptor) and only then moved into
+    place. That has three consequences the previous in-place write lacked:
+
+    * an existing FIFO, hard link or read-only file is *replaced*, never opened, so a
+      FIFO cannot hang the command and a hard-linked file elsewhere is never modified;
+    * any failure while staging removes the temporaries and leaves every existing file
+      exactly as it was (no half-overwritten scaffold);
+    * without ``--force`` the final step is ``os.link``, which fails if the target
+      appeared in the meantime, so a concurrently created file is never clobbered.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    # Never O_TRUNC at open: the hard-link check must run before any byte is destroyed.
-    flags |= 0 if force else os.O_EXCL
+    staged: list[tuple[Path, Path]] = []
     try:
-        fd = os.open(path, flags, mode)
-    except FileExistsError:
-        print_error(f"{path} already exists. Re-run with --force to overwrite.")
-        raise typer.Exit(code=1) from None
-    except OSError as exc:  # e.g. ELOOP from O_NOFOLLOW, EISDIR
-        print_error(f"Cannot write {path}: {exc.strerror or exc}.")
-        raise typer.Exit(code=1) from exc
-    try:
-        if os.fstat(fd).st_nlink > 1:  # a hard link would modify a file shared elsewhere
-            os.close(fd)
-            print_error(f"{path} has other hard links; refusing to overwrite it.")
-            raise typer.Exit(code=1)
-        os.fchmod(fd, mode)
-        os.ftruncate(fd, 0)
-    except typer.Exit:
-        raise
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(content)
+        for target, content, mode in items:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                print_error(f"Cannot create {target.parent}: {exc.strerror or exc}.")
+                raise typer.Exit(code=1) from exc
+            tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(tmp, flags, mode)
+            except OSError as exc:
+                print_error(f"Cannot write {target}: {exc.strerror or exc}.")
+                raise typer.Exit(code=1) from exc
+            staged.append((tmp, target))
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), mode)
+                handle.write(content)
+        for tmp, target in staged:
+            try:
+                if force:
+                    os.replace(tmp, target)
+                else:
+                    os.link(tmp, target)  # fails if the target now exists
+                    tmp.unlink()
+            except FileExistsError:
+                print_error(f"{target} already exists. Re-run with --force to overwrite.")
+                raise typer.Exit(code=1) from None
+            except OSError as exc:
+                print_error(f"Cannot write {target}: {exc.strerror or exc}.")
+                raise typer.Exit(code=1) from exc
+    finally:
+        for tmp, _ in staged:
+            tmp.unlink(missing_ok=True)
 
 
 def _check_outputs(paths: list[Path], force: bool) -> None:
@@ -948,10 +976,14 @@ def deploy_cloud_run_job(
         return
 
     _check_outputs([path for path, _ in outputs], force)
-    for path, content in outputs:
-        _write_scaffold_file(
-            path, content, force=force, mode=0o750 if path.name == "scheduler.sh" else 0o640
-        )
+    _write_scaffold_files(
+        [
+            (path, content, 0o750 if path.name == "scheduler.sh" else 0o640)
+            for path, content in outputs
+        ],
+        force=force,
+    )
+    for path, _ in outputs:
         console.print(f"[green]✓ Wrote {path}[/green]")
 
     console.print("\n[bold]Next steps:[/bold]")
@@ -1003,7 +1035,9 @@ def deploy_k8s_cronjob(
     if not _IMAGE_REF.fullmatch(image):
         print_error(f'--image "{image}" must be a container image reference without whitespace.')
         raise typer.Exit(code=1)
-    if len(secret_name) > 253 or not _K8S_NAME.fullmatch(secret_name):
+    if len(secret_name) > 253 or not all(
+        _K8S_LABEL.fullmatch(label) for label in secret_name.split(".")
+    ):
         print_error(f'--secret-name "{secret_name}" must be a valid Kubernetes name (DNS-1123).')
         raise typer.Exit(code=1)
     secrets, _, _ = _project_details(project_dir, None)
@@ -1014,7 +1048,7 @@ def deploy_k8s_cronjob(
         return
 
     _check_outputs([output], force)
-    _write_scaffold_file(output, content, force=force)
+    _write_scaffold_files([(output, content, 0o640)], force=force)
     console.print(f"[green]✓ Wrote {output}[/green]")
     console.print("\n[bold]Next steps:[/bold]")
     console.print(f"  1. Build and push {image}, with this project and its connector extras.")
@@ -1112,7 +1146,7 @@ def deploy_github_actions(
         return
 
     _check_outputs([output], force)
-    _write_scaffold_file(output, content, force=force)
+    _write_scaffold_files([(output, content, 0o640)], force=force)
 
     console.print(f"[green]✓ Wrote {output}[/green]")
     console.print("\n[bold]Next steps:[/bold]")
@@ -1164,8 +1198,10 @@ def _scaffold_plan_loop(
         return
 
     _check_outputs([plan_output, apply_output], force)
-    for path, text in ((plan_output, plan_text), (apply_output, apply_text)):
-        _write_scaffold_file(path, text, force=force)
+    _write_scaffold_files(
+        [(plan_output, plan_text, 0o640), (apply_output, apply_text, 0o640)], force=force
+    )
+    for path in (plan_output, apply_output):
         console.print(f"[green]✓ Wrote {path}[/green]")
 
     console.print("\n[bold]Next steps:[/bold]")
