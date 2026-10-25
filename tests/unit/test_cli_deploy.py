@@ -875,7 +875,7 @@ def test_scheduler_script_is_executable(project: Path) -> None:
     runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
 
     mode = (project / "deploy/cloud-run-job/scheduler.sh").stat().st_mode & 0o777
-    assert mode == 0o755
+    assert mode == 0o750  # owner+group only: no world access (CodeQL py/overly-permissive-file)
 
 
 @pytest.mark.parametrize(

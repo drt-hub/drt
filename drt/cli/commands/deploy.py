@@ -363,7 +363,7 @@ def _check_target_is_safe(path: Path, project_dir: Path = Path(".")) -> None:
 
 
 def _write_scaffold_file(
-    path: Path, content: str, *, force: bool = False, mode: int = 0o644
+    path: Path, content: str, *, force: bool = False, mode: int = 0o640
 ) -> None:
     """Write ``path`` atomically-enough: never through a symlink, never over a hard link.
 
@@ -950,7 +950,7 @@ def deploy_cloud_run_job(
     _check_outputs([path for path, _ in outputs], force)
     for path, content in outputs:
         _write_scaffold_file(
-            path, content, force=force, mode=0o755 if path.name == "scheduler.sh" else 0o644
+            path, content, force=force, mode=0o750 if path.name == "scheduler.sh" else 0o640
         )
         console.print(f"[green]✓ Wrote {path}[/green]")
 
