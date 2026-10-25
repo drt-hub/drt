@@ -45,6 +45,14 @@ on:
       - 'README.md'
       - 'scripts/check_drift.sh'
       - 'scripts/check_cli_mcp_parity.py'
+      - 'drt/engine/plan_coverage.py'
+      # The behaviour the matrix is checked against (#1223).
+      - 'drt/engine/diff.py'
+      - 'drt/engine/plan.py'
+      - 'drt/destinations/query.py'
+      - 'drt/config/models.py'
+      - 'scripts/gen_plan_coverage.py'
+      - 'docs/guides/plan-coverage.md'
       - 'scripts/drift_baseline.txt'
   schedule:
     # Monday 01:00 UTC — offset from contributors-audit (00:30) and the

@@ -30,6 +30,15 @@ nothing renamed or removed, so v2 consumers keep working unchanged:
   :meth:`Manifest.from_dict` with no ``config_hash`` in the source data)
   free of a schema-v3-only key its declared ``schema_version`` doesn't
   actually support.
+
+Schema v4 (#1222, ADR 0013) is a pure superset of v3 — three optional keys on
+each ``runs[]`` entry, nothing renamed or removed, omitted (never ``null``)
+when absent:
+
+- ``plan_id``: the plan a ``drt apply`` run applied (an opaque digest id).
+- ``guards``: the run-time guard outcome, ``{"tripped": [...], "forced": bool}``.
+- ``approved_by``: who approved the apply. A person's name, so — like the other
+  labels redacted by default (#696) — it is emitted only with ``--full-labels``.
 """
 
 from __future__ import annotations
@@ -37,7 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 EdgeKind = Literal["source_to_sync", "sync_to_destination", "lookup"]
 
@@ -95,6 +104,10 @@ class SyncRun:
     records_failed: int
     errors: tuple[str, ...] = ()
     cursor_value_used: str | None = None
+    # Schema v4 (#1222, ADR 0013); see the module docstring.
+    plan_id: str | None = None
+    guards: dict[str, Any] | None = None
+    approved_by: str | None = None  # only populated with --full-labels
 
 
 @dataclass(frozen=True)
@@ -204,25 +217,35 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
             "last_error": s.state.last_error,
         }
     if s.runs:
-        d["runs"] = [
-            {
-                "started_at": r.started_at,
-                "completed_at": r.completed_at,
-                "duration_seconds": r.duration_seconds,
-                "status": r.status,
-                "records_synced": r.records_synced,
-                "records_failed": r.records_failed,
-                "errors": list(r.errors),
-                "cursor_value_used": r.cursor_value_used,
-            }
-            for r in s.runs
-        ]
+        d["runs"] = [_run_to_dict(r) for r in s.runs]
     if s.fields:
         d["fields"] = [
             {"name": f.name, "source_name": f.source_name, "mask": f.mask} for f in s.fields
         ]
     if s.dlq_depth is not None:
         d["dlq_depth"] = s.dlq_depth
+    return d
+
+
+def _run_to_dict(r: SyncRun) -> dict[str, Any]:
+    d: dict[str, Any] = {
+        "started_at": r.started_at,
+        "completed_at": r.completed_at,
+        "duration_seconds": r.duration_seconds,
+        "status": r.status,
+        "records_synced": r.records_synced,
+        "records_failed": r.records_failed,
+        "errors": list(r.errors),
+        "cursor_value_used": r.cursor_value_used,
+    }
+    # v4 keys: omitted rather than null, so a re-serialized v1-v3 manifest does
+    # not grow keys its declared schema_version does not support.
+    if r.plan_id is not None:
+        d["plan_id"] = r.plan_id
+    if r.guards is not None:
+        d["guards"] = r.guards
+    if r.approved_by is not None:
+        d["approved_by"] = r.approved_by
     return d
 
 

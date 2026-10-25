@@ -26,21 +26,20 @@ data is recorded with status ``success`` and cannot be told apart here.
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from drt.config.duration import parse_max_age
+from drt.state._integrity import report_unreadable
 
 FreshnessState = Literal["fresh", "stale", "never_run", "clock_skew"]
 Severity = Literal["ok", "warn", "error"]
 
 # How many recent runs to inspect for the last success. Retention prunes history
 # anyway; a sync whose recent runs hold no success is reported stale, not green.
-_HISTORY_WINDOW = 200
+_HISTORY_WINDOW = 1000  # above the 500-entry default retention of remote history
 # A last success this far in the future is clock skew, not "just now".
 _MAX_FUTURE_SKEW = timedelta(minutes=5)
 
@@ -105,7 +104,10 @@ def _last_success(sync_name: str, history: Any, stored: Any) -> tuple[datetime |
             if entry.status != "success":
                 continue
             when = _parse_time(entry.completed_at) or _parse_time(entry.started_at)
-            if when is not None and (best is None or when > best):
+            if when is None:
+                # A "success" whose time cannot be read must not be silently ignored.
+                report_unreadable(f"{sync_name}: a history entry has an unreadable timestamp")
+            elif best is None or when > best:
                 best = when
     if stored is not None:
         seen_run = True
@@ -113,7 +115,9 @@ def _last_success(sync_name: str, history: Any, stored: Any) -> tuple[datetime |
             # The stored state can be newer than history (a best-effort history append
             # failed, or history was switched off): trust whichever success is newer.
             when = _parse_time(stored.last_run_at)
-            if when is not None and (best is None or when > best):
+            if when is None:
+                report_unreadable(f"{sync_name}: the stored state has an unreadable timestamp")
+            elif best is None or when > best:
                 best = when
     return best, seen_run
 
@@ -166,28 +170,3 @@ def evaluate_freshness(
 def has_failure(verdicts: Iterable[FreshnessVerdict]) -> bool:
     """True when any verdict is an error (stale, clock skew, or ``never_run: error``)."""
     return any(v.severity == "error" for v in verdicts)
-
-
-@contextmanager
-def collect_unreadable_evidence() -> Iterator[list[str]]:
-    """Collect warnings the state/history stores log while they are read.
-
-    Stores deliberately degrade on a corrupt or malformed record (best-effort
-    reads), which a watchdog must not mistake for "this sync never ran". Anything
-    logged at WARNING or above under ``drt.state`` during the ``with`` block is
-    returned so the caller can fail instead of reporting green.
-    """
-    messages: list[str] = []
-
-    class _Collector(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            if record.levelno >= logging.WARNING:
-                messages.append(record.getMessage())
-
-    handler = _Collector()
-    logger = logging.getLogger("drt.state")
-    logger.addHandler(handler)
-    try:
-        yield messages
-    finally:
-        logger.removeHandler(handler)

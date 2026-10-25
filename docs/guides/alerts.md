@@ -200,10 +200,15 @@ Rules:
 - It reads run history (local, GCS/S3 or warehouse-backed); if history holds no
   success it falls back to the sync's stored state, which records the run's *start*
   time, so keep `max_age` longer than the run's duration if you disable history.
-- **Unreadable evidence fails the check.** If a state or history record is corrupt or
-  malformed (the stores normally skip it with a warning), a quiet "never ran" would be
-  wrong, so `--check` exits 1 and reports how many records could not be read
-  (`unreadable_evidence` in JSON; MCP `ok` is false). `--allow-empty` does not hide it.
+- **Unreadable evidence fails the check.** The state and history stores normally skip a
+  corrupt record with a warning, which a watchdog must not read as "never ran". They now
+  also report it to a side channel that does not depend on logging configuration, and
+  `--check` exits 1 with the count (`unreadable_evidence` in JSON; MCP `ok` is false;
+  `--allow-empty` does not hide it). Covered: a corrupt or non-object `state.json`
+  (local and GCS/S3), malformed history lines (local and object-store), a success whose
+  timestamp cannot be parsed, and a missing GCS bucket. Warehouse-backed stores raise on
+  query or decode errors, so those fail the command outright. It cannot detect a record
+  that is well-formed but wrong.
 - Unknown keys under `on_stale` (for example `never_runs`) are rejected, so a typo cannot
   quietly weaken the policy.
 - `--notify` is explicit so a local check never posts to Slack by surprise, and it posts

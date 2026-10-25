@@ -125,6 +125,30 @@ def test_metadata_not_found_returns_create_only_generation_zero(
     assert bucket.calls == [("missing", None)]
 
 
+def test_a_missing_bucket_is_an_error_not_empty_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deleted or misspelled bucket also 404s on the object lookup (#1224)."""
+    _install_google_exceptions(monkeypatch)
+    bucket = FakeBucket()
+    bucket.live_generation = 0
+    bucket.exists = lambda: False  # type: ignore[attr-defined]
+    client = GCSObjectClient("bucket", client=FakeStorageClient(bucket))
+
+    with pytest.raises(RuntimeError, match="does not exist"):
+        client.read_for_update("state.json")
+
+
+def test_a_missing_object_in_an_existing_bucket_is_still_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_google_exceptions(monkeypatch)
+    bucket = FakeBucket()
+    bucket.live_generation = 0
+    bucket.exists = lambda: True  # type: ignore[attr-defined]
+    client = GCSObjectClient("bucket", client=FakeStorageClient(bucket))
+
+    assert client.read_for_update("state.json") == (None, 0)
+
+
 def test_stale_upload_is_normalized_to_object_precondition_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -393,3 +393,70 @@ def test_concurrent_first_writes_survive_table_creation_race() -> None:
                 )
         finally:
             conn.close()
+
+
+def test_history_adds_the_guards_column_to_a_legacy_table_and_round_trips_it() -> None:
+    """#1264 live: drop ``guards`` (if a previous run added it), then append with it.
+
+    The append must ALTER the table, and a read must return the stored overrides.
+    The history table is shared by the suite; this only touches the optional column.
+    """
+    creds = _require_creds()
+    profile = _profile(creds)
+    table = f"{profile.database}.{profile.managed_schema}._drt_history"
+    sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    history = SnowflakeWarehouseHistoryStore(profile)
+    # Make sure the table exists, then force the legacy shape.
+    history.append(
+        HistoryEntry(
+            sync_name=sync_name,
+            started_at="2026-10-17T00:00:00+00:00",
+            completed_at="2026-10-17T00:00:01+00:00",
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+        )
+    )
+    conn = _admin_connect(creds)
+    try:
+        cur = conn.cursor()
+        for column in ("guards", "plan_id", "approved_by"):
+            cur.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}")
+        cur.execute(
+            f"SELECT COUNT(*) FROM {profile.database}.information_schema.columns "
+            "WHERE table_schema = %s AND table_name = '_DRT_HISTORY' AND column_name = 'GUARDS'",
+            (profile.managed_schema.upper(),),
+        )
+        assert cur.fetchone() == (0,)
+
+        guards = {"forced": True, "tripped": [{"guard": "max_deletes", "observed": 3}]}
+        fresh = SnowflakeWarehouseHistoryStore(profile)  # a new run: nothing cached
+        assert fresh.read(sync_name)[0].guards is None  # legacy read works, never alters
+        fresh.append(
+            HistoryEntry(
+                sync_name=sync_name,
+                started_at="2026-10-18T00:00:00+00:00",
+                completed_at="2026-10-18T00:00:01+00:00",
+                duration_seconds=1.0,
+                status="success",
+                records_synced=1,
+                records_failed=0,
+                guards=guards,
+                plan_id="sha256:smoke",
+                approved_by="smoke-user",
+            )
+        )
+        cur.execute(
+            f"SELECT COUNT(*) FROM {profile.database}.information_schema.columns "
+            "WHERE table_schema = %s AND table_name = '_DRT_HISTORY' AND column_name = 'GUARDS'",
+            (profile.managed_schema.upper(),),
+        )
+        assert cur.fetchone() == (1,)
+        entries = SnowflakeWarehouseHistoryStore(profile).read(sync_name)
+        assert entries[0].guards == guards and entries[1].guards is None
+        assert (entries[0].plan_id, entries[0].approved_by) == ("sha256:smoke", "smoke-user")
+        assert (entries[1].plan_id, entries[1].approved_by) == (None, None)
+        cur.execute(f"DELETE FROM {table} WHERE sync_name = %s", (sync_name,))
+    finally:
+        conn.close()

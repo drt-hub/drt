@@ -556,3 +556,124 @@ def test_mcp_flags_unreadable_evidence_and_rejects_a_dangling_allow_empty(
 
     assert checked["ok"] is False and checked["unreadable_evidence"] >= 1
     assert "check=True" in dangling["error"]
+
+
+# ---------------------------------------------------------------------------
+# Unreadable evidence: the side channel, its backends, and what cannot switch it off
+# ---------------------------------------------------------------------------
+
+
+def test_the_signal_survives_logging_being_disabled(project: Path) -> None:
+    """The channel is not log records, so a host's logging config cannot silence it."""
+    import logging
+
+    _write_sync(project, "daily", {"max_age": "6h"})
+    (project / ".drt").mkdir(exist_ok=True)
+    (project / ".drt" / "state.json").write_text("{ broken")
+    logging.disable(logging.CRITICAL)
+    try:
+        result = runner.invoke(app, ["status", "--check", "--output", "json"])
+    finally:
+        logging.disable(logging.NOTSET)
+
+    assert result.exit_code == 1 and json.loads(result.stdout)["unreadable_evidence"] >= 1
+
+
+@pytest.mark.parametrize("root", ["[]", "0", '""', "false"])
+def test_a_falsey_non_object_state_root_is_corruption_not_empty_state(
+    project: Path, root: str
+) -> None:
+    _write_sync(project, "daily", {"max_age": "6h"})
+    (project / ".drt").mkdir(exist_ok=True)
+    (project / ".drt" / "state.json").write_text(root)
+
+    result = runner.invoke(app, ["status", "--check", "--output", "json"])
+
+    assert result.exit_code == 1 and json.loads(result.stdout)["unreadable_evidence"] >= 1
+
+
+def test_an_empty_json_null_state_is_just_empty(project: Path) -> None:
+    from drt.state._integrity import collect_unreadable
+    from drt.state.manager import StateManager
+
+    (project / ".drt").mkdir(exist_ok=True)
+    (project / ".drt" / "state.json").write_text("null")
+
+    with collect_unreadable() as seen:
+        assert StateManager(project).get_all() == {}
+
+    assert seen == []
+
+
+def test_corrupt_object_store_state_and_history_are_reported() -> None:
+    from drt.state._integrity import collect_unreadable
+    from drt.state._objectstore import ObjectStoreHistoryStore, ObjectStoreStateStore
+
+    with collect_unreadable() as seen:
+        assert ObjectStoreStateStore._decode(b"{broken") == {}
+        assert ObjectStoreStateStore._decode(b"[1, 2]") == {}
+        ObjectStoreHistoryStore._decode(b"not json\n", "history/x.jsonl")
+
+    assert len(seen) == 3
+
+
+def test_an_unreadable_success_timestamp_is_reported_not_ignored(tmp_path: Path) -> None:
+    from drt.state._integrity import collect_unreadable
+
+    mgr = HistoryManager(tmp_path)
+    bad = _entry("orders", 1)
+    bad.completed_at = "not a time"
+    bad.started_at = "also not a time"
+    mgr.append(bad)
+    mgr.append(_entry("orders", 2))  # a valid fresh success alongside it
+
+    with collect_unreadable() as seen:
+        [verdict] = evaluate_freshness([_sync("orders")], mgr, {}, NOW)
+
+    assert verdict.state == "fresh"  # the readable one still counts...
+    assert seen, "...but the malformed record must be surfaced, not swallowed"
+
+
+def test_concurrent_collectors_do_not_see_each_others_reports() -> None:
+    import threading
+
+    from drt.state._integrity import collect_unreadable, report_unreadable
+
+    results: dict[str, list[str]] = {}
+    ready, go = threading.Event(), threading.Event()
+
+    def worker(name: str, emit: bool) -> None:
+        with collect_unreadable() as seen:
+            if emit:
+                report_unreadable(f"{name} broke")
+            ready.set()
+            go.wait(2)
+        results[name] = list(seen)
+
+    a = threading.Thread(target=worker, args=("a", True))
+    b = threading.Thread(target=worker, args=("b", False))
+    a.start()
+    ready.wait(2)
+    b.start()
+    go.set()
+    a.join()
+    b.join()
+
+    assert results == {"a": ["a broke"], "b": []}
+
+
+def test_reports_outside_a_collector_are_ignored() -> None:
+    from drt.state._integrity import report_unreadable
+
+    report_unreadable("nobody is listening")  # must not raise
+
+
+def test_a_success_older_than_two_hundred_failures_is_still_found(tmp_path: Path) -> None:
+    mgr = HistoryManager(tmp_path)
+    mgr.append(_entry("orders", 5))  # the last success, 5h ago
+    for i in range(300):  # 300 failures since
+        mgr.append(_entry("orders", 4.9 - i / 1000, status="failed"))
+
+    [verdict] = evaluate_freshness([_sync("orders")], mgr, {}, NOW)
+
+    assert verdict.state == "fresh" and verdict.age_seconds == 5 * 3600

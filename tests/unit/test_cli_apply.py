@@ -166,6 +166,19 @@ def test_apply_writes_through_the_normal_run_path(project: Path, world: _World) 
     assert claim["run_id"] == writes[0]["run_id"]
 
 
+def test_apply_hands_the_plan_and_approver_to_the_run_for_its_history_entry(
+    project: Path, world: _World
+) -> None:
+    plan = _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--approved-by", "alice"])
+
+    assert result.exit_code == 0, result.output
+    [write] = _writes(world)
+    assert write["plan_id"] == plan["plan_id"]
+    assert write["approved_by"] == "alice"
+
+
 def test_drift_aborts_before_any_write_and_reports_the_keys(project: Path, world: _World) -> None:
     _plan(project)
     world.added.append({"id": 3, "name": "c"})

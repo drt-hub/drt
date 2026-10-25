@@ -387,3 +387,154 @@ def test_concurrent_first_writes_survive_table_creation_race(
 
     store = PostgresWarehouseStateStore(pg_profile)
     assert set(store.get_all().keys()) == {f"sync_{i}" for i in range(8)}
+
+
+_LEGACY_HISTORY_DDL = (
+    "CREATE TABLE _drt._drt_history ("
+    "sync_name TEXT NOT NULL, started_at TEXT NOT NULL, "
+    "completed_at TEXT NOT NULL, duration_seconds DOUBLE PRECISION NOT NULL, "
+    "status TEXT NOT NULL, records_synced BIGINT NOT NULL, "
+    "records_failed BIGINT NOT NULL, errors JSONB NOT NULL DEFAULT '[]', "
+    "cursor_value_used TEXT, dry_run BOOLEAN NOT NULL DEFAULT FALSE, "
+    "run_id TEXT, sync_run_id TEXT)"
+)
+
+
+def _guards_entry(sync_name: str, **kw: object) -> HistoryEntry:
+    return HistoryEntry(
+        sync_name=sync_name,
+        started_at="2026-10-18T00:00:00+00:00",
+        completed_at="2026-10-18T00:00:01+00:00",
+        duration_seconds=1.0,
+        status="success",
+        records_synced=1,
+        records_failed=0,
+        **kw,  # type: ignore[arg-type]
+    )
+
+
+def _admin(host: str, port: int) -> object:
+    return psycopg2.connect(
+        host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+    )
+
+
+def _pg_profile(host: str, port: int, user: str, password: str) -> PostgresProfile:
+    return PostgresProfile(
+        type="postgres", host=host, port=port, dbname="testdb", user=user, password=password
+    )
+
+
+def _history_columns(conn: object) -> set[str]:
+    with conn.cursor() as cur:  # type: ignore[attr-defined]
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = '_drt' AND table_name = '_drt_history'"
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
+def test_history_adds_the_guards_column_to_a_legacy_table_and_round_trips_it() -> None:
+    """#1264 live: a history table created before ``guards`` existed is migrated in place."""
+    require_docker()
+    postgres_container = testcontainers_postgres.PostgresContainer
+
+    with postgres_container(
+        "postgres:16-alpine", username="admin", password="adminpass", dbname="testdb", driver=None
+    ) as postgres:
+        host = postgres.get_container_host_ip()
+        port = int(postgres.get_exposed_port(5432))
+        profile = PostgresProfile(
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
+        )
+        admin = psycopg2.connect(
+            host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+        )
+        try:
+            with admin.cursor() as cur:
+                cur.execute("CREATE SCHEMA _drt")
+                cur.execute(_LEGACY_HISTORY_DDL)
+                cur.execute(
+                    "INSERT INTO _drt._drt_history (sync_name, started_at, completed_at, "
+                    "duration_seconds, status, records_synced, records_failed) "
+                    "VALUES ('s', '2026-10-01T00:00:00+00:00', '2026-10-01T00:00:01+00:00', "
+                    "1, 'success', 1, 0)"
+                )
+            admin.commit()
+            assert "guards" not in _history_columns(admin)
+
+            # A read of the legacy table works and never alters it.
+            before = PostgresWarehouseHistoryStore(profile).read("s")
+            assert [e.guards for e in before] == [None]
+            assert "guards" not in _history_columns(admin)
+
+            guards = {"forced": True, "tripped": [{"guard": "max_deletes", "observed": 3}]}
+            PostgresWarehouseHistoryStore(profile).append(
+                _guards_entry("s", guards=guards, plan_id="sha256:smoke", approved_by="smoke-user")
+            )
+            assert {"guards", "plan_id", "approved_by"} <= set(_history_columns(admin))
+
+            entries = PostgresWarehouseHistoryStore(profile).read("s")
+            assert [e.guards for e in entries] == [
+                guards,
+                None,
+            ]  # newest first; legacy row stays NULL
+            assert [(e.plan_id, e.approved_by) for e in entries] == [
+                ("sha256:smoke", "smoke-user"),
+                (None, None),
+            ]
+
+            # A second append (a new store, a new run) must not try to add it again.
+            PostgresWarehouseHistoryStore(profile).append(_guards_entry("s"))
+            assert len(PostgresWarehouseHistoryStore(profile).read("s")) == 3
+        finally:
+            admin.close()
+
+
+def test_history_keeps_working_without_alter_privilege_and_skips_guards() -> None:
+    """#1264 live: a pre-provisioned legacy table + a role that cannot ALTER it.
+
+    The append must not fail the sync, the legacy columns must still be written,
+    and ``guards`` is simply not recorded (one warning), never an error.
+    """
+    require_docker()
+    postgres_container = testcontainers_postgres.PostgresContainer
+
+    with postgres_container(
+        "postgres:16-alpine", username="admin", password="adminpass", dbname="testdb", driver=None
+    ) as postgres:
+        host = postgres.get_container_host_ip()
+        port = int(postgres.get_exposed_port(5432))
+        admin = psycopg2.connect(
+            host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+        )
+        try:
+            with admin.cursor() as cur:
+                cur.execute("CREATE SCHEMA _drt")
+                cur.execute(_LEGACY_HISTORY_DDL)
+                cur.execute("CREATE USER retl_user WITH PASSWORD 'retlpass'")
+                cur.execute("GRANT USAGE ON SCHEMA _drt TO retl_user")
+                cur.execute("GRANT SELECT, INSERT, DELETE ON _drt._drt_history TO retl_user")
+            admin.commit()
+            profile = PostgresProfile(
+                type="postgres",
+                host=host,
+                port=port,
+                dbname="testdb",
+                user="retl_user",
+                password="retlpass",
+            )
+
+            store = PostgresWarehouseHistoryStore(profile)
+            store.append(_guards_entry("s", guards={"forced": True, "tripped": []}))
+
+            entries = PostgresWarehouseHistoryStore(profile).read("s")
+            assert len(entries) == 1 and entries[0].guards is None
+            assert "guards" not in _history_columns(admin)
+        finally:
+            admin.close()

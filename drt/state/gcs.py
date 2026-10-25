@@ -53,7 +53,11 @@ class GCSObjectClient:
                 current.reload()
             except NotFound:
                 # A 404 at metadata lookup means there is no live object. GCS
-                # generation 0 is the create-only conditional-write token.
+                # generation 0 is the create-only conditional-write token. But a
+                # missing *bucket* also 404s, and must not read as empty state.
+                exists = getattr(bucket, "exists", None)
+                if callable(exists) and exists() is False:
+                    raise RuntimeError(f"GCS bucket '{self._bucket_name}' does not exist") from None
                 return None, 0
 
             generation = current.generation

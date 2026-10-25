@@ -28,11 +28,8 @@ def get_status(
     if check:
         # Same verdict as `drt status --check` (#1224): freshness against
         # alerts.on_stale, read-only, from run history.
-        from drt.engine.freshness import (
-            collect_unreadable_evidence,
-            evaluate_freshness,
-            has_failure,
-        )
+        from drt.engine.freshness import evaluate_freshness, has_failure
+        from drt.state._integrity import collect_unreadable as collect_unreadable_evidence
 
         syncs = ctx.load_syncs()
         if sync_name:

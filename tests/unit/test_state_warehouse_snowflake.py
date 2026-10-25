@@ -11,7 +11,11 @@ cursor can't validate the SQL itself (#908's lesson).
 
 from __future__ import annotations
 
+import json
+from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from drt.config.credentials import SnowflakeProfile
 from drt.state.dlq import DeadLetter
@@ -289,8 +293,10 @@ class TestSnowflakeWarehouseHistoryStore:
         assert "SELECT" in sql
         assert "PARSE_JSON(%s)" in sql
         assert "VALUES" not in sql
-        assert "guards" not in sql
-        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 12
+        # The mock probe reports no ``guards`` column and ALTER "succeeds", so the
+        # optional column is written (the dedicated suite covers every branch).
+        assert ", guards, plan_id, approved_by)" in sql
+        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 15
 
     def test_read_reconstructs_history_entry_from_a_json_string_variant(self) -> None:
         """Covers the branch where the connector hands VARIANT back as a
@@ -696,3 +702,146 @@ class TestSnowflakeWarehouseDlqBackend:
             entries = SnowflakeWarehouseDlqBackend(_profile()).read("s")
 
         assert entries[0].record == {"a": 1}
+
+
+class TestSnowflakeHistoryOptionalColumns:
+    """Optional additive history columns (#1264): present / legacy / ALTER refused."""
+
+    _BASE = (
+        "sync_name started_at completed_at duration_seconds status records_synced "
+        "records_failed errors cursor_value_used dry_run run_id sync_run_id"
+    ).split()
+
+    @staticmethod
+    def _conn(
+        columns: list[str], *, rows: list[tuple] | None = None, alter_error: bool = False
+    ) -> MagicMock:
+        conn = MagicMock()
+        cur = conn.cursor.return_value
+        cur.statements = []
+        state = {"sql": ""}
+
+        def execute(sql: Any, params: Any = None) -> None:
+            state["sql"] = str(sql)
+            cur.statements.append((str(sql), params))
+            if alter_error and "ALTER TABLE" in str(sql):
+                raise PermissionError("insufficient privileges")
+
+        def fetchall() -> list[tuple]:
+            if "information_schema.columns" in state["sql"]:
+                return [(name,) for name in columns]
+            return rows or []
+
+        cur.execute.side_effect = execute
+        cur.fetchall.side_effect = fetchall
+        return conn
+
+    @staticmethod
+    def _entry(**kw: Any) -> HistoryEntry:
+        return HistoryEntry(
+            sync_name="s",
+            started_at="t0",
+            completed_at="t1",
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+            **kw,
+        )
+
+    @staticmethod
+    def _append(conn: MagicMock, entry: HistoryEntry) -> None:
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch("drt.sources.snowflake.SnowflakeSource.ensure_managed_schema"),
+            patch("drt.sources.snowflake.SnowflakeSource.managed_table_exists", return_value=True),
+        ):
+            SnowflakeWarehouseHistoryStore(_profile()).append(entry)
+
+    @staticmethod
+    def _insert(conn: MagicMock) -> tuple[str, Any]:
+        return next((s, p) for s, p in conn.cursor.return_value.statements if "INSERT" in s)
+
+    def test_writes_guards_json_when_the_column_exists(self) -> None:
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
+        guards = {"forced": True, "tripped": [{"guard": "max_deletes"}]}
+
+        self._append(conn, self._entry(guards=guards))
+
+        sql, params = self._insert(conn)
+        assert ", guards, plan_id, approved_by)" in sql and len(params) == 15
+        assert json.loads(params[-3]) == guards
+        assert not any("ALTER TABLE" in s for s, _ in conn.cursor.return_value.statements)
+
+    def test_adds_the_missing_column_to_a_legacy_table_before_the_insert(self) -> None:
+        conn = self._conn(self._BASE)
+
+        self._append(conn, self._entry(guards={"forced": False, "tripped": []}))
+
+        statements = [s for s, _ in conn.cursor.return_value.statements]
+        alters = [s for s in statements if "ALTER TABLE" in s]
+        assert len(alters) == 3 and "ADD COLUMN IF NOT EXISTS guards TEXT" in alters[0]
+        assert statements.index(alters[0]) < next(
+            i for i, s in enumerate(statements) if "INSERT" in s
+        )
+        assert len(self._insert(conn)[1]) == 15
+
+    def test_stores_null_without_guards(self) -> None:
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
+
+        self._append(conn, self._entry())
+
+        assert self._insert(conn)[1][-1] is None
+
+    def test_falls_back_to_the_legacy_insert_when_alter_is_refused(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        conn = self._conn(self._BASE, alter_error=True)
+
+        with caplog.at_level("WARNING"):
+            self._append(conn, self._entry(guards={"forced": True, "tripped": []}))
+
+        sql, params = self._insert(conn)
+        assert "guards" not in sql and len(params) == 12
+        assert "could not be added" in caplog.text
+
+    def test_read_returns_guards_and_never_alters(self) -> None:
+        guards = {"forced": True, "tripped": [{"guard": "max_delete_pct"}]}
+        row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "r", "sr")
+        conn = self._conn(
+            [*self._BASE, "guards", "plan_id", "approved_by"],
+            rows=[(*row, json.dumps(guards), None, None)],
+        )
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+        ):
+            entries = SnowflakeWarehouseHistoryStore(_profile()).read("s")
+        assert entries[0].guards == guards
+        selects = [s for s, _ in conn.cursor.return_value.statements if "ORDER BY" in s]
+        assert selects and "sync_run_id, guards" in selects[0]
+
+        legacy = self._conn(self._BASE, rows=[row])
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=legacy),
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+        ):
+            assert SnowflakeWarehouseHistoryStore(_profile()).read()[0].guards is None
+        statements = [s for s, _ in legacy.cursor.return_value.statements]
+        assert not any("ALTER TABLE" in s for s in statements)
+        assert not any("guards" in s for s in statements if "ORDER BY" in s)
+
+    def test_resolution_is_cached_per_store_instance(self) -> None:
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
+        src = "drt.sources.snowflake.SnowflakeSource"
+        store = SnowflakeWarehouseHistoryStore(_profile())
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch(f"{src}.ensure_managed_schema"),
+            patch(f"{src}.managed_table_exists", return_value=True),
+        ):
+            store.append(self._entry())
+            store.append(self._entry())
+
+        probes = [s for s, _ in conn.cursor.return_value.statements if "information_schema" in s]
+        assert len(probes) == 1

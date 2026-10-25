@@ -43,6 +43,97 @@ def _seed_history(project_dir: Path, sync: str = "demo", count: int = 3) -> None
 # ---------------------------------------------------------------------------
 
 
+class TestStatusHistoryLineage:
+    """#1222: the Plan column appears only when some run applied a plan."""
+
+    def _run(self, project_dir: Path, *args: str) -> Any:
+        import os
+
+        old = os.getcwd()
+        os.chdir(project_dir)
+        try:
+            return runner.invoke(
+                app,
+                ["status", "--history", *args],
+                catch_exceptions=False,
+                env={"COLUMNS": "200"},
+            )
+        finally:
+            os.chdir(old)
+
+    def test_applied_plan_and_approver_are_listed(self, tmp_path: Path) -> None:
+        HistoryManager(tmp_path).append(
+            HistoryEntry(
+                sync_name="alpha",
+                started_at="2026-05-01T10:00:00+00:00",
+                completed_at="2026-05-01T10:00:30+00:00",
+                duration_seconds=30.0,
+                status="success",
+                records_synced=3,
+                records_failed=0,
+                plan_id="sha256:cafe1234",
+                approved_by="alice",
+            )
+        )
+
+        result = self._run(tmp_path)
+
+        assert result.exit_code == 0
+        assert "Plan" in result.stdout
+        assert "alice" in result.stdout
+        payload = json.loads(self._run(tmp_path, "--output", "json").stdout)
+        assert payload["entries"][0]["plan_id"] == "sha256:cafe1234"
+        assert payload["entries"][0]["approved_by"] == "alice"
+
+    def test_an_approver_name_cannot_inject_rich_markup(self, tmp_path: Path) -> None:
+        HistoryManager(tmp_path).append(
+            HistoryEntry(
+                sync_name="alpha",
+                started_at="2026-05-01T10:00:00+00:00",
+                completed_at="2026-05-01T10:00:30+00:00",
+                duration_seconds=30.0,
+                status="success",
+                records_synced=3,
+                records_failed=0,
+                plan_id="sha256:abc",
+                approved_by="\\\\[conceal]mallory",
+            )
+        )
+
+        result = self._run(tmp_path)
+
+        assert "mallory" in result.stdout and "conceal" in result.stdout
+
+    def test_a_hand_edited_non_string_lineage_value_does_not_crash_status(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / ".drt" / "history"
+        path.mkdir(parents=True)
+        (path / "alpha.jsonl").write_text(
+            json.dumps(
+                {
+                    "sync_name": "alpha",
+                    "started_at": "2026-05-01T10:00:00+00:00",
+                    "completed_at": "2026-05-01T10:00:30+00:00",
+                    "duration_seconds": 1.0,
+                    "status": "success",
+                    "records_synced": 1,
+                    "records_failed": 0,
+                    "plan_id": 12345,
+                    "approved_by": {"name": "x"},
+                }
+            )
+            + "\n"
+        )
+
+        assert self._run(tmp_path).exit_code == 0
+
+    def test_ordinary_history_keeps_its_existing_columns(self, tmp_path: Path) -> None:
+        _seed_history(tmp_path, sync="alpha", count=1)
+
+        assert "Plan" not in self._run(tmp_path).stdout
+
+
 class TestStatusHistoryText:
     def test_history_text_output_contains_sync_name(self, tmp_path: Path) -> None:
         _seed_history(tmp_path, sync="alpha", count=2)
