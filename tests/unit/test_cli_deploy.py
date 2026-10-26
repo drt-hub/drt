@@ -1050,47 +1050,19 @@ def test_secret_names_obey_the_63_character_label_limit(project: Path, name: str
 # ---------------------------------------------------------------------------
 
 
-def test_a_failure_while_publishing_restores_every_file_already_replaced(
+def test_a_failure_while_publishing_names_the_files_already_written_and_leaves_no_temp_files(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No rollback by design: the error says what was written, and the files are in Git."""
     import os
 
     root = project / "deploy" / "cloud-run-job"
-    root.mkdir(parents=True)
-    for name in ("Dockerfile", "job.yaml", "scheduler.sh"):
-        (root / name).write_text(f"old {name}")
-    real_replace = os.replace
-    published = {"n": 0}
-
-    def flaky_replace(src: Any, dst: Any) -> None:
-        # Only publishing renames a ".tmp" file; restoring renames a ".bak" back.
-        if str(src).endswith(".tmp"):
-            published["n"] += 1
-            if published["n"] == 2:  # the second file cannot be published
-                raise PermissionError(13, "Permission denied")
-        real_replace(src, dst)
-
-    monkeypatch.setattr("drt.cli.commands.deploy.os.replace", flaky_replace)
-
-    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--force"])
-
-    assert result.exit_code == 1
-    for name in ("Dockerfile", "job.yaml", "scheduler.sh"):
-        assert (root / name).read_text() == f"old {name}", f"{name} was left at a new generation"
-    assert not list(root.glob(".*.tmp")) and not list(root.glob(".*.bak"))
-
-
-def test_a_publish_failure_removes_files_that_did_not_exist_before(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import os
-
     real_link = os.link
     calls = {"n": 0}
 
     def flaky_link(src: Any, dst: Any, **kw: Any) -> None:
         calls["n"] += 1
-        if calls["n"] == 3:
+        if calls["n"] == 2:  # the second file cannot be published
             raise PermissionError(13, "Permission denied")
         real_link(src, dst, **kw)
 
@@ -1099,7 +1071,34 @@ def test_a_publish_failure_removes_files_that_did_not_exist_before(
     result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
 
     assert result.exit_code == 1
-    assert not list((project / "deploy" / "cloud-run-job").glob("*"))
+    flat = " ".join(result.output.split())  # the terminal wraps long lines
+    assert "Already written before the failure" in flat and "Dockerfile" in flat
+    assert not list(root.glob(".*.tmp"))  # staging leftovers are always removed
+
+
+def test_a_staging_failure_changes_nothing_at_all(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    root = project / "deploy" / "cloud-run-job"
+    root.mkdir(parents=True)
+    (root / "Dockerfile").write_text("old")
+    real_open = os.open
+    calls = {"n": 0}
+
+    def flaky_open(path: Any, flags: int, mode: int = 0o600) -> int:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr("drt.cli.commands.deploy.os.open", flaky_open)
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--force"])
+
+    assert result.exit_code == 1 and (root / "Dockerfile").read_text() == "old"
+    assert not list(root.glob(".*.tmp"))
 
 
 def test_deploy_works_where_the_platform_has_no_fchmod(
@@ -1170,3 +1169,48 @@ def test_more_credential_shapes_bypass_nothing(project: Path, snippet: str) -> N
     result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
 
     assert result.exit_code == 1 and "leaky.yml" in result.output
+
+
+def test_numeric_and_url_embedded_credentials_are_caught(project: Path) -> None:
+    (project / "syncs" / "numeric.yml").write_text(
+        "name: numeric\nmodel: ref('x')\ndestination:\n  type: rest_api\n  url: https://x.invalid\n"
+        "  password: 12345678\nsync:\n  mode: full\n"
+    )
+    first = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+    (project / "syncs" / "numeric.yml").unlink()
+    (project / "syncs" / "url.yml").write_text(
+        "name: url\nmodel: ref('x')\ndestination:\n  type: rest_api\n"
+        "  url: https://user:s3cret@example.invalid/api\nsync:\n  mode: full\n"
+    )
+    second = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    assert first.exit_code == 1 and "numeric.yml: destination.password" in first.output
+    assert second.exit_code == 1 and "url.yml: destination.url" in second.output
+    assert "12345678" not in first.output and "s3cret" not in second.output
+
+
+def test_a_plain_url_without_credentials_or_with_a_placeholder_is_fine(project: Path) -> None:
+    (project / "syncs" / "ok.yml").write_text(
+        "name: ok\nmodel: ref('x')\ndestination:\n  type: rest_api\n"
+        "  url: https://${API_USER}:${API_PASS}@example.invalid/api\nsync:\n  mode: full\n"
+    )
+
+    assert runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"]).exit_code == 0
+
+
+def test_identical_plan_and_apply_outputs_are_refused(project: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            "github-actions",
+            "--with-plan",
+            "--plan-output",
+            ".github/workflows/same.yml",
+            "--apply-output",
+            ".github/workflows/same.yml",
+        ],
+    )
+
+    assert result.exit_code == 1 and "must be different" in result.output
+    assert not (project / ".github").exists()

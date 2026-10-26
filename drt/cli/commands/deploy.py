@@ -212,9 +212,17 @@ _ONLY_PLACEHOLDER = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 _NOT_CREDENTIALS = frozenset({"mask", "unit_tests", "tests", "field_mappings", "description"})
 
 
+# user:password@host inside a URL is a credential wherever it appears.
+_URL_CREDENTIALS = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@")
+
+
 def _is_literal_secret(key: str, value: Any, parent: dict[Any, Any]) -> bool:
-    if not isinstance(value, str) or not value or key.endswith("_env"):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = str(value)  # an unquoted numeric password or token is still a literal
+    if not isinstance(value, str) or not value or key.lower().endswith("_env"):
         return False
+    if _URL_CREDENTIALS.search(value) and "${" not in value:
+        return True
     if _ONLY_PLACEHOLDER.fullmatch(value) or _SECRET_URI.match(value):
         return False
     if "${" in value and _SCHEME_ONLY.fullmatch(re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", "", value)):
@@ -381,7 +389,7 @@ def _check_target_is_safe(path: Path, project_dir: Path = Path(".")) -> None:
 
 
 def _write_scaffold_files(items: list[tuple[Path, str, int]], *, force: bool) -> None:
-    """Write several scaffold files all-or-nothing, without ever opening an existing target.
+    """Write several scaffold files, never opening an existing target.
 
     Each file is written to a private, randomly named temporary file in its own
     directory (``O_EXCL | O_NOFOLLOW``) and only then moved into place:
@@ -389,15 +397,17 @@ def _write_scaffold_files(items: list[tuple[Path, str, int]], *, force: bool) ->
     * an existing FIFO, hard link or read-only file is *replaced*, never opened, so a
       FIFO cannot hang the command and a hard-linked file elsewhere is never modified;
     * a failure while staging removes the temporaries and changes nothing;
-    * a failure while publishing restores every file already published (the previous
-      content comes back, or a newly created file is removed), so the set of files is
-      never left at mixed generations;
     * without ``--force`` the final step is ``os.link``, which fails if the target
       appeared in the meantime, so a concurrently created file is never clobbered.
+
+    The final renames are not atomic *across* files. They are renames inside directories
+    that were just created or written to, so a failure there is very unlikely; if it
+    happens the error names the files already updated, and they are project files kept
+    in Git (``git restore`` brings them back). No rollback machinery on purpose: it
+    would be far more code than the problem deserves.
     """
     staged: list[tuple[Path, Path]] = []
-    backups: dict[Path, Path | None] = {}  # published target -> its saved previous file
-    saved_files: list[Path] = []  # every backup created, so none is leaked on a failure
+    published: list[Path] = []
     try:
         for target, content, mode in items:
             try:
@@ -419,40 +429,27 @@ def _write_scaffold_files(items: list[tuple[Path, str, int]], *, force: bool) ->
                 handle.write(content)
             if not hasattr(os, "fchmod"):
                 tmp.chmod(mode)
-        try:
-            for tmp, target in staged:
-                backup: Path | None = None
-                if force and target.exists():
-                    backup = target.with_name(f".{target.name}.{os.urandom(6).hex()}.bak")
-                    try:
-                        os.link(target, backup)  # keeps the old inode alive under another name
-                    except OSError:  # a filesystem without hard links: keep a copy instead
-                        backup.write_bytes(target.read_bytes())
-                    saved_files.append(backup)
+        for tmp, target in staged:
+            try:
                 if force:
                     os.replace(tmp, target)
                 else:
                     os.link(tmp, target)  # fails if the target now exists
                     tmp.unlink()
-                backups[target] = backup
-        except BaseException as exc:
-            for published, saved in reversed(list(backups.items())):
-                if saved is not None:
-                    os.replace(saved, published)  # the previous content comes back
-                else:
-                    published.unlink(missing_ok=True)  # it did not exist before
-            if isinstance(exc, FileExistsError):
+            except FileExistsError:
                 print_error(f"{target} already exists. Re-run with --force to overwrite.")
                 raise typer.Exit(code=1) from None
-            if isinstance(exc, OSError):
-                print_error(f"Cannot write {target}: {exc.strerror or exc}.")
+            except OSError as exc:
+                done = ", ".join(str(p) for p in published) or "none"
+                print_error(
+                    f"Cannot write {target}: {exc.strerror or exc}. "
+                    f"Already written before the failure: {done}."
+                )
                 raise typer.Exit(code=1) from exc
-            raise
+            published.append(target)
     finally:
         for tmp, _ in staged:
             tmp.unlink(missing_ok=True)
-        for saved in saved_files:
-            saved.unlink(missing_ok=True)
 
 
 def _check_outputs(paths: list[Path], force: bool) -> None:
@@ -1228,6 +1225,9 @@ def _scaffold_plan_loop(
         typer.echo(f"# {plan_output}\n{plan_text}\n# {apply_output}\n{apply_text}")
         return
 
+    if os.path.abspath(plan_output) == os.path.abspath(apply_output):
+        print_error("--plan-output and --apply-output must be different files.")
+        raise typer.Exit(code=1)
     _check_outputs([plan_output, apply_output], force)
     _write_scaffold_files(
         [(plan_output, plan_text, 0o640), (apply_output, apply_text, 0o640)], force=force

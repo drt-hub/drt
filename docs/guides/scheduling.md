@@ -68,7 +68,7 @@ the storage extra of a `state.backend: gcs|s3`.
 Scaffolds accept a plain `--select` (name, glob, `tag:`, `destination:`). The
 `state:modified` / `state:new` selectors need a baseline manifest through
 `drt run --state`, which a scheduled job does not carry, so they are refused.
-Output paths must stay inside the project and must not pass through a symlink; files are staged under temporary names and moved into place together, so a failure part-way leaves every existing file as it was, an existing FIFO or hard-linked file is replaced rather than opened or modified, and without `--force` a file that appears late is never clobbered. Cron expressions are range-checked, and `--image` / `--secret-name` are validated. A concurrent attacker who can swap a parent directory for a symlink between the check and the write is out of scope.
+Output paths must stay inside the project and must not pass through a symlink; files are staged under temporary names first (a staging failure changes nothing) and then moved into place; an existing FIFO or hard-linked file is replaced rather than opened or modified, the final renames are not atomic across files (a failure there names the files already written; they are project files in Git, so `git restore` brings them back), and without `--force` a file that appears late is never clobbered. Cron expressions are range-checked, and `--image` / `--secret-name` are validated. A concurrent attacker who can swap a parent directory for a symlink between the check and the write is out of scope.
 
 Replace the project, region, repository, image, and service-account
 placeholders before applying it. Create the named Secret Manager secrets
