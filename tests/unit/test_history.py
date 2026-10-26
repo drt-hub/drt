@@ -235,6 +235,28 @@ class TestEngineHistoryIntegration:
         assert e.records_failed == 0
         assert e.duration_seconds >= 0
 
+    def test_applied_plan_and_approver_land_on_the_history_entry(self, tmp_path: Path) -> None:
+        from drt.engine.sync import run_sync
+
+        source, dest, sync, profile = self._setup_sync()
+        mgr = HistoryManager(tmp_path)
+        run_sync(
+            sync,
+            source,
+            dest,
+            profile,
+            tmp_path,
+            history_manager=mgr,
+            plan_id="sha256:abc",
+            approved_by="alice",
+        )
+        run_sync(sync, source, dest, profile, tmp_path, history_manager=mgr)
+
+        newest, ordinary = mgr.read(sync_name="history_demo")
+        applied, plain = sorted([newest, ordinary], key=lambda e: e.plan_id is None)
+        assert (applied.plan_id, applied.approved_by) == ("sha256:abc", "alice")
+        assert (plain.plan_id, plain.approved_by) == (None, None)
+
     def test_history_skipped_on_dry_run(self, tmp_path: Path) -> None:
         from drt.engine.sync import run_sync
 
@@ -343,6 +365,38 @@ class TestHistoryEntryCorrelationIds:
         [loaded] = mgr.read(sync_name="s")
         assert loaded.run_id == "cli-1"
         assert loaded.sync_run_id == "sync-1"
+
+    def test_plan_lineage_round_trips_and_defaults_to_none(self, tmp_path: Path) -> None:
+        assert _entry().plan_id is None and _entry().approved_by is None
+        mgr = HistoryManager(tmp_path)
+        entry = HistoryEntry(
+            sync_name="s",
+            started_at="2026-05-01T00:00:00+00:00",
+            completed_at="2026-05-01T00:00:01+00:00",
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+            plan_id="sha256:abc",
+            approved_by="alice",
+        )
+        mgr.append(entry)
+
+        [loaded] = mgr.read(sync_name="s")
+        assert (loaded.plan_id, loaded.approved_by) == ("sha256:abc", "alice")
+
+    def test_absent_optional_fields_are_left_out_of_the_serialized_line(
+        self, tmp_path: Path
+    ) -> None:
+        mgr = HistoryManager(tmp_path)
+        entry = _entry()
+        mgr.append(entry)
+
+        [line] = (
+            (tmp_path / ".drt" / "history" / f"{entry.sync_name}.jsonl").read_text().splitlines()
+        )
+
+        assert not {"guards", "plan_id", "approved_by"} & set(json.loads(line))
 
     def test_a_pre_762_jsonl_line_still_loads(self, tmp_path: Path) -> None:
         """The reader unpacks each line via HistoryEntry(**data); a line

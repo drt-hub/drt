@@ -439,7 +439,10 @@ def create_server(project_dir: Path | None = None) -> Any:
         Returns:
             Dict with ``entries`` list, each entry containing sync_name,
             started_at, completed_at, duration_seconds, status, records_synced,
-            records_failed, errors (truncated), and cursor_value_used.
+            records_failed, errors (truncated), and cursor_value_used. Runs
+            applied from a reviewed plan also carry ``plan_id`` and
+            ``approved_by``; runs that tripped or forced a change guard carry
+            ``guards``.
         """
         return _get_history(ctx, sync_name, limit)
 

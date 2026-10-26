@@ -96,6 +96,13 @@ from typing import Any
 
 from drt.config.credentials import SnowflakeProfile
 from drt.sources.snowflake import SnowflakeSource
+from drt.state._history_columns import (
+    OPTIONAL_HISTORY_COLUMNS,
+    column_list_sql,
+    decode_optional,
+    encode_optional,
+    resolve_optional_columns,
+)
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
@@ -282,6 +289,41 @@ class SnowflakeWarehouseHistoryStore:
 
     def __init__(self, profile: SnowflakeProfile) -> None:
         self._profile = profile
+        # Optional additive columns (#1264) present on the table; resolved lazily.
+        self._optional: tuple[str, ...] | None = None
+        self._alter_tried = False
+
+    def _optional_columns(self, conn: Any, *, allow_alter: bool) -> tuple[str, ...]:
+        """Optional history columns this table has; an append adds missing ones."""
+        complete = self._optional is not None and len(self._optional) == len(
+            OPTIONAL_HISTORY_COLUMNS
+        )
+        if self._optional is not None and (not allow_alter or self._alter_tried or complete):
+            return self._optional
+
+        def list_columns() -> list[str]:
+            cur = conn.cursor()
+            # Snowflake folds unquoted identifiers to upper case.
+            cur.execute(
+                f"SELECT column_name FROM {self._profile.database}.information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (self._profile.managed_schema.upper(), _HISTORY_TABLE.upper()),
+            )
+            return [row[0] for row in cur.fetchall()]
+
+        def add_column(name: str) -> None:
+            conn.cursor().execute(
+                f"ALTER TABLE {_qualified(self._profile, _HISTORY_TABLE)} "
+                f"ADD COLUMN IF NOT EXISTS {name} TEXT"
+            )
+
+        self._optional = resolve_optional_columns(
+            list_columns,
+            add_column if allow_alter else None,
+            table=f"{self._profile.managed_schema}.{_HISTORY_TABLE}",
+        )
+        self._alter_tried = self._alter_tried or allow_alter
+        return self._optional
 
     def _ensure_table(self, conn: Any) -> None:
         _ensure_table_exists(
@@ -308,6 +350,7 @@ class SnowflakeWarehouseHistoryStore:
             conn = _connect(self._profile)
             try:
                 self._ensure_table(conn)
+                present = self._optional_columns(conn, allow_alter=True)
                 cur = conn.cursor()
                 t = _qualified(self._profile, _HISTORY_TABLE)
                 # SELECT form, not VALUES: Snowflake disallows a function
@@ -315,8 +358,10 @@ class SnowflakeWarehouseHistoryStore:
                 cur.execute(
                     f"INSERT INTO {t} (sync_name, started_at, completed_at, "
                     "duration_seconds, status, records_synced, records_failed, "
-                    "errors, cursor_value_used, dry_run, run_id, sync_run_id) "
-                    "SELECT %s, %s, %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, %s, %s",
+                    "errors, cursor_value_used, dry_run, run_id, sync_run_id"
+                    + column_list_sql(present)
+                    + ") SELECT %s, %s, %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, %s, %s"
+                    + ", %s" * len(present),
                     (
                         entry.sync_name,
                         entry.started_at,
@@ -330,6 +375,7 @@ class SnowflakeWarehouseHistoryStore:
                         entry.dry_run,
                         entry.run_id,
                         entry.sync_run_id,
+                        *encode_optional(entry, present),
                     ),
                 )
             finally:
@@ -342,12 +388,13 @@ class SnowflakeWarehouseHistoryStore:
             return []
         conn = _connect(self._profile)
         try:
+            present = self._optional_columns(conn, allow_alter=False)
             cur = conn.cursor()
             t = _qualified(self._profile, _HISTORY_TABLE)
             columns = (
                 "sync_name, started_at, completed_at, duration_seconds, status, "
                 "records_synced, records_failed, errors, cursor_value_used, dry_run, "
-                "run_id, sync_run_id"
+                "run_id, sync_run_id" + column_list_sql(present)
             )
             if sync_name is not None:
                 cur.execute(
@@ -359,7 +406,7 @@ class SnowflakeWarehouseHistoryStore:
                 cur.execute(
                     f"SELECT {columns} FROM {t} ORDER BY started_at DESC LIMIT %s", (limit,)
                 )
-            return [_row_to_history_entry(row) for row in cur.fetchall()]
+            return [_row_to_history_entry(row, present) for row in cur.fetchall()]
         finally:
             conn.close()
 
@@ -380,7 +427,7 @@ class SnowflakeWarehouseHistoryStore:
             conn.close()
 
 
-def _row_to_history_entry(row: tuple[Any, ...]) -> HistoryEntry:
+def _row_to_history_entry(row: tuple[Any, ...], optional: tuple[str, ...] = ()) -> HistoryEntry:
     (
         sync_name,
         started_at,
@@ -394,8 +441,10 @@ def _row_to_history_entry(row: tuple[Any, ...]) -> HistoryEntry:
         dry_run,
         run_id,
         sync_run_id,
+        *optional_cells,
     ) = row
     return HistoryEntry(
+        **decode_optional(optional, optional_cells),
         sync_name=sync_name,
         started_at=started_at,
         completed_at=completed_at,

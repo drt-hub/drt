@@ -219,7 +219,7 @@ class ObjectStoreHistoryStore(_ObjectStoreBase):
     def _encode(entries: list[HistoryEntry]) -> bytes:
         if not entries:
             return b""
-        lines = "\n".join(json.dumps(asdict(entry), default=str) for entry in entries)
+        lines = "\n".join(json.dumps(entry.to_json_dict(), default=str) for entry in entries)
         return (lines + "\n").encode()
 
     def append(self, entry: HistoryEntry) -> None:

@@ -1043,3 +1043,130 @@ def test_secret_names_obey_the_63_character_label_limit(project: Path, name: str
     )
 
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Fourth adversarial round (#1291)
+# ---------------------------------------------------------------------------
+
+
+def test_a_failure_while_publishing_restores_every_file_already_replaced(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    root = project / "deploy" / "cloud-run-job"
+    root.mkdir(parents=True)
+    for name in ("Dockerfile", "job.yaml", "scheduler.sh"):
+        (root / name).write_text(f"old {name}")
+    real_replace = os.replace
+    published = {"n": 0}
+
+    def flaky_replace(src: Any, dst: Any) -> None:
+        # Only publishing renames a ".tmp" file; restoring renames a ".bak" back.
+        if str(src).endswith(".tmp"):
+            published["n"] += 1
+            if published["n"] == 2:  # the second file cannot be published
+                raise PermissionError(13, "Permission denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr("drt.cli.commands.deploy.os.replace", flaky_replace)
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *", "--force"])
+
+    assert result.exit_code == 1
+    for name in ("Dockerfile", "job.yaml", "scheduler.sh"):
+        assert (root / name).read_text() == f"old {name}", f"{name} was left at a new generation"
+    assert not list(root.glob(".*.tmp")) and not list(root.glob(".*.bak"))
+
+
+def test_a_publish_failure_removes_files_that_did_not_exist_before(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    real_link = os.link
+    calls = {"n": 0}
+
+    def flaky_link(src: Any, dst: Any, **kw: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise PermissionError(13, "Permission denied")
+        real_link(src, dst, **kw)
+
+    monkeypatch.setattr("drt.cli.commands.deploy.os.link", flaky_link)
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    assert result.exit_code == 1
+    assert not list((project / "deploy" / "cloud-run-job").glob("*"))
+
+
+def test_deploy_works_where_the_platform_has_no_fchmod(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows has no os.fchmod; the writer must fall back instead of raising AttributeError."""
+    import os
+
+    monkeypatch.delattr(os, "fchmod")
+
+    result = runner.invoke(app, ["deploy", "github-actions"])
+
+    assert result.exit_code == 0, result.output
+    assert (project / ".github/workflows/drt-sync.yml").is_file()
+
+
+def test_a_stale_temp_file_from_a_crashed_run_does_not_wedge_the_next_run(project: Path) -> None:
+    import os
+
+    target_dir = project / ".github" / "workflows"
+    target_dir.mkdir(parents=True)
+    (target_dir / f".drt-sync.yml.{os.getpid()}.tmp").write_text("left by a crash")
+
+    result = runner.invoke(app, ["deploy", "github-actions"])
+
+    assert result.exit_code == 0, result.output
+
+
+def test_uppercase_env_reference_keys_are_runtime_secrets(project: Path) -> None:
+    (project / "profiles.yml").write_text(
+        "default:\n  type: deltalake\n  AWS_SECRET_ACCESS_KEY_ENV: AWS_SECRET\n"
+    )
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    assert result.exit_code == 0, result.output
+    assert "AWS_SECRET" in (project / "deploy/cloud-run-job/job.yaml").read_text()
+
+
+@pytest.mark.parametrize("value", ["Bearer ${ALERT_TOKEN}", "${ALERT_TOKEN}", "Basic ${B64}"])
+def test_a_scheme_wrapped_reference_is_not_an_inline_secret(project: Path, value: str) -> None:
+    (project / "syncs" / "ok.yml").write_text(
+        "name: ok\nmodel: ref('x')\ndestination:\n  type: rest_api\n  url: https://x.invalid\n"
+        f'  headers:\n    Authorization: "{value}"\nsync:\n  mode: full\n'
+    )
+
+    assert runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"]).exit_code == 0
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "  headers:\n    X-API-Key: abc123\n",
+        "  headers:\n    x-api-key: abc123\n",
+        "alerts:\n  on_failure:\n    - type: webhook\n      url: https://hooks.example.invalid/SECRET\n",
+    ],
+)
+def test_more_credential_shapes_bypass_nothing(project: Path, snippet: str) -> None:
+    body = (
+        "name: leaky\nmodel: ref('x')\ndestination:\n  type: rest_api\n  url: https://x.invalid\n"
+    )
+    tail = "sync:\n  mode: full\n"
+    text = body + (snippet if snippet.startswith(" ") else "") + tail
+    if not snippet.startswith(" "):
+        text += snippet
+    (project / "syncs" / "leaky.yml").write_text(text)
+
+    result = runner.invoke(app, ["deploy", "cloud-run-job", "--schedule", "0 6 * * *"])
+
+    assert result.exit_code == 1 and "leaky.yml" in result.output

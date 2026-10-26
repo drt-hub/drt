@@ -89,7 +89,7 @@ def _collect_env_refs(node: Any, envs: set[str]) -> None:
         for key, value in node.items():
             if (
                 isinstance(key, str)
-                and key.endswith("_env")
+                and key.lower().endswith("_env")  # Delta/Iceberg profiles use `*_ENV`
                 and isinstance(value, str)
                 and _ENV_NAME.fullmatch(value)  # a name only: it lands in generated YAML/shell
             ):
@@ -200,10 +200,12 @@ def _cron_field_is_valid(field: str, low: int, high: int, names: dict[str, int])
 
 
 _SECRET_KEY = re.compile(
-    r"(?:^|_|-)(?:password|passwd|secret|token|api_?key|private_key|access_key|secret_key"
-    r"|authorization|webhook_url)$",
+    r"(?:^|_|-)(?:password|passwd|secret|token|api[_-]?key|private[_-]key|access[_-]key"
+    r"|secret[_-]key|authorization|webhook_url)$",
     re.IGNORECASE,
 )
+# `Bearer ${TOKEN}` is a reference wrapped in an auth scheme, not an embedded credential.
+_SCHEME_ONLY = re.compile(r"\s*(?:bearer|basic|token|apikey|api-key)?\s*", re.IGNORECASE)
 # A value that is only a ${VAR} placeholder is a reference, not a literal.
 _ONLY_PLACEHOLDER = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 # Subtrees that hold data or documentation, not connection credentials.
@@ -215,10 +217,15 @@ def _is_literal_secret(key: str, value: Any, parent: dict[Any, Any]) -> bool:
         return False
     if _ONLY_PLACEHOLDER.fullmatch(value) or _SECRET_URI.match(value):
         return False
+    if "${" in value and _SCHEME_ONLY.fullmatch(re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", "", value)):
+        return False
     if _SECRET_KEY.search(key):
         return True
     # `auth: {type: api_key, value: ...}` — the credential sits under a neutral key.
-    return key == "value" and parent.get("type") in {"api_key", "apikey", "header"}
+    if key == "value" and parent.get("type") in {"api_key", "apikey", "header"}:
+        return True
+    # An alert channel's URL is its credential (`alerts.on_*: [{type: webhook, url: ...}]`).
+    return key == "url" and parent.get("type") in {"webhook", "slack"}
 
 
 def _walk_inline_secrets(node: Any, path: str, found: list[str]) -> None:
@@ -376,18 +383,21 @@ def _check_target_is_safe(path: Path, project_dir: Path = Path(".")) -> None:
 def _write_scaffold_files(items: list[tuple[Path, str, int]], *, force: bool) -> None:
     """Write several scaffold files all-or-nothing, without ever opening an existing target.
 
-    Each file is written to a private temporary name in its own directory
-    (``O_EXCL | O_NOFOLLOW``, mode set on the descriptor) and only then moved into
-    place. That has three consequences the previous in-place write lacked:
+    Each file is written to a private, randomly named temporary file in its own
+    directory (``O_EXCL | O_NOFOLLOW``) and only then moved into place:
 
     * an existing FIFO, hard link or read-only file is *replaced*, never opened, so a
       FIFO cannot hang the command and a hard-linked file elsewhere is never modified;
-    * any failure while staging removes the temporaries and leaves every existing file
-      exactly as it was (no half-overwritten scaffold);
+    * a failure while staging removes the temporaries and changes nothing;
+    * a failure while publishing restores every file already published (the previous
+      content comes back, or a newly created file is removed), so the set of files is
+      never left at mixed generations;
     * without ``--force`` the final step is ``os.link``, which fails if the target
       appeared in the meantime, so a concurrently created file is never clobbered.
     """
     staged: list[tuple[Path, Path]] = []
+    backups: dict[Path, Path | None] = {}  # published target -> its saved previous file
+    saved_files: list[Path] = []  # every backup created, so none is leaked on a failure
     try:
         for target, content, mode in items:
             try:
@@ -395,7 +405,7 @@ def _write_scaffold_files(items: list[tuple[Path, str, int]], *, force: bool) ->
             except OSError as exc:
                 print_error(f"Cannot create {target.parent}: {exc.strerror or exc}.")
                 raise typer.Exit(code=1) from exc
-            tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+            tmp = target.with_name(f".{target.name}.{os.urandom(6).hex()}.tmp")
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             try:
                 fd = os.open(tmp, flags, mode)
@@ -404,24 +414,45 @@ def _write_scaffold_files(items: list[tuple[Path, str, int]], *, force: bool) ->
                 raise typer.Exit(code=1) from exc
             staged.append((tmp, target))
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), mode)
+                if hasattr(os, "fchmod"):  # POSIX; Windows has no descriptor-level chmod
+                    os.fchmod(handle.fileno(), mode)
                 handle.write(content)
-        for tmp, target in staged:
-            try:
+            if not hasattr(os, "fchmod"):
+                tmp.chmod(mode)
+        try:
+            for tmp, target in staged:
+                backup: Path | None = None
+                if force and target.exists():
+                    backup = target.with_name(f".{target.name}.{os.urandom(6).hex()}.bak")
+                    try:
+                        os.link(target, backup)  # keeps the old inode alive under another name
+                    except OSError:  # a filesystem without hard links: keep a copy instead
+                        backup.write_bytes(target.read_bytes())
+                    saved_files.append(backup)
                 if force:
                     os.replace(tmp, target)
                 else:
                     os.link(tmp, target)  # fails if the target now exists
                     tmp.unlink()
-            except FileExistsError:
+                backups[target] = backup
+        except BaseException as exc:
+            for published, saved in reversed(list(backups.items())):
+                if saved is not None:
+                    os.replace(saved, published)  # the previous content comes back
+                else:
+                    published.unlink(missing_ok=True)  # it did not exist before
+            if isinstance(exc, FileExistsError):
                 print_error(f"{target} already exists. Re-run with --force to overwrite.")
                 raise typer.Exit(code=1) from None
-            except OSError as exc:
+            if isinstance(exc, OSError):
                 print_error(f"Cannot write {target}: {exc.strerror or exc}.")
                 raise typer.Exit(code=1) from exc
+            raise
     finally:
         for tmp, _ in staged:
             tmp.unlink(missing_ok=True)
+        for saved in saved_files:
+            saved.unlink(missing_ok=True)
 
 
 def _check_outputs(paths: list[Path], force: bool) -> None:
