@@ -28,8 +28,8 @@ from drt.docs import (
 runner = CliRunner()
 
 
-def test_schema_version_is_4() -> None:
-    assert SCHEMA_VERSION == 4
+def test_schema_version_is_5() -> None:
+    assert SCHEMA_VERSION == 5
 
 
 def _write_project(project_dir: Path, profile: str = "bq_prod", name: str = "demo") -> None:
@@ -706,3 +706,59 @@ class TestDocsGenerateJsonCLI:
         result = runner.invoke(app, ["docs", "generate", "--format", "html"])
         assert result.exit_code == 0, result.output
         assert (tmp_path / "target" / "docs" / "index.html").exists()
+
+
+class TestManifestV5MetaAndFreshness:
+    """Schema v5 (#1226): sync.meta and the declared freshness contract."""
+
+    def _project(self, tmp_path: Path, extra: dict[str, object]) -> None:
+        import yaml
+
+        _write_project(tmp_path)
+        sync = _pg_sync("users", "public.users")
+        sync.update(extra)
+        (tmp_path / "syncs").mkdir(exist_ok=True)
+        (tmp_path / "syncs" / "users.yml").write_text(yaml.safe_dump(sync))
+
+    def test_meta_and_declared_freshness_are_emitted_without_an_email_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        self._project(
+            tmp_path,
+            {
+                "meta": {"owner": "Growth", "owner_email": "growth@example.com", "maturity": "low"},
+                "alerts": {"on_stale": {"max_age": "6h", "never_run": "error"}},
+            },
+        )
+
+        sync = build_manifest(tmp_path).to_dict()["syncs"][0]
+
+        assert sync["meta"] == {"owner": "Growth", "maturity": "low"}
+        assert sync["freshness"] == {"max_age_seconds": 21600, "never_run": "error"}
+        assert "growth@example.com" not in json.dumps(sync)
+
+    def test_full_labels_adds_the_owner_email(self, tmp_path: Path) -> None:
+        self._project(tmp_path, {"meta": {"owner": "Growth", "owner_email": "growth@example.com"}})
+
+        sync = build_manifest(tmp_path, full_labels=True).to_dict()["syncs"][0]
+
+        assert sync["meta"]["owner_email"] == "growth@example.com"
+
+    def test_a_sync_without_them_omits_both_keys_and_round_trips(self, tmp_path: Path) -> None:
+        self._project(tmp_path, {})
+
+        data = build_manifest(tmp_path).to_dict()
+
+        assert "meta" not in data["syncs"][0] and "freshness" not in data["syncs"][0]
+        assert Manifest.from_dict(data).to_dict() == data
+
+    def test_a_v4_manifest_still_loads(self) -> None:
+        v4 = {
+            "schema_version": 4,
+            "drt_version": "1.2.1",
+            "syncs": [{"name": "u", "source": "s", "destination": "d", "mode": "upsert"}],
+        }
+
+        sync = Manifest.from_dict(v4).syncs[0]
+
+        assert sync.meta is None and sync.freshness is None

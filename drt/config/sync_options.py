@@ -978,6 +978,22 @@ _WRITE_POLICY_SQL_DESTINATION_TYPES = frozenset(
 )
 
 
+class SyncMetaConfig(BaseModel):
+    """``meta`` on a sync (#1226): who owns it and how much to trust it.
+
+    Catalog metadata for ``drt docs`` and ``drt docs generate --format dbt-exposures``;
+    it never changes how a sync runs. ``owner`` and ``maturity`` are authored for
+    display, so they appear in the default manifest; ``owner_email`` is personal data
+    and is emitted only with ``--full-labels`` (#696).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner: str | None = None
+    owner_email: str | None = None
+    maturity: Literal["high", "medium", "low"] = "high"
+
+
 class SyncConfig(BaseModel):
     name: str
     description: str = ""
@@ -990,6 +1006,7 @@ class SyncConfig(BaseModel):
     # queries the real destination after a sync has run.
     unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
+    meta: SyncMetaConfig | None = None  # catalog metadata (#1226); no runtime effect
 
     @model_validator(mode="after")
     def _check_write_policy_destination_mode(self) -> SyncConfig:

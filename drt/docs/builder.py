@@ -9,6 +9,7 @@ from pathlib import Path
 
 from drt import __version__
 from drt._redaction import redact_error_text as _redact_error_text
+from drt.config.duration import parse_max_age
 from drt.config.fingerprint import sync_fingerprints
 from drt.config.models import SyncConfig
 from drt.config.parser import load_project, load_syncs_safe
@@ -21,6 +22,8 @@ from drt.docs.manifest import (
     Source,
     Sync,
     SyncField,
+    SyncFreshness,
+    SyncMeta,
     SyncRun,
     SyncStateSnapshot,
 )
@@ -182,6 +185,29 @@ def _sync_runs(entries: list[HistoryEntry], redact: bool) -> tuple[SyncRun, ...]
     return tuple(runs)
 
 
+def _sync_meta(sync_cfg: SyncConfig, full_labels: bool) -> SyncMeta | None:
+    """The sync's ``meta`` block; ``owner_email`` is personal data (--full-labels only)."""
+    meta = sync_cfg.meta
+    if meta is None:
+        return None
+    return SyncMeta(
+        owner=meta.owner,
+        owner_email=meta.owner_email if full_labels else None,
+        maturity=meta.maturity,
+    )
+
+
+def _sync_freshness(sync_cfg: SyncConfig) -> SyncFreshness | None:
+    """The declared ``alerts.on_stale`` contract. A declaration, never a time-dependent verdict."""
+    on_stale = sync_cfg.alerts.on_stale if sync_cfg.alerts is not None else None
+    if on_stale is None:
+        return None
+    return SyncFreshness(
+        max_age_seconds=int(parse_max_age(on_stale.max_age).total_seconds()),
+        never_run=on_stale.never_run,
+    )
+
+
 def _declared_fields(sync_cfg: SyncConfig) -> tuple[SyncField, ...]:
     """Write-side column facts declared on the sync (v2, #808 column lineage).
 
@@ -311,6 +337,8 @@ def build_manifest(
                 fields=_declared_fields(sync_cfg),
                 dlq_depth=dlq_depths.get(sync_cfg.name, 0) if include_state else None,
                 config_hash=fingerprints.get(sync_cfg.name),
+                meta=_sync_meta(sync_cfg, full_labels),
+                freshness=_sync_freshness(sync_cfg),
             )
         )
 

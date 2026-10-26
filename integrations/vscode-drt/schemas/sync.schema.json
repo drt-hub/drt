@@ -4939,6 +4939,48 @@
       "title": "StagedUploadPollConfig",
       "type": "object"
     },
+    "SyncMetaConfig": {
+      "additionalProperties": false,
+      "description": "``meta`` on a sync (#1226): who owns it and how much to trust it.\n\nCatalog metadata for ``drt docs`` and ``drt docs generate --format dbt-exposures``;\nit never changes how a sync runs. ``owner`` and ``maturity`` are authored for\ndisplay, so they appear in the default manifest; ``owner_email`` is personal data\nand is emitted only with ``--full-labels`` (#696).",
+      "properties": {
+        "owner": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner"
+        },
+        "owner_email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner Email"
+        },
+        "maturity": {
+          "default": "high",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ],
+          "title": "Maturity",
+          "type": "string"
+        }
+      },
+      "title": "SyncMetaConfig",
+      "type": "object"
+    },
     "SyncOptions": {
       "properties": {
         "mode": {
@@ -5969,6 +6011,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/AlertsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "meta": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SyncMetaConfig"
         },
         {
           "type": "null"

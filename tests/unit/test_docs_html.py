@@ -577,3 +577,57 @@ def test_collect_sync_yaml_texts_redacts_secrets(tmp_path: Path) -> None:
     assert "PG_PASSWORD" in text  # *_env reference preserved
     assert "batch_size: 100" in text  # non-sensitive value preserved
     assert "inline secrets / PII masked" in text  # redaction note shown
+
+
+def _ops_manifest(**sync_fields: object) -> Manifest:
+    from dataclasses import replace
+
+    base = _manifest()
+    first = replace(base.syncs[0], **sync_fields)  # type: ignore[arg-type]
+    return replace(base, syncs=[first, *base.syncs[1:]])
+
+
+def test_sync_page_shows_owner_declared_freshness_and_last_plan(tmp_path: Path) -> None:
+    from drt.docs.manifest import SyncFreshness, SyncMeta, SyncRun
+
+    run = SyncRun(
+        started_at="2026-06-27T06:00:00Z",
+        completed_at="2026-06-27T06:01:00Z",
+        duration_seconds=60.0,
+        status="success",
+        records_synced=3,
+        records_failed=0,
+        plan_id="sha256:abc123",
+    )
+    out = tmp_path / "docs"
+    render_html(
+        _ops_manifest(
+            meta=SyncMeta(owner="Growth team", maturity="medium"),
+            freshness=SyncFreshness(max_age_seconds=21600),
+            runs=(run,),
+        ),
+        out,
+    )
+
+    html = (out / "sync/customers-to-discord.html").read_text(encoding="utf-8")
+
+    assert "owner: Growth team" in html and "maturity: <code>medium</code>" in html
+    assert "last success within <code>6h</code>" in html
+    assert "last applied plan: sha256:abc123" in html
+
+
+def test_sync_page_is_unchanged_without_operational_metadata(site: Path) -> None:
+    html = (site / "sync/customers-to-discord.html").read_text(encoding="utf-8")
+
+    assert "owner:" not in html and "freshness:" not in html and "last applied plan" not in html
+
+
+def test_owner_text_is_escaped_in_the_sync_page(tmp_path: Path) -> None:
+    from drt.docs.manifest import SyncMeta
+
+    out = tmp_path / "docs"
+    render_html(_ops_manifest(meta=SyncMeta(owner="<script>alert(1)</script>")), out)
+
+    html = (out / "sync/customers-to-discord.html").read_text(encoding="utf-8")
+
+    assert "<script>alert(1)</script>" not in html and "&lt;script&gt;" in html

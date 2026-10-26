@@ -339,6 +339,15 @@ Dashed edges are destination lookups.</p>
 {% endblock %}
 """
 
+
+def _duration_label(seconds: int) -> str:
+    """``21600`` -> ``6h`` (the largest whole unit), for the declared freshness contract."""
+    for unit, size in (("w", 604800), ("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds % size == 0 and seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
 _SYNC = """\
 {% extends layout %}
 {% block main %}
@@ -359,6 +368,9 @@ _SYNC = """\
     <div class="kpi__label">Configuration</div>
     <div>source: <code>{{ sync.source }}</code> &middot; mode: <code>{{ sync.mode }}</code></div>
     <div class="font-mono">&rarr; {{ destination_label }}</div>
+    {% if sync.meta %}<div>owner: {{ sync.meta.owner or '&mdash;'|safe }} &middot; maturity: <code>{{ sync.meta.maturity }}</code></div>{% endif %}
+    {% if sync.freshness %}<div>freshness: last success within <code>{{ freshness_label }}</code></div>{% endif %}
+    {% if last_plan %}<div class="font-mono">last applied plan: {{ last_plan }}</div>{% endif %}
   </div>
 </div>
 
@@ -772,6 +784,8 @@ def render_html(
                 source_slug=source_slugs.get(s.source, _slug(s.source)),
                 destination_slug=dest_slugs.get(s.destination, _slug(s.destination)),
                 destination_label=dest.label if dest else s.destination,
+                freshness_label=_duration_label(s.freshness.max_age_seconds) if s.freshness else "",
+                last_plan=next((run.plan_id for run in s.runs if run.plan_id), None),
                 yaml_html=yaml_html,
                 yaml_is_raw=raw_yaml is not None,
                 yaml_path=yaml_path,

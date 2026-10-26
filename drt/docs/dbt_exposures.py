@@ -103,11 +103,17 @@ def render_dbt_exposures(
         if model_ref is None:
             continue
         destination = destinations[sync.destination]
+        meta = sync.meta
+        owner: dict[str, object] = {"name": (meta.owner if meta and meta.owner else "drt")}
+        # owner_email never reaches this artifact: exposures are built from the repo with
+        # default (docs-safe) labels, so the manifest carries no email here.
+        if meta and meta.owner_email:
+            owner["email"] = meta.owner_email
         exposure: dict[str, object] = {
             "name": exposure_names[sync.name],
             "type": "application",
-            "maturity": "high",
-            "owner": {"name": "drt"},
+            "maturity": meta.maturity if meta else "high",
+            "owner": owner,
             "depends_on": [f"ref('{model_ref}')"],
             "description": (
                 f"drt sync {sync.name} -> {destination.type} ({sync.mode}). Managed by drt."
@@ -115,13 +121,19 @@ def render_dbt_exposures(
         }
         if sync_page_url := sync_page_urls.get(sync.name):
             exposure["url"] = sync_page_url
-        exposure["meta"] = {
-            "drt": {
-                "sync": sync.name,
-                "destination": destination.type,
-                "mode": sync.mode,
-            }
+        drt_meta: dict[str, object] = {
+            "sync": sync.name,
+            "destination": destination.type,
+            "mode": sync.mode,
         }
+        if sync.freshness is not None:
+            # The declared contract only; a fresh/stale verdict would depend on the
+            # clock and break byte-identical regeneration.
+            drt_meta["freshness"] = {
+                "max_age_seconds": sync.freshness.max_age_seconds,
+                "never_run": sync.freshness.never_run,
+            }
+        exposure["meta"] = {"drt": drt_meta}
         exposures.append(exposure)
 
     rendered = yaml.safe_dump(
