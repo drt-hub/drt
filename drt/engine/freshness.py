@@ -103,7 +103,12 @@ def _last_success(sync_name: str, history: Any, stored: Any) -> tuple[datetime |
             seen_run = True
             if entry.status != "success":
                 continue
-            when = _parse_time(entry.completed_at) or _parse_time(entry.started_at)
+            completed = _parse_time(entry.completed_at)
+            if completed is None and entry.completed_at:
+                # started_at may still give a usable time, but a garbled completion
+                # time is a damaged record and must be surfaced, not papered over.
+                report_unreadable(f"{sync_name}: a history entry has an unreadable completed_at")
+            when = completed or _parse_time(entry.started_at)
             if when is None:
                 # A "success" whose time cannot be read must not be silently ignored.
                 report_unreadable(f"{sync_name}: a history entry has an unreadable timestamp")

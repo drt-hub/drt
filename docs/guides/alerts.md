@@ -206,7 +206,8 @@ Rules:
   `--check` exits 1 with the count (`unreadable_evidence` in JSON; MCP `ok` is false;
   `--allow-empty` does not hide it). Covered: a corrupt or non-object `state.json`
   (local and GCS/S3), malformed history lines (local and object-store), a success whose
-  timestamp cannot be parsed, and a missing GCS bucket. Warehouse-backed stores raise on
+  completion or start timestamp cannot be parsed, and a missing GCS or S3 bucket (probed with
+  a one-item listing, so no extra IAM permission is needed). Warehouse-backed stores raise on
   query or decode errors, so those fail the command outright. It cannot detect a record
   that is well-formed but wrong.
 - Unknown keys under `on_stale` (for example `never_runs`) are rejected, so a typo cannot

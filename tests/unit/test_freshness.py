@@ -677,3 +677,17 @@ def test_a_success_older_than_two_hundred_failures_is_still_found(tmp_path: Path
     [verdict] = evaluate_freshness([_sync("orders")], mgr, {}, NOW)
 
     assert verdict.state == "fresh" and verdict.age_seconds == 5 * 3600
+
+
+def test_a_garbled_completed_at_is_reported_even_when_started_at_is_usable(tmp_path: Path) -> None:
+    from drt.state._integrity import collect_unreadable
+
+    mgr = HistoryManager(tmp_path)
+    entry = _entry("orders", 1)
+    entry.completed_at = "garbled"  # started_at stays a valid recent time
+    mgr.append(entry)
+
+    with collect_unreadable() as seen:
+        [verdict] = evaluate_freshness([_sync("orders")], mgr, {}, NOW)
+
+    assert verdict.state == "fresh" and seen, "the damaged record must be surfaced"
