@@ -355,17 +355,26 @@ def create_server(project_dir: Path | None = None) -> Any:
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    def drt_get_status(sync_name: str | None = None) -> dict[str, Any]:
-        """Get the last sync run result(s).
+    def drt_get_status(
+        sync_name: str | None = None, check: bool = False, allow_empty: bool = False
+    ) -> dict[str, Any]:
+        """Get the last sync run result(s), or judge their freshness.
 
         Args:
             sync_name: Name of a specific sync. If omitted, returns all syncs.
+            check: Instead of the last run, return the freshness verdict of every
+                sync that configures ``alerts.on_stale`` (same as
+                ``drt status --check``): ``ok`` plus one entry per sync with
+                ``state`` (fresh / stale / never_run / clock_skew), ``severity``, age and
+                limit. ``ok`` is false when nothing is monitored.
+            allow_empty: With ``check``, treat "no sync configures ``alerts.on_stale``"
+                as ``ok`` (for rolling the watchdog out).
 
         Returns:
             Dict of sync_name → last run status (last_run_at, records_synced,
-            status, last_cursor_value).
+            status, last_cursor_value); with ``check``, the freshness verdict.
         """
-        return _get_status(ctx, sync_name)
+        return _get_status(ctx, sync_name, check, allow_empty)
 
     # -----------------------------------------------------------------------
     # drt_state_show / drt_state_reset (#776)

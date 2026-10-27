@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from drt.state._filelock import advisory_lock
+from drt.state._integrity import report_unreadable
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +241,8 @@ def _read_jsonl(path: Path) -> list[HistoryEntry]:
                         path,
                         exc,
                     )
+                    report_unreadable(f"history: malformed line {lineno} in {path.name}")
     except OSError as exc:
         logger.warning("history: cannot read %s: %s", path, exc)
+        report_unreadable(f"history: cannot read {path.name}")
     return entries

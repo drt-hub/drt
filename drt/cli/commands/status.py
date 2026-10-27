@@ -38,6 +38,30 @@ def status(
         help="Only show entries for this sync (--history mode only).",
     ),
     limit: int = typer.Option(20, "--limit", help="Max entries to show in --history mode."),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help=(
+            "Judge sync freshness against alerts.on_stale and exit 1 if any sync is stale "
+            "(for cron / CI). Read-only; evaluated from run history."
+        ),
+    ),
+    select: list[str] | None = typer.Option(
+        None, "--select", help="With --check: only these syncs (name, glob, tag:..., ...)."
+    ),
+    notify: bool = typer.Option(
+        False,
+        "--notify",
+        help="With --check: send an alert to each stale sync's alerts.on_stale.channels.",
+    ),
+    allow_empty: bool = typer.Option(
+        False,
+        "--allow-empty",
+        help=(
+            "With --check: do not fail when no selected sync configures alerts.on_stale "
+            "(for rolling the watchdog out before the syncs are configured)."
+        ),
+    ),
 ) -> None:
     """Show the status of the most recent sync runs."""
     from drt.security import PermissionAction, get_permission_checker
@@ -47,6 +71,23 @@ def status(
     # sync_name=None here — this checks project-wide view access; a
     # per-sync check would additionally apply once --sync narrows the read.
     get_permission_checker().check(PermissionAction.VIEW, None)
+
+    if check:
+        if history or sync_name or verbose:
+            typer.echo(
+                "drt status: --check cannot be combined with --history, --sync or --verbose "
+                "(use --select to choose syncs).",
+                err=True,
+            )
+            raise typer.Exit(1)
+        _check_freshness(select=select, notify=notify, output=output, allow_empty=allow_empty)
+        return
+    if notify or select or allow_empty:
+        typer.echo(
+            "drt status: --select, --notify and --allow-empty only apply together with --check.",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     if history:
         _print_history(sync_name=sync_name, limit=limit, output=output)
@@ -103,6 +144,119 @@ def status(
                 f"[yellow]⚠ {name}: {dlq_depths[name]} record(s) in dead letter "
                 f"queue — run [bold]drt retry {name}[/bold] to replay.[/yellow]"
             )
+
+
+def _check_freshness(
+    *, select: list[str] | None, notify: bool, output: str, allow_empty: bool = False
+) -> None:
+    """``drt status --check`` (#1224): exit 1 when any sync is stale.
+
+    Fails closed: a check that monitors nothing (no selected sync configures
+    ``alerts.on_stale``, or there are no syncs) exits 1 rather than reporting a
+    green that means nothing; ``--allow-empty`` opts out while the watchdog is
+    being rolled out. Selected syncs without ``on_stale`` are listed as
+    *unmonitored* so a partial rollout is visible.
+    """
+    from drt.alerts.dispatcher import dispatch_targets
+    from drt.cli._selection import SelectionError, select_syncs
+    from drt.config.models import SlackAlertConfig
+    from drt.config.parser import load_project, load_syncs
+    from drt.engine.freshness import evaluate_freshness, has_failure
+    from drt.state._integrity import collect_unreadable as collect_unreadable_evidence
+    from drt.state.factory import build_state_bundle
+
+    project_dir = Path(".")
+    try:
+        project = load_project(project_dir)
+        syncs = select_syncs(load_syncs(project_dir), select)
+    except (FileNotFoundError, ValueError, SelectionError) as e:
+        typer.echo(f"drt status --check: {type(e).__name__}: {e}", err=True)
+        raise typer.Exit(1) from e
+
+    bundle = build_state_bundle(project, project_dir)
+    with collect_unreadable_evidence() as unreadable:
+        verdicts = evaluate_freshness(syncs, bundle.history, bundle.state.get_all())
+    monitored = {v.sync_name for v in verdicts}
+    unmonitored = sorted(s.name for s in syncs if s.name not in monitored)
+    by_name = {s.name: s for s in syncs}
+
+    if notify:
+        from drt.config.sync_options import SlackAlertConfig as _Slack
+
+        default_message = _Slack.model_fields["message"].default
+        for v in verdicts:
+            if v.severity == "ok":
+                continue
+            config = by_name[v.sync_name].alerts.on_stale  # type: ignore[union-attr]
+            targets = [
+                # The inherited Slack default says "failed"; a stale alert should not.
+                t.model_copy(update={"message": "drt sync `{sync_name}` is stale: {error}"})
+                if isinstance(t, SlackAlertConfig) and t.message == default_message
+                else t
+                for t in config.channels  # type: ignore[union-attr]
+            ]
+            dispatch_targets(
+                targets,
+                {
+                    # The same keys every other alert provides, so any documented
+                    # template variable resolves instead of silently dropping the alert.
+                    "sync_name": v.sync_name,
+                    "status": v.state,
+                    "error": f"{v.state.replace('_', ' ')} \u2014 {v.message()}",
+                    "rows_processed": 0,
+                    "duration_s": 0,
+                    "started_at": v.last_success_at or "",
+                    "run_id": None,
+                    "sync_run_id": None,
+                    "last_success_at": v.last_success_at,
+                    "age_seconds": v.age_seconds,
+                    "max_age_seconds": v.max_age_seconds,
+                },
+            )
+
+    nothing_monitored = not verdicts
+    # A corrupt state/history record is not "never ran": fail rather than report green.
+    failed = has_failure(verdicts) or (nothing_monitored and not allow_empty) or bool(unreadable)
+    if output == "json":
+        print(
+            json.dumps(
+                {
+                    "ok": not failed,
+                    "checked": len(verdicts),
+                    "unmonitored": unmonitored,
+                    "unreadable_evidence": len(unreadable),
+                    "syncs": [v.to_dict() for v in verdicts],
+                },
+                indent=2,
+            )
+        )
+    else:
+        from rich.markup import escape
+
+        for v in verdicts:
+            colour = {"ok": "green", "warn": "yellow", "error": "red"}[v.severity]
+            console.print(
+                f"[{colour}]{v.state:<10}[/{colour}] {escape(v.sync_name)} \u2014 {v.message()}"
+            )
+        if unmonitored:
+            console.print(
+                "[yellow]Not monitored (no alerts.on_stale): "
+                + ", ".join(escape(n) for n in unmonitored)
+                + "[/yellow]"
+            )
+        if unreadable:
+            console.print(
+                f"[red]{len(unreadable)} state/history record(s) could not be read; the "
+                "verdicts above may be wrong. Fix or restore the state, then re-run.[/red]"
+            )
+        if nothing_monitored:
+            colour = "yellow" if allow_empty else "red"
+            console.print(
+                f"[{colour}]Nothing was checked: no selected sync configures "
+                f"alerts.on_stale.[/{colour}]"
+            )
+    if failed:
+        raise typer.Exit(1)
 
 
 def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
