@@ -292,6 +292,36 @@ def _run_to_dict(r: SyncRun) -> dict[str, Any]:
     return d
 
 
+def _meta_from_dict(data: Any) -> SyncMeta | None:
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ValueError("manifest syncs[].meta must be an object")
+    unknown = set(data) - {"owner", "owner_email", "maturity"}
+    if unknown:
+        raise ValueError(f"manifest syncs[].meta has unknown key(s): {sorted(unknown)}")
+    for key in ("owner", "owner_email"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            raise ValueError(f"manifest syncs[].meta.{key} must be a string")
+    if data.get("maturity", "high") not in {"high", "medium", "low"}:
+        raise ValueError("manifest syncs[].meta.maturity must be high, medium or low")
+    return SyncMeta(**data)
+
+
+def _freshness_from_dict(data: Any) -> SyncFreshness | None:
+    if data is None:
+        return None
+    if (
+        not isinstance(data, dict)
+        or set(data) - {"max_age_seconds", "never_run"}
+        or not isinstance(data.get("max_age_seconds"), int)
+        or isinstance(data.get("max_age_seconds"), bool)
+        or data.get("never_run", "warn") not in {"warn", "error"}
+    ):
+        raise ValueError("manifest syncs[].freshness is malformed")
+    return SyncFreshness(**data)
+
+
 def _sync_from_dict(d: dict[str, Any]) -> Sync:
     state_data = d.get("state")
     state = SyncStateSnapshot(**state_data) if state_data else None
@@ -309,6 +339,6 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         fields=tuple(SyncField(**f) for f in d.get("fields", [])),
         dlq_depth=d.get("dlq_depth"),
         config_hash=d.get("config_hash"),
-        meta=SyncMeta(**d["meta"]) if d.get("meta") else None,
-        freshness=SyncFreshness(**d["freshness"]) if d.get("freshness") else None,
+        meta=_meta_from_dict(d.get("meta")),
+        freshness=_freshness_from_dict(d.get("freshness")),
     )

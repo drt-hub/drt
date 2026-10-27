@@ -143,7 +143,7 @@ sync a `meta` block and dbt sees who owns it and how far to trust it:
 # syncs/users_to_hubspot.yml
 meta:
   owner: Growth team          # exposure owner.name
-  owner_email: growth@acme.io # personal data: never written to dbt exposures
+  owner_email: growth@acme.io # personal data: never written to dbt exposures, and masked in the docs site
   maturity: medium            # high | medium | low (default high)
 alerts:
   on_stale:

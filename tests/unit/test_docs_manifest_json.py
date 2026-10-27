@@ -762,3 +762,28 @@ class TestManifestV5MetaAndFreshness:
         sync = Manifest.from_dict(v4).syncs[0]
 
         assert sync.meta is None and sync.freshness is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"meta": []},
+        {"meta": "owner"},
+        {"meta": {"owner": 123}},
+        {"meta": {"owner": "a", "extra": 1}},
+        {"meta": {"maturity": "ultra"}},
+        {"freshness": {"max_age_seconds": "6h"}},
+        {"freshness": {"max_age_seconds": 60, "never_run": "maybe"}},
+        {"freshness": {"max_age_seconds": 60, "bogus": 1}},
+        {"freshness": []},
+    ],
+)
+def test_malformed_v5_meta_or_freshness_is_rejected_consistently(bad: dict[str, object]) -> None:
+    doc = {
+        "schema_version": 5,
+        "drt_version": "1.3.0",
+        "syncs": [{"name": "u", "source": "s", "destination": "d", "mode": "upsert", **bad}],
+    }
+
+    with pytest.raises(ValueError):
+        Manifest.from_dict(doc)

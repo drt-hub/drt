@@ -105,10 +105,8 @@ def render_dbt_exposures(
         destination = destinations[sync.destination]
         meta = sync.meta
         owner: dict[str, object] = {"name": (meta.owner if meta and meta.owner else "drt")}
-        # owner_email never reaches this artifact: exposures are built from the repo with
-        # default (docs-safe) labels, so the manifest carries no email here.
-        if meta and meta.owner_email:
-            owner["email"] = meta.owner_email
+        # owner_email is personal data and is deliberately never written here, whatever
+        # labels the manifest was built with: a dbt project is committed and shared.
         exposure: dict[str, object] = {
             "name": exposure_names[sync.name],
             "type": "application",

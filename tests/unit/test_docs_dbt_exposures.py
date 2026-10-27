@@ -321,3 +321,22 @@ def test_unknown_meta_keys_are_rejected(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(app, ["validate"])
 
     assert result.exit_code != 0
+
+
+def test_the_public_renderer_never_emits_an_email_even_for_a_full_labels_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from drt.docs.builder import build_manifest
+    from drt.docs.dbt_exposures import render_dbt_exposures
+
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    _write_sync_with(
+        tmp_path, "users_to_hubspot", {"meta": {"owner": "G", "owner_email": "g@example.com"}}
+    )
+    manifest = build_manifest(Path("."), full_labels=True)
+    assert manifest.syncs[0].meta is not None and manifest.syncs[0].meta.owner_email
+
+    out = render_dbt_exposures(manifest, {"users_to_hubspot": "mart_users"})
+
+    assert "g@example.com" not in out and "email" not in out

@@ -409,7 +409,16 @@ _SENSITIVE_KEY_RE = re.compile(
 # scalar on the same line (block scalars / nested maps have no inline value).
 _YAML_KV_RE = re.compile(r"^(\s*(?:-\s+)?)([A-Za-z0-9_.\-]+)(\s*:\s+)(\S.*)$")
 _REDACTION = "'« redacted »'"
+# `key: value` pairs inside a one-line flow mapping, e.g. `meta: {owner: A, owner_email: b@c}`.
+_FLOW_PAIR_RE = re.compile(r"([A-Za-z0-9_.\-]+)(\s*:\s*)([^,{}\[\]]+)")
 _MAX_YAML_BYTES = 64 * 1024  # a sync definition beyond this is pathological
+
+
+def _mask_flow_pair(match: re.Match[str]) -> str:
+    key, sep, _value = match.groups()
+    if key.endswith("_env") or not _SENSITIVE_KEY_RE.search(key):
+        return match.group(0)
+    return f"{key}{sep}{_REDACTION}"
 
 
 def _redact_sensitive_yaml(raw: str) -> tuple[str, bool]:
@@ -427,7 +436,14 @@ def _redact_sensitive_yaml(raw: str) -> tuple[str, bool]:
         if m:
             prefix, key, sep, value = m.groups()
             block_or_anchor = value[:1] in {"|", ">", "&", "*", "#"}
-            if key.endswith("_env") or block_or_anchor or not _SENSITIVE_KEY_RE.search(key):
+            if value[:1] in {"{", "["} and not (
+                _SENSITIVE_KEY_RE.search(key) and not key.endswith("_env")
+            ):
+                # A flow collection hides its own keys from the line rule above.
+                masked = _FLOW_PAIR_RE.sub(_mask_flow_pair, value)
+                redacted = redacted or masked != value
+                out.append(f"{prefix}{key}{sep}{masked}")
+            elif key.endswith("_env") or block_or_anchor or not _SENSITIVE_KEY_RE.search(key):
                 out.append(line)
             else:
                 out.append(f"{prefix}{key}{sep}{_REDACTION}")
@@ -484,6 +500,13 @@ def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, tuple[st
             display = encoded[:_MAX_YAML_BYTES].decode("utf-8", "ignore").rstrip()
             display += f"\n# … truncated by drt docs (file exceeds {_MAX_YAML_BYTES // 1024} KiB)"
         display, redacted = _redact_sensitive_yaml(display)
+        # Belt and braces: the line rules cannot see every YAML shape (anchors, block
+        # scalars, odd flow layouts), so the owner's e-mail address is also removed by value.
+        meta_block = parsed.get("meta")
+        email = meta_block.get("owner_email") if isinstance(meta_block, dict) else None
+        if isinstance(email, str) and email and email in display:
+            display = display.replace(email, "« redacted »")
+            redacted = True
         if redacted:
             display = (
                 "# drt docs: inline secrets / PII masked — prefer *_env references\n" + display

@@ -631,3 +631,41 @@ def test_owner_text_is_escaped_in_the_sync_page(tmp_path: Path) -> None:
     html = (out / "sync/customers-to-discord.html").read_text(encoding="utf-8")
 
     assert "<script>alert(1)</script>" not in html and "&lt;script&gt;" in html
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    [
+        "name: s\nmeta: {owner: Growth, owner_email: growth@example.com}\n",
+        "name: s\nmeta:\n  owner: Growth\n  owner_email: growth@example.com\n",
+        "name: s\nmeta: &m\n  owner: Growth\n  owner_email: growth@example.com\nalias: *m\n",
+        (
+            "name: s\nnote: |\n  contact growth@example.com\n"
+            "meta:\n  owner_email: growth@example.com\n"
+        ),
+    ],
+)
+def test_owner_email_never_reaches_the_raw_yaml_tab(tmp_path: Path, yaml_text: str) -> None:
+    from drt.docs.builder import collect_sync_yaml_texts
+
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "syncs" / "s.yml").write_text(yaml_text)
+
+    _path, shown = collect_sync_yaml_texts(tmp_path)["s"]
+
+    assert "growth@example.com" not in shown
+    if "Growth" in yaml_text:  # the display name stays; only the address is masked
+        assert "Growth" in shown
+
+
+def test_a_sensitive_key_inside_any_flow_mapping_is_masked(tmp_path: Path) -> None:
+    from drt.docs.builder import collect_sync_yaml_texts
+
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "syncs" / "s.yml").write_text(
+        "name: s\ndestination: {type: rest_api, auth: {token: hunter2}, password: pw9}\n"
+    )
+
+    _path, shown = collect_sync_yaml_texts(tmp_path)["s"]
+
+    assert "hunter2" not in shown and "pw9" not in shown

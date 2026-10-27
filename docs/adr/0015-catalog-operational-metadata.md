@@ -26,8 +26,9 @@ hosted or dbt-bound output (#696).
    clock; putting it in the manifest or exposures would make regeneration differ between
    runs and break the drift gate. The verdict stays `drt status --check`.
 4. **dbt exposures** use `meta.owner` / `meta.maturity` and add `meta.drt.freshness`.
-   They are built from the repo with default labels and without run state, so the email
-   and the last applied plan never reach the dbt project.
+   The renderer **never emits the e-mail, whatever labels the manifest was built with**,
+   and the CLI builds them without run state, so the last applied plan never reaches the
+   dbt project either.
 5. **The docs site** shows owner, maturity, the declared freshness and (when history is
    included) the last applied plan on the sync page, only when present, so existing
    output and visual baselines are unchanged.
