@@ -1,6 +1,6 @@
 # ADR 0016 — Managed destination tables: `manage_table` and `on_schema_change`
 
-- **Status:** Proposed 2026-10-28 (design draft; owner review pending — see "Open questions").
+- **Status:** Accepted 2026-10-28 (owner confirmed the proposals — see "Decisions").
 - **Issue:** [#760](https://github.com/drt-hub/drt/issues/760) (epic [#1227](https://github.com/drt-hub/drt/issues/1227)).
 - **Relates to:** [ADR 0005](0005-state-location-and-write-grants.md) (warehouse writes are opt-in; cursor
   incremental stays first-class); [ADR 0017](0017-column-contracts.md) (declared columns inform the
@@ -87,11 +87,11 @@ existing `sql_base` seam; no new abstraction.
 - drt can now alter a customer's table when asked: the opt-in, the nullable-only additions and the
   recorded DDL exist to keep that auditable.
 
-## Open questions for the owner
+## Decisions
 
-1. **Default of `on_schema_change`.** Proposed `fail` (nothing changes silently). `ignore` would
-   match today's "load what fits" more closely but hides drift.
-2. **Missing table with `manage_table: false`.** Proposed: a clear pre-load error. Alternative:
-   keep today's driver error (no behaviour change, worse message).
-3. **Scope of the first release:** Postgres + MySQL only (proposed), or Postgres alone.
-4. **Record DDL in run history** (proposed yes, additive), or keep it log-only.
+Confirmed by the maintainer on 2026-10-28, all as proposed:
+
+1. `on_schema_change` defaults to `fail`.
+2. A missing table with `manage_table: false` is a clear pre-load error.
+3. First release: Postgres + MySQL.
+4. Executed DDL is recorded in run history (additive).

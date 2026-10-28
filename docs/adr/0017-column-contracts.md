@@ -1,6 +1,6 @@
 # ADR 0017 — Column contracts: declared columns enforced before load, optionally derived from dbt
 
-- **Status:** Proposed 2026-10-28 (design draft; owner review pending — see "Open questions").
+- **Status:** Accepted 2026-10-28 (owner confirmed the proposals — see "Decisions").
 - **Issues:** [#761](https://github.com/drt-hub/drt/issues/761), [#896](https://github.com/drt-hub/drt/issues/896) (epic [#1227](https://github.com/drt-hub/drt/issues/1227)).
 - **Relates to:** [ADR 0016](0016-managed-destination-tables.md) (the destination-side drift policy);
   [ADR 0015](0015-catalog-operational-metadata.md) (catalog metadata, manifest versioning);
@@ -79,11 +79,11 @@ differs. Declared types feed `manage_table` column creation; the two checks shar
   `drt validate` must say clearly when the manifest is missing or stale.
 - A type vocabulary is now a public contract: adding types later is compatible, renaming is not.
 
-## Open questions for the owner
+## Decisions
 
-1. **Default `on_extra_columns`.** Proposed `fail`. `ignore` is friendlier for wide models.
-2. **Type vocabulary:** the seven portable types (proposed), or also decimal/array.
-3. **`source: dbt` when the manifest is absent:** validate error (proposed) vs. skip with a warning
-   (lets syncs run on machines with no dbt build, at the cost of a silently absent contract).
-4. **Implementation order.** Proposed: #761 core first, `source: dbt` second, ADR 0016 third (it
-   consumes the declared types).
+Confirmed by the maintainer on 2026-10-28, all as proposed:
+
+1. `on_extra_columns` defaults to `fail`.
+2. Seven portable types (no decimal/array yet).
+3. `contract.source: dbt` with no manifest is a validate error.
+4. Order: #761 core, then `source: dbt`, then ADR 0016.
