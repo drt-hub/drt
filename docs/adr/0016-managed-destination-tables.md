@@ -2,7 +2,7 @@
 
 - **Status:** Proposed 2026-10-28 (design draft; owner review pending — see "Open questions").
 - **Issue:** [#760](https://github.com/drt-hub/drt/issues/760) (epic [#1227](https://github.com/drt-hub/drt/issues/1227)).
-- **Relates to:** [ADR 0005](0005-warehouse-write-opt-in.md) (warehouse writes are opt-in; cursor
+- **Relates to:** [ADR 0005](0005-state-location-and-write-grants.md) (warehouse writes are opt-in; cursor
   incremental stays first-class); [ADR 0017](0017-column-contracts.md) (declared columns inform the
   types); #317 (`introspect_schema()`); #542 (boundary tests documenting today's failures); #695
   (privilege docs).
