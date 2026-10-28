@@ -1,6 +1,6 @@
 # ADR 0014 — Exact-replay apply: encrypted plan payloads (`--exact`)
 
-- **Status:** Proposed 2026-10-25 (draft; owner review pending — see "Open questions").
+- **Status:** Accepted 2026-10-28 (owner confirmed all four decisions as proposed — see "Decisions").
 - **Issue:** [#1221](https://github.com/drt-hub/drt/issues/1221) (epic [#1227](https://github.com/drt-hub/drt/issues/1227)).
 - **Relates to:** [ADR 0013](0013-plan-apply-lineage.md) (plan/apply lineage); the plan
   guide (`docs/guides/plan.md`); `docs/guides/secrets-encryption.md` (age/X25519, #303);
@@ -85,13 +85,13 @@ caught; drift in the **source** is, by design, ignored (that is the point of the
   exist to keep it small and short-lived.
 - Warehouse destinations need no new code: the verification reuses `compute_diff`.
 
-## Open questions for the owner
+## Decisions
 
-1. **Sidecar file vs embedding the ciphertext inside `plan.json`.** Proposed: sidecar, so
-   the shareable plan can never carry values even by mistake.
-2. **Recipient model.** Proposed: public-key recipients at plan time, `DRT_SECRETS_KEY`
-   identity at apply (the two can be different machines). The alternative is one shared
-   identity for both, which is simpler but lets the planner read the data.
-3. **Defaults for the size cap** (proposed 10,000 rows) and whether to delete the payload
-   after a successful apply (proposed: yes).
-4. **MCP exposure** (proposed: none in v1.3).
+Confirmed by the maintainer on 2026-10-28, all as proposed:
+
+1. **Sidecar file**, not embedded in `plan.json`, so the shareable plan can never carry values.
+2. **Public-key recipients at plan time, `DRT_SECRETS_KEY` identity at apply**; the planner
+   cannot read the data.
+3. **Size cap 10,000 rows**; over the cap exact-replay is unavailable (a result, not an error).
+   The payload is **deleted after a successful apply**; a failed apply leaves it.
+4. **No MCP exposure in v1.3**, recorded as a parity exclusion with the reason.
