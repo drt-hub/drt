@@ -268,3 +268,63 @@ def test_dlq_append_larger_than_one_merge_chunk_round_trips(
     round_tripped = dlq.read(sync_name)
     assert len(round_tripped) == len(entries)
     assert {item.record["index"] for item in round_tripped} == set(range(len(entries)))
+
+
+def test_history_adds_the_guards_column_to_a_legacy_table_and_round_trips_it(
+    warehouse_profile: BigQueryProfile,
+) -> None:
+    """#1264 live: a ``_drt_history`` created before ``guards`` existed is migrated in place."""
+    import json
+
+    from drt.sources.bigquery import BigQuerySource
+
+    BigQuerySource().ensure_managed_schema(warehouse_profile)
+    client = BigQuerySource()._build_client(warehouse_profile)
+    legacy_columns = [
+        ("sync_name", "STRING", "REQUIRED"),
+        ("started_at", "STRING", "REQUIRED"),
+        ("completed_at", "STRING", "REQUIRED"),
+        ("duration_seconds", "FLOAT64", "REQUIRED"),
+        ("status", "STRING", "REQUIRED"),
+        ("records_synced", "INT64", "REQUIRED"),
+        ("records_failed", "INT64", "REQUIRED"),
+        ("errors", "STRING", "REQUIRED"),
+        ("cursor_value_used", "STRING", "NULLABLE"),
+        ("dry_run", "BOOL", "REQUIRED"),
+        ("run_id", "STRING", "NULLABLE"),
+        ("sync_run_id", "STRING", "NULLABLE"),
+    ]
+    table_id = f"{warehouse_profile.project}.{warehouse_profile.managed_schema}._drt_history"
+    client.create_table(
+        bigquery.Table(
+            table_id,
+            schema=[bigquery.SchemaField(n, t, mode=m) for n, t, m in legacy_columns],
+        )
+    )
+    assert "guards" not in {f.name for f in client.get_table(table_id).schema}
+
+    history = BigQueryWarehouseHistoryStore(warehouse_profile)
+    sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    # A read of the legacy table works and never alters it.
+    assert history.read(sync_name) == []
+    assert "guards" not in {f.name for f in client.get_table(table_id).schema}
+
+    guards = {"forced": True, "tripped": [{"guard": "max_deletes", "observed": 3}]}
+    entry = HistoryEntry(
+        sync_name=sync_name,
+        started_at="2026-10-18T00:00:00+00:00",
+        completed_at="2026-10-18T00:00:01+00:00",
+        duration_seconds=1.0,
+        status="success",
+        records_synced=1,
+        records_failed=0,
+        guards=guards,
+        plan_id="sha256:smoke",
+        approved_by="smoke-user",
+    )
+    history.append(entry)
+    assert "guards" in {f.name for f in client.get_table(table_id).schema}
+
+    stored = BigQueryWarehouseHistoryStore(warehouse_profile).read(sync_name)
+    assert len(stored) == 1 and json.loads(json.dumps(stored[0].guards)) == guards
+    assert (stored[0].plan_id, stored[0].approved_by) == ("sha256:smoke", "smoke-user")

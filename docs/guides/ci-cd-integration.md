@@ -2,6 +2,10 @@
 
 Run drt in your CI/CD pipeline to automate data activation with proper testing and error handling.
 
+Choosing between warehouse scheduling, Dagster sensors, `drt serve`, GitHub
+Actions, Cloud Run Jobs, and Kubernetes CronJobs? Start with the [scheduling
+decision guide](scheduling.md).
+
 ## GitHub Actions
 
 ### Fastest path: `drt deploy github-actions`
@@ -18,6 +22,11 @@ This writes `.github/workflows/drt-sync.yml` wired to [`drt-hub/drt-action`](htt
 - **every required secret enumerated** in the step's `env:` block — each `*_env` reference and `${VAR}` placeholder in your project becomes `NAME: ${{ secrets.NAME }}`, and the command prints the matching `gh secret set NAME` checklist
 
 Use `--select` / `--profile` to scope it, `--dry-run` to preview, `--force` to overwrite. The sections below cover hand-rolled workflows for anything the scaffold doesn't fit.
+
+For container schedulers, `drt deploy cloud-run-job` writes a Dockerfile,
+Cloud Run Job, and Cloud Scheduler command, while `drt deploy k8s-cronjob`
+writes a hardened `batch/v1` CronJob. Both are covered in the [scheduling
+guide](scheduling.md).
 
 ### Basic: run syncs on push to main
 

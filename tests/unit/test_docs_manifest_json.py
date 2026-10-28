@@ -28,8 +28,8 @@ from drt.docs import (
 runner = CliRunner()
 
 
-def test_schema_version_is_3() -> None:
-    assert SCHEMA_VERSION == 3
+def test_schema_version_is_5() -> None:
+    assert SCHEMA_VERSION == 5
 
 
 def _write_project(project_dir: Path, profile: str = "bq_prod", name: str = "demo") -> None:
@@ -427,6 +427,82 @@ class TestBuildManifestRuns:
         )
 
 
+class TestManifestV4Lineage:
+    """Schema v4 (#1222, ADR 0013): plan_id / guards on runs; approver only with --full-labels."""
+
+    _LINEAGE = {
+        "plan_id": "sha256:abc",
+        "approved_by": "alice",
+        "guards": {"tripped": [{"guard": "max_deletes"}], "forced": True},
+    }
+
+    def _project(self, tmp_path: Path, **entry: object) -> None:
+        TestBuildManifestRuns()._project_with_history(
+            tmp_path, [_history_entry("users", "2026-05-14T00:00:00+00:00", **entry)]
+        )
+
+    def test_default_manifest_carries_plan_and_guards_but_not_the_approver(
+        self, tmp_path: Path
+    ) -> None:
+        self._project(tmp_path, **self._LINEAGE)
+
+        run = build_manifest(tmp_path, include_state=True).to_dict()["syncs"][0]["runs"][0]
+
+        assert run["plan_id"] == "sha256:abc"
+        assert run["guards"]["forced"] is True
+        assert "approved_by" not in run
+
+    def test_full_labels_adds_the_approver(self, tmp_path: Path) -> None:
+        self._project(tmp_path, **self._LINEAGE)
+
+        run = build_manifest(tmp_path, include_state=True, full_labels=True).to_dict()["syncs"][0][
+            "runs"
+        ][0]
+
+        assert run["approved_by"] == "alice"
+
+    def test_ordinary_runs_omit_every_v4_key_and_a_round_trip_keeps_it_that_way(
+        self, tmp_path: Path
+    ) -> None:
+        self._project(tmp_path)
+
+        data = build_manifest(tmp_path, include_state=True).to_dict()
+        run = data["syncs"][0]["runs"][0]
+
+        assert not {"plan_id", "guards", "approved_by"} & set(run)
+        assert Manifest.from_dict(data).to_dict() == data
+
+    def test_a_v3_manifest_without_the_keys_still_loads(self) -> None:
+        v3 = {
+            "schema_version": 3,
+            "drt_version": "1.1.0",
+            "syncs": [
+                {
+                    "name": "users",
+                    "source": "s",
+                    "destination": "d",
+                    "mode": "upsert",
+                    "runs": [
+                        {
+                            "started_at": "t0",
+                            "completed_at": "t1",
+                            "duration_seconds": 1.0,
+                            "status": "success",
+                            "records_synced": 1,
+                            "records_failed": 0,
+                            "errors": [],
+                            "cursor_value_used": None,
+                        }
+                    ],
+                }
+            ],
+        }
+
+        run = Manifest.from_dict(v3).syncs[0].runs[0]
+
+        assert (run.plan_id, run.guards, run.approved_by) == (None, None, None)
+
+
 class TestBuildManifestFields:
     """Schema v2 (#808): declared write-side column facts from field_mappings + mask."""
 
@@ -630,3 +706,84 @@ class TestDocsGenerateJsonCLI:
         result = runner.invoke(app, ["docs", "generate", "--format", "html"])
         assert result.exit_code == 0, result.output
         assert (tmp_path / "target" / "docs" / "index.html").exists()
+
+
+class TestManifestV5MetaAndFreshness:
+    """Schema v5 (#1226): sync.meta and the declared freshness contract."""
+
+    def _project(self, tmp_path: Path, extra: dict[str, object]) -> None:
+        import yaml
+
+        _write_project(tmp_path)
+        sync = _pg_sync("users", "public.users")
+        sync.update(extra)
+        (tmp_path / "syncs").mkdir(exist_ok=True)
+        (tmp_path / "syncs" / "users.yml").write_text(yaml.safe_dump(sync))
+
+    def test_meta_and_declared_freshness_are_emitted_without_an_email_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        self._project(
+            tmp_path,
+            {
+                "meta": {"owner": "Growth", "owner_email": "growth@example.com", "maturity": "low"},
+                "alerts": {"on_stale": {"max_age": "6h", "never_run": "error"}},
+            },
+        )
+
+        sync = build_manifest(tmp_path).to_dict()["syncs"][0]
+
+        assert sync["meta"] == {"owner": "Growth", "maturity": "low"}
+        assert sync["freshness"] == {"max_age_seconds": 21600, "never_run": "error"}
+        assert "growth@example.com" not in json.dumps(sync)
+
+    def test_full_labels_adds_the_owner_email(self, tmp_path: Path) -> None:
+        self._project(tmp_path, {"meta": {"owner": "Growth", "owner_email": "growth@example.com"}})
+
+        sync = build_manifest(tmp_path, full_labels=True).to_dict()["syncs"][0]
+
+        assert sync["meta"]["owner_email"] == "growth@example.com"
+
+    def test_a_sync_without_them_omits_both_keys_and_round_trips(self, tmp_path: Path) -> None:
+        self._project(tmp_path, {})
+
+        data = build_manifest(tmp_path).to_dict()
+
+        assert "meta" not in data["syncs"][0] and "freshness" not in data["syncs"][0]
+        assert Manifest.from_dict(data).to_dict() == data
+
+    def test_a_v4_manifest_still_loads(self) -> None:
+        v4 = {
+            "schema_version": 4,
+            "drt_version": "1.2.1",
+            "syncs": [{"name": "u", "source": "s", "destination": "d", "mode": "upsert"}],
+        }
+
+        sync = Manifest.from_dict(v4).syncs[0]
+
+        assert sync.meta is None and sync.freshness is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"meta": []},
+        {"meta": "owner"},
+        {"meta": {"owner": 123}},
+        {"meta": {"owner": "a", "extra": 1}},
+        {"meta": {"maturity": "ultra"}},
+        {"freshness": {"max_age_seconds": "6h"}},
+        {"freshness": {"max_age_seconds": 60, "never_run": "maybe"}},
+        {"freshness": {"max_age_seconds": 60, "bogus": 1}},
+        {"freshness": []},
+    ],
+)
+def test_malformed_v5_meta_or_freshness_is_rejected_consistently(bad: dict[str, object]) -> None:
+    doc = {
+        "schema_version": 5,
+        "drt_version": "1.3.0",
+        "syncs": [{"name": "u", "source": "s", "destination": "d", "mode": "upsert", **bad}],
+    }
+
+    with pytest.raises(ValueError):
+        Manifest.from_dict(doc)

@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, runtime_checkable
 
+from drt.state._integrity import report_unreadable
 from drt.state.dlq import DeadLetter, decode_dead_letter_lines
 from drt.state.errors import StateContentionError
 from drt.state.history import HistoryEntry
@@ -106,6 +107,8 @@ class ObjectStoreStateStore(_ObjectStoreBase):
             return value
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             print("Warning: remote state.json is corrupted and will be reset.", file=sys.stderr)
+            logger.warning("remote state.json is corrupted")
+            report_unreadable("remote state.json is corrupted")
             return {}
 
     @staticmethod
@@ -213,13 +216,14 @@ class ObjectStoreHistoryStore(_ObjectStoreBase):
                 entries.append(HistoryEntry(**json.loads(raw)))
             except (json.JSONDecodeError, TypeError) as exc:
                 logger.warning("history: skipping malformed line %s in %s: %s", lineno, key, exc)
+                report_unreadable(f"history: malformed line {lineno} in {key}")
         return entries
 
     @staticmethod
     def _encode(entries: list[HistoryEntry]) -> bytes:
         if not entries:
             return b""
-        lines = "\n".join(json.dumps(asdict(entry), default=str) for entry in entries)
+        lines = "\n".join(json.dumps(entry.to_json_dict(), default=str) for entry in entries)
         return (lines + "\n").encode()
 
     def append(self, entry: HistoryEntry) -> None:

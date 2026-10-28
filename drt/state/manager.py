@@ -16,6 +16,7 @@ an OS-level sidecar lock so overlapping drt processes do not clobber updates.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from drt.state._filelock import advisory_lock
+from drt.state._integrity import report_unreadable
 
 
 @dataclass
@@ -99,8 +101,13 @@ class LocalStateManager:
             return {}
         try:
             with self._state_file.open() as f:
-                result: dict[str, Any] = json.load(f) or {}
-                return result
+                loaded = json.load(f)
+            if loaded is None:  # an empty document is an empty state, not corruption
+                return {}
+            if not isinstance(loaded, dict):  # [], 0, "", false ... are not a state document
+                raise ValueError("state root is not an object")
+            result: dict[str, Any] = loaded
+            return result
         except (json.JSONDecodeError, ValueError):
             import sys
 
@@ -108,6 +115,10 @@ class LocalStateManager:
                 f"Warning: {self._state_file} is corrupted and will be reset.",
                 file=sys.stderr,
             )
+            # Also a log record, so a read-only consumer (drt status --check) can tell
+            # "no runs on record" from "the record is unreadable".
+            logging.getLogger(__name__).warning("%s is corrupted", self._state_file)
+            report_unreadable(f"{self._state_file} is corrupted")
             return {}
 
     def _save_all(self, data: dict[str, Any]) -> None:

@@ -10,6 +10,8 @@ cursor can't validate the SQL itself (#908's lesson).
 
 from __future__ import annotations
 
+import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -128,6 +130,9 @@ class TestPostgresWarehouseStateStore:
         assert not any("CREATE TABLE" in sql for sql in executed)
 
 
+_OPTIONAL = ("guards", "plan_id", "approved_by")
+
+
 class TestPostgresWarehouseHistoryStore:
     def test_read_returns_empty_before_any_table_exists(self) -> None:
         conn = _undefined_table_conn()
@@ -154,29 +159,187 @@ class TestPostgresWarehouseHistoryStore:
                 )
             )
 
-    def test_append_ignores_guards_without_changing_managed_schema(self) -> None:
-        conn = _mock_conn()
+    # -- optional additive columns (#1264) ---------------------------------
+
+    @staticmethod
+    def _history_conn(
+        columns: list[str], *, rows: list[tuple] | None = None, alter_error: Exception | None = None
+    ) -> MagicMock:
+        """Scripted connection: the column probe, the ALTER and the SELECT behave differently."""
+        conn = MagicMock()
+        cur = conn.cursor.return_value
+        cur.statements = []
+        state = {"sql": ""}
+
+        def execute(sql: Any, params: Any = None) -> None:
+            text = str(sql)
+            cur.statements.append((text, params))
+            state["sql"] = text
+            if alter_error is not None and "ALTER TABLE" in text:
+                raise alter_error
+
+        def fetchall() -> list[tuple]:
+            if "information_schema.columns" in state["sql"]:
+                return [(name,) for name in columns]
+            return rows or []
+
+        cur.execute.side_effect = execute
+        cur.fetchall.side_effect = fetchall
+        return conn
+
+    _BASE_COLUMNS = (
+        "sync_name started_at completed_at duration_seconds status records_synced "
+        "records_failed errors cursor_value_used dry_run run_id sync_run_id"
+    ).split()
+
+    @staticmethod
+    def _entry(**kw: Any) -> HistoryEntry:
+        return HistoryEntry(
+            sync_name="s",
+            started_at="t0",
+            completed_at="t1",
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+            **kw,
+        )
+
+    def _append(self, conn: MagicMock, entry: HistoryEntry) -> None:
         with (
             patch("drt.state.warehouse._connect", return_value=conn),
             patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
             patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
         ):
-            PostgresWarehouseHistoryStore(_profile()).append(
-                HistoryEntry(
-                    sync_name="s",
-                    started_at="t0",
-                    completed_at="t1",
-                    duration_seconds=1.0,
-                    status="success",
-                    records_synced=1,
-                    records_failed=0,
-                    guards={"forced": True, "tripped": [{"guard": "max_deletes"}]},
-                )
-            )
+            PostgresWarehouseHistoryStore(_profile()).append(entry)
 
-        sql = str(conn.cursor.return_value.execute.call_args.args[0])
-        params = conn.cursor.return_value.execute.call_args.args[1]
+    @staticmethod
+    def _insert(conn: MagicMock) -> tuple[str, Any]:
+        return next(
+            (sql, params) for sql, params in conn.cursor.return_value.statements if "INSERT" in sql
+        )
+
+    def test_append_writes_guards_json_when_the_column_exists(self) -> None:
+        conn = self._history_conn([*self._BASE_COLUMNS, *_OPTIONAL])
+        guards = {"forced": True, "tripped": [{"guard": "max_deletes"}]}
+
+        self._append(conn, self._entry(guards=guards, plan_id="sha256:abc", approved_by="alice"))
+
+        sql, params = self._insert(conn)
+        assert ", guards, plan_id, approved_by)" in sql and len(params) == 15
+        assert json.loads(params[-3]) == guards
+        assert params[-2] == "sha256:abc"  # scalar columns are plain, queryable text
+        assert params[-1] == "alice"
+        assert not any("ALTER TABLE" in s for s, _ in conn.cursor.return_value.statements)
+
+    def test_append_adds_the_missing_column_to_a_legacy_table_once(self) -> None:
+        conn = self._history_conn(self._BASE_COLUMNS)
+
+        self._append(conn, self._entry(guards={"forced": False, "tripped": []}))
+
+        statements = [s for s, _ in conn.cursor.return_value.statements]
+        alters = [s for s in statements if "ALTER TABLE" in s]
+        assert len(alters) == 3 and all("ADD COLUMN IF NOT EXISTS" in a for a in alters)
+        for column in _OPTIONAL:
+            assert any(column in a for a in alters)
+        assert statements.index(alters[0]) < next(
+            i for i, s in enumerate(statements) if "INSERT" in s
+        )
+        _sql, params = self._insert(conn)
+        assert len(params) == 15
+
+    def test_append_stores_null_when_the_entry_has_no_guards(self) -> None:
+        conn = self._history_conn([*self._BASE_COLUMNS, *_OPTIONAL])
+
+        self._append(conn, self._entry())
+
+        assert self._insert(conn)[1][-3:] == (None, None, None)
+
+    def test_append_falls_back_to_the_legacy_insert_when_alter_is_refused(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        conn = self._history_conn(
+            self._BASE_COLUMNS, alter_error=psycopg2.errors.InsufficientPrivilege("must be owner")
+        )
+
+        with caplog.at_level("WARNING"):
+            self._append(conn, self._entry(guards={"forced": True, "tripped": []}))
+
+        sql, params = self._insert(conn)
         assert "guards" not in sql and len(params) == 12
+        conn.rollback.assert_called()
+        assert "could not be added" in caplog.text
+
+    def test_append_never_fails_the_sync_when_the_column_probe_breaks(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        conn = self._history_conn(self._BASE_COLUMNS)
+        original = conn.cursor.return_value.execute.side_effect
+
+        def execute(sql: Any, params: Any = None) -> None:
+            if "information_schema.columns" in str(sql):
+                raise RuntimeError("no access to information_schema")
+            original(sql, params)
+
+        conn.cursor.return_value.execute.side_effect = execute
+
+        with caplog.at_level("WARNING"):
+            self._append(conn, self._entry(guards={"forced": True, "tripped": []}))
+
+        sql, params = self._insert(conn)
+        assert "guards" not in sql and len(params) == 12
+        assert "could not inspect columns" in caplog.text
+
+    def test_read_returns_guards_when_the_column_exists(self) -> None:
+        row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "r", "sr")
+        guards = {"forced": True, "tripped": [{"guard": "max_delete_pct"}]}
+        conn = self._history_conn(
+            [*self._BASE_COLUMNS, "guards"], rows=[(*row, json.dumps(guards))]
+        )
+
+        with patch("drt.state.warehouse._connect", return_value=conn):
+            entries = PostgresWarehouseHistoryStore(_profile()).read("s")
+
+        assert entries[0].guards == guards
+        selects = [s for s, _ in conn.cursor.return_value.statements if "ORDER BY" in s]
+        assert selects and "sync_run_id, guards" in selects[0]
+
+    def test_read_never_alters_the_schema_and_omits_a_missing_column(self) -> None:
+        row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "r", "sr")
+        conn = self._history_conn(self._BASE_COLUMNS, rows=[row])
+
+        with patch("drt.state.warehouse._connect", return_value=conn):
+            entries = PostgresWarehouseHistoryStore(_profile()).read()
+
+        assert entries[0].guards is None
+        statements = [s for s, _ in conn.cursor.return_value.statements]
+        assert not any("ALTER TABLE" in s for s in statements)
+        assert not any(
+            "guards" in s for s in statements if s.lstrip().startswith("SELECT sync_name")
+        )
+
+    def test_read_ignores_a_non_json_guards_cell(self, caplog: pytest.LogCaptureFixture) -> None:
+        row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "r", "sr", "not json")
+        conn = self._history_conn([*self._BASE_COLUMNS, "guards"], rows=[row])
+
+        with caplog.at_level("WARNING"), patch("drt.state.warehouse._connect", return_value=conn):
+            entries = PostgresWarehouseHistoryStore(_profile()).read("s")
+
+        assert entries[0].guards is None and "non-JSON" in caplog.text
+
+    def test_resolution_is_cached_per_store_instance(self) -> None:
+        conn = self._history_conn([*self._BASE_COLUMNS, "guards"])
+        store = PostgresWarehouseHistoryStore(_profile())
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            store.append(self._entry())
+            store.append(self._entry())
+
+        probes = [s for s, _ in conn.cursor.return_value.statements if "information_schema" in s]
+        assert len(probes) == 1
 
     def test_read_reconstructs_history_entry(self) -> None:
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "run-1", "sync-run-1")

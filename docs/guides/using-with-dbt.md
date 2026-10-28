@@ -134,6 +134,34 @@ If `--output` points outside `target/`, the HTML page is not reachable through
 `dbt docs serve`, so the exporter omits the URL. The command only writes to
 stdout; you choose and commit the destination file yourself.
 
+### Owner, maturity and the freshness contract
+
+By default every exposure says `owner: {name: drt}` and `maturity: high`. Give a
+sync a `meta` block and dbt sees who owns it and how far to trust it:
+
+```yaml
+# syncs/users_to_hubspot.yml
+meta:
+  owner: Growth team          # exposure owner.name
+  owner_email: growth@acme.io # personal data: never written to dbt exposures, and masked in the docs site
+  maturity: medium            # high | medium | low (default high)
+alerts:
+  on_stale:
+    max_age: 6h               # see the alerts guide; also declared in the exposure
+```
+
+The declared freshness (`alerts.on_stale`) appears as
+`meta.drt.freshness: {max_age_seconds, never_run}`. It is a **declaration, not a
+verdict**: whether the sync is fresh right now depends on the clock, which would make
+the output change between runs. For the verdict use `drt status --check`
+([alerts guide](alerts.md#staleness-a-sync-that-stopped-running-on_stale)). Unknown keys under
+`meta` are rejected. Editing `meta` changes the sync file, so it changes the sync's
+`config_hash` like any other edit (and invalidates a plan made before it).
+
+The same fields appear on each sync's page in `drt docs generate` (owner, maturity,
+the declared freshness, and the last applied plan when run history is included), and
+in the manifest (schema v5; `owner_email` only with `--full-labels`).
+
 The output is sorted by sync name and byte-identical for an unchanged project,
 so it can be regenerated and checked for drift in CI. See [CI/CD
 Integration](ci-cd-integration.md#fail-on-dbt-exposure-drift).

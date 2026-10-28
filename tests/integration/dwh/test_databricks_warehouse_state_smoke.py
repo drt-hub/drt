@@ -420,3 +420,51 @@ def test_concurrent_first_writes_survive_table_creation_race() -> None:
             cur.execute(f"DROP SCHEMA IF EXISTS {creds[CATALOG_ENV]}.{schema_name} CASCADE")
         finally:
             conn.close()
+
+
+def test_history_round_trips_guards_and_the_column_exists_afterwards() -> None:
+    """#1264 live: the first append against a table without ``guards`` adds it; later runs reuse it.
+
+    Delta cannot drop the column again (no column-mapping mode on this table), so this
+    asserts the end state instead of forcing the legacy shape: ``guards`` exists after the
+    append and the stored overrides come back from a fresh store.
+    """
+    creds = _require_creds()
+    profile = _profile(creds)
+    sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    guards = {"forced": True, "tripped": [{"guard": "max_deletes", "observed": 3}]}
+
+    DatabricksWarehouseHistoryStore(profile).append(
+        HistoryEntry(
+            sync_name=sync_name,
+            started_at="2026-10-18T00:00:00+00:00",
+            completed_at="2026-10-18T00:00:01+00:00",
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+            guards=guards,
+            plan_id="sha256:smoke",
+            approved_by="smoke-user",
+        )
+    )
+
+    conn = _admin_connect(creds)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT column_name FROM {profile.catalog}.information_schema.columns "
+            "WHERE table_schema = ? AND table_name = '_drt_history'",
+            [profile.managed_schema],
+        )
+        assert "guards" in {row[0] for row in cur.fetchall()}
+        entries = DatabricksWarehouseHistoryStore(profile).read(sync_name)
+        assert [e.guards for e in entries] == [guards]
+        assert [(e.plan_id, e.approved_by) for e in entries] == [("sha256:smoke", "smoke-user")]
+        cur.execute(
+            f"DELETE FROM {profile.catalog}.{profile.managed_schema}._drt_history "
+            "WHERE sync_name = ?",
+            [sync_name],
+        )
+    finally:
+        conn.close()

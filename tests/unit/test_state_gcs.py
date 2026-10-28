@@ -72,6 +72,7 @@ class FakeBucket:
         self.body = b"generation one"
         self.race_first_versioned_read = race_first_versioned_read
         self.calls: list[tuple[str, int | None]] = []
+        self.bucket_exists = True
 
     def blob(self, key: str, generation: int | None = None) -> FakeBlob:
         self.calls.append((key, generation))
@@ -90,8 +91,12 @@ class FakeStorageClient:
         assert name == "bucket"
         return self.fake_bucket
 
-    def list_blobs(self, name: str, *, prefix: str) -> list[Any]:
+    def list_blobs(
+        self, name: str, *, prefix: str = "", max_results: int | None = None
+    ) -> list[Any]:
         assert name == "bucket"
+        if not self.fake_bucket.bucket_exists:
+            raise FakeNotFound
         return [type("BlobName", (), {"name": f"{prefix}a.jsonl"})()]
 
 
@@ -123,6 +128,29 @@ def test_metadata_not_found_returns_create_only_generation_zero(
 
     assert client.read_for_update("missing") == (None, 0)
     assert bucket.calls == [("missing", None)]
+
+
+def test_a_missing_bucket_is_an_error_not_empty_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deleted or misspelled bucket also 404s on the object lookup (#1224)."""
+    _install_google_exceptions(monkeypatch)
+    bucket = FakeBucket()
+    bucket.live_generation = 0
+    bucket.bucket_exists = False  # a one-item listing 404s: it needs only storage.objects.list
+    client = GCSObjectClient("bucket", client=FakeStorageClient(bucket))
+
+    with pytest.raises(RuntimeError, match="does not exist"):
+        client.read_for_update("state.json")
+
+
+def test_a_missing_object_in_an_existing_bucket_is_still_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_google_exceptions(monkeypatch)
+    bucket = FakeBucket()
+    bucket.live_generation = 0
+    client = GCSObjectClient("bucket", client=FakeStorageClient(bucket))
+
+    assert client.read_for_update("state.json") == (None, 0)
 
 
 def test_stale_upload_is_normalized_to_object_precondition_error(

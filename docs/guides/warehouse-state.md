@@ -80,12 +80,27 @@ Three tables, created under `managed_schema`, one per persistence surface:
 These are drt-managed tables — do not write to them directly except for read-only observability
 queries. Their exact columns are not a stable public API.
 
-Compatibility note for change guards: a forced run-time guard is recorded in
-`target/drt/run_results.json` and in local or GCS/S3 object-store history, but not yet in
-warehouse-backed `_drt_history`. The four warehouse history stores deliberately ignore the
-additive in-memory `HistoryEntry.guards` field instead of adding a column that would break inserts
-into already-managed tables. Persisting it here needs a follow-up, backward-compatible warehouse
-schema-evolution design.
+### Optional history columns (`guards`, `plan_id`, `approved_by`)
+
+`_drt_history` can carry **optional, additive columns** for fields that were added to
+`HistoryEntry` after your table was created. The first is `guards` (a `TEXT`/`STRING` column holding
+JSON): a forced run-time change-guard override, recorded as `{"tripped": [...], "forced": true}`. It
+is also kept in `target/drt/run_results.json` and in local or GCS/S3 object-store history. `plan_id` and
+`approved_by` (same column type) record which reviewed plan a `drt apply` run applied and who approved it;
+they stay empty for an ordinary `drt run`.
+
+How an existing table is handled — it is *your* table, and the role drt connects with may not be
+allowed to alter it:
+
+- **Column present:** it is written and read.
+- **Column absent:** the first *append* tries `ALTER TABLE ... ADD COLUMN guards` once (Postgres,
+  Snowflake and BigQuery use `IF NOT EXISTS`; Delta uses `ADD COLUMNS`). A read never alters a table;
+  rows written before the column existed read back as no overrides.
+- **Cannot be added** (no `ALTER` privilege): drt logs one warning and carries on without the column.
+  History is best-effort, so this never fails a sync or `drt status --history`. To record it anyway,
+  add a `TEXT` (`STRING` on Databricks and BigQuery) column named `guards`, `plan_id` or `approved_by` yourself.
+- Pre-provisioned tables (the escape hatch below) need no change: the columns in the `CREATE TABLE`
+  examples still work as they are, and these columns are simply optional extras.
 
 ## Escape hatch and reversibility
 

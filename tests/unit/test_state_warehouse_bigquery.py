@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from types import ModuleType
@@ -364,27 +365,110 @@ class TestBigQueryWarehouseHistoryStore:
             assert store.read() == []
             assert store.prune("s", 30) == 0
 
+    @staticmethod
+    def _table_with(client: MagicMock, *extra: str) -> None:
+        base = [
+            "sync_name started_at completed_at duration_seconds status records_synced "
+            "records_failed errors cursor_value_used dry_run run_id sync_run_id"
+        ][0].split()
+        client.get_table.return_value = _Table(
+            "t", [_SchemaField(n, "STRING") for n in [*base, *extra]]
+        )
+
     def test_append_uses_bound_json_string_and_is_best_effort(self) -> None:
         client = _client([])
+        self._table_with(client, "guards", "plan_id", "approved_by")
+        store = BigQueryWarehouseHistoryStore(_profile())
+        guards = {"forced": True, "tripped": [{"guard": "max_deletes"}]}
+        with (
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.append(_history_entry(errors=["a", "b", "c", "d", "e", "ignored"], guards=guards))
+        params = {p.name: p.value for p in _params(client.query.call_args_list[0])}
+        assert params["errors"] == '["a", "b", "c", "d", "e"]'
+        assert "@errors" in _sqls(client)[0]
+        assert ", guards, plan_id, approved_by)" in _sqls(client)[0]
+        assert ", @guards, @plan_id, @approved_by)" in _sqls(client)[0]
+        assert json.loads(params["guards"]) == guards
+
+        with patch("drt.state.warehouse_bigquery._connect", side_effect=RuntimeError("offline")):
+            store.append(_history_entry())  # must not raise
+
+    def test_append_adds_the_missing_column_to_a_legacy_table(self) -> None:
+        client = _client([], [], [], [])
+        self._table_with(client)
         store = BigQueryWarehouseHistoryStore(_profile())
         with (
             patch("drt.state.warehouse_bigquery._connect", return_value=client),
             patch.object(store, "_ensure_table"),
         ):
-            store.append(
-                _history_entry(
-                    errors=["a", "b", "c", "d", "e", "ignored"],
-                    guards={"forced": True, "tripped": [{"guard": "max_deletes"}]},
-                )
-            )
-        params = {p.name: p.value for p in _params(client.query.call_args_list[0])}
-        assert params["errors"] == '["a", "b", "c", "d", "e"]'
-        assert "@errors" in _sqls(client)[0]
-        assert "guards" not in _sqls(client)[0]
-        assert "guards" not in params
+            store.append(_history_entry(guards={"forced": False, "tripped": []}))
 
-        with patch("drt.state.warehouse_bigquery._connect", side_effect=RuntimeError("offline")):
-            store.append(_history_entry())  # must not raise
+        sqls = _sqls(client)
+        for i, column in enumerate(("guards", "plan_id", "approved_by")):
+            assert f"ADD COLUMN IF NOT EXISTS {column} STRING" in sqls[i]
+        assert sqls[3].startswith("INSERT INTO") and "@guards" in sqls[3]
+
+    def test_append_falls_back_to_the_legacy_insert_when_alter_is_refused(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = _client([])
+        self._table_with(client)
+        job = client.query.return_value
+
+        def query(sql: str, **kwargs: Any) -> Any:
+            if sql.startswith("ALTER TABLE"):
+                raise PermissionError("bigquery.tables.update denied")
+            return job
+
+        client.query.side_effect = query
+        store = BigQueryWarehouseHistoryStore(_profile())
+        with (
+            caplog.at_level("WARNING"),
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.append(_history_entry(guards={"forced": True, "tripped": []}))
+
+        insert = next(sql for sql in _sqls(client) if sql.startswith("INSERT INTO"))
+        assert "guards" not in insert
+        assert "could not be added" in caplog.text
+
+    def test_read_returns_guards_when_the_column_exists_and_never_alters(self) -> None:
+        guards = {"forced": True, "tripped": [{"guard": "max_delete_pct"}]}
+        row = ("s", "t0", "t1", 1.5, "success", 3, 0, '["boom"]', "c", False, "run-1", "sync-run-1")
+        client = _client([(*row, json.dumps(guards), None, None)])
+        self._table_with(client, "guards", "plan_id", "approved_by")
+        with (
+            patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+        ):
+            entries = BigQueryWarehouseHistoryStore(_profile()).read("s")
+        assert entries == [_history_entry(guards=guards)]
+        assert "sync_run_id, guards" in _sqls(client)[0]
+
+        legacy = _client([row])
+        self._table_with(legacy)
+        with (
+            patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
+            patch("drt.state.warehouse_bigquery._connect", return_value=legacy),
+        ):
+            assert BigQueryWarehouseHistoryStore(_profile()).read()[0].guards is None
+        assert not any(sql.startswith("ALTER") or "guards" in sql for sql in _sqls(legacy))
+
+    def test_resolution_is_cached_per_store_instance(self) -> None:
+        client = _client([], [])
+        self._table_with(client, "guards", "plan_id", "approved_by")
+        store = BigQueryWarehouseHistoryStore(_profile())
+        with (
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.append(_history_entry())
+            store.append(_history_entry())
+
+        assert client.get_table.call_count == 1
 
     def test_read_filtered_and_unfiltered_reconstruct_json(self) -> None:
         row = (

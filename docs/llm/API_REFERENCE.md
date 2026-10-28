@@ -42,7 +42,7 @@ query_tagging:            # optional: cost-attribution query tagging (#768)
 ```
 
 With the local backend, history is stored under `.drt/history/<sync_name>.jsonl` (one file per sync, JSONL format).
-Inspect via `drt status --history` or the `drt_get_history` MCP tool.
+Inspect via `drt status --history` or the `drt_get_history` MCP tool. `drt status --check` (or `drt_get_status(check=True)`) judges freshness against `alerts.on_stale` and exits 1 when a sync is stale.
 State backend selection is documented in `docs/guides/remote-state.md`; it is independent of `sync.watermark.storage`.
 
 ### Query tagging (#768)
@@ -789,6 +789,10 @@ alerts:
   on_failure:                      # hard failure (#414) — fires when the sync errors out
     - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL }
     - { type: webhook, url_env: PAGERDUTY_URL }   # webhook covers PagerDuty etc.
+  on_stale:                        # sync-level freshness (#1224) — evaluated by `drt status --check`
+    max_age: 6h                    # age of the last successful run (30m, 6h, 2d, 1w)
+    never_run: warn                # warn | error — no run on record at all
+    channels: []                   # used by `drt status --check --notify`
   on_degraded:                     # partial degradation (#784) — thresholds on post-sync metrics
     channels:                      # same channel types as on_failure; empty => JSON-only (CI)
       - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL }

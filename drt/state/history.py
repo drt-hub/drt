@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from drt.state._filelock import advisory_lock
+from drt.state._integrity import report_unreadable
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,23 @@ class HistoryEntry:
     # Structured run-time guard outcome (#1218 part 2), omitted on historical
     # entries and ordinary runs. Shape: {"tripped": [...], "forced": bool}.
     guards: dict[str, Any] | None = None
+    # Plan/apply lineage (#1222, ADR 0013): the plan this run applied and who
+    # approved it. Both None for an ordinary ``drt run`` and on entries written
+    # before these fields existed.
+    plan_id: str | None = None
+    approved_by: str | None = None
+
+    # Optional additive fields are left out of the serialized line when absent
+    # (ADR 0013), so ordinary runs and re-written retained history stay as small
+    # and as unchanged as before.
+    _OMIT_WHEN_NONE = ("guards", "plan_id", "approved_by")
+
+    def to_json_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        for key in self._OMIT_WHEN_NONE:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 @runtime_checkable
@@ -123,7 +141,7 @@ class LocalHistoryManager:
             self._dir.mkdir(parents=True, exist_ok=True)
             # Truncate errors to bound disk growth on long-failing syncs.
             entry.errors = entry.errors[: self._MAX_ERRORS_PER_ENTRY]
-            line = json.dumps(asdict(entry), default=str)
+            line = json.dumps(entry.to_json_dict(), default=str)
             path = self._file_for(entry.sync_name)
             with advisory_lock(path):
                 with path.open("a") as f:
@@ -195,7 +213,7 @@ class LocalHistoryManager:
                 tmp = path.with_suffix(".jsonl.tmp")
                 with tmp.open("w") as f:
                     for entry in kept:
-                        f.write(json.dumps(asdict(entry), default=str) + "\n")
+                        f.write(json.dumps(entry.to_json_dict(), default=str) + "\n")
                 tmp.replace(path)
                 return removed
 
@@ -223,6 +241,8 @@ def _read_jsonl(path: Path) -> list[HistoryEntry]:
                         path,
                         exc,
                     )
+                    report_unreadable(f"history: malformed line {lineno} in {path.name}")
     except OSError as exc:
         logger.warning("history: cannot read %s: %s", path, exc)
+        report_unreadable(f"history: cannot read {path.name}")
     return entries

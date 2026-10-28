@@ -117,6 +117,7 @@ jobs:
                 tests/integration/dwh/test_snowflake_warehouse_state_smoke.py
                 tests/integration/dwh/test_snowflake_diff_incremental_smoke.py
                 tests/integration/dwh/test_snowflake_write_policy_smoke.py
+                tests/integration/dwh/test_snowflake_plan_apply_fidelity_smoke.py
               )
             fi
           else
@@ -346,6 +347,7 @@ jobs:
             tests/integration/dwh/test_databricks_mirror_diff_smoke.py \
             tests/integration/dwh/test_databricks_write_policy_smoke.py \
             tests/integration/dwh/test_databricks_runtime_guards_smoke.py \
+            tests/integration/dwh/test_databricks_plan_apply_fidelity_smoke.py \
             -v
 
   bigquery:

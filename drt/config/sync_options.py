@@ -17,6 +17,7 @@ from pydantic import (
     PrivateAttr,
     SerializeAsAny,
     Tag,
+    field_validator,
     model_validator,
 )
 
@@ -814,8 +815,39 @@ class OnDegradedConfig(BaseModel):
     conditions: DegradedConditions = Field(default_factory=DegradedConditions)
 
 
+class OnStaleConfig(BaseModel):
+    """``alerts.on_stale`` (#1224) — sync-level freshness, judged from run history.
+
+    Unlike ``on_failure`` / ``on_degraded`` this is not evaluated while a run is
+    happening: a sync that silently stopped running never fires those. It is
+    evaluated by whoever calls ``drt status --check`` (cron, CI, ``drt serve``);
+    drt stays daemon-free (ADR 0004). It measures the *sync's* last successful
+    run, so it works for every destination, including SaaS and file ones.
+    """
+
+    # A typo in this safety policy (``never_runs: error``) must not silently fall back
+    # to the lenient default, so unknown keys are rejected.
+    model_config = ConfigDict(extra="forbid")
+
+    max_age: str  # "6h", "30m", "2d", "1w" or "6 hours"
+    never_run: Literal["warn", "error"] = "warn"  # a sync with no run on record at all
+    channels: list[AlertItem] = Field(default_factory=list)
+
+    # A field validator (not an after-model one) so a validation error carries only
+    # the offending value, never the whole block with its channel webhook URLs.
+    @field_validator("max_age")
+    @classmethod
+    def _validate_max_age(cls, value: str) -> str:
+        from drt.config.duration import parse_max_age
+
+        parse_max_age(value, field_name="alerts.on_stale.max_age")
+        return value
+
+
 class AlertsConfig(BaseModel):
     on_failure: list[AlertItem] = Field(default_factory=list)
+    # Sync-level freshness (#1224) — see OnStaleConfig.
+    on_stale: OnStaleConfig | None = None
     # Partial-degradation thresholds (#784) — see OnDegradedConfig. on_failure
     # (hard failure) is untouched.
     on_degraded: OnDegradedConfig | None = None
@@ -946,6 +978,22 @@ _WRITE_POLICY_SQL_DESTINATION_TYPES = frozenset(
 )
 
 
+class SyncMetaConfig(BaseModel):
+    """``meta`` on a sync (#1226): who owns it and how much to trust it.
+
+    Catalog metadata for ``drt docs`` and ``drt docs generate --format dbt-exposures``;
+    it never changes how a sync runs. ``owner`` and ``maturity`` are authored for
+    display, so they appear in the default manifest; ``owner_email`` is personal data
+    and is emitted only with ``--full-labels`` (#696).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner: str | None = None
+    owner_email: str | None = None
+    maturity: Literal["high", "medium", "low"] = "high"
+
+
 class SyncConfig(BaseModel):
     name: str
     description: str = ""
@@ -958,6 +1006,7 @@ class SyncConfig(BaseModel):
     # queries the real destination after a sync has run.
     unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
+    meta: SyncMetaConfig | None = None  # catalog metadata (#1226); no runtime effect
 
     @model_validator(mode="after")
     def _check_write_policy_destination_mode(self) -> SyncConfig:

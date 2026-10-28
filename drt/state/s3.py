@@ -110,6 +110,14 @@ class S3ObjectClient:
             self._injected_client = _s3_client(**self._client_options)
         return self._injected_client
 
+    def _require_bucket(self, client: Any, client_error: type[BaseException]) -> None:
+        try:
+            client.list_objects_v2(Bucket=self._bucket_name, MaxKeys=1)
+        except client_error as exc:
+            code, _status = _error_details(exc)  # type: ignore[arg-type]
+            if code == "NoSuchBucket":
+                raise
+
     def read_for_update(self, key: str) -> tuple[bytes | None, Token]:
         ClientError = _client_error_type()
         client = self._client()
@@ -126,6 +134,9 @@ class S3ObjectClient:
                 if code == "NoSuchBucket":
                     raise
                 if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
+                    # HeadObject reports a missing bucket as a bare 404 too, so a
+                    # one-key listing (s3:ListBucket, already required) tells them apart.
+                    self._require_bucket(client, ClientError)
                     # None is S3's create-only token; write_if translates it
                     # to the SDK's modeled IfNoneMatch="*" parameter.
                     return None, None
