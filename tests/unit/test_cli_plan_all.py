@@ -153,7 +153,7 @@ def test_exact_directory_apply_decrypts_one_payload_at_a_time(
     real_load = _apply_flow.load_exact_payload
     writes_seen_before_each_decrypt: list[list[str]] = []
 
-    def tracked_load(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    def tracked_load(*args: Any, **kwargs: Any) -> Any:
         writes_seen_before_each_decrypt.append(list(world.writes))
         return real_load(*args, **kwargs)
 

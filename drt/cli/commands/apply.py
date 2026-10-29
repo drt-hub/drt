@@ -139,7 +139,7 @@ def apply(
         try:
             # Directory applies deliberately decrypt one sidecar at a time;
             # aggregate payload bytes are never retained in memory.
-            exact_records = (
+            loaded_payload = (
                 load_exact_payload(
                     plan_text,
                     payload_path_for(source_file),
@@ -162,7 +162,7 @@ def apply(
                 json_output=output == "json",
                 # stderr, so `--output json` stays one parseable document on stdout.
                 notify=lambda message: typer.echo(message, err=True),
-                exact_records=exact_records,
+                exact_records=loaded_payload.records if loaded_payload is not None else None,
             )
         except ApplyRefused as e:
             if isinstance(e, ApplyAborted):  # the person declined: not an error
@@ -175,7 +175,16 @@ def apply(
         if exact and not outcome.had_error and not keep_payload:
             sidecar = payload_path_for(source_file)
             try:
-                sidecar.unlink()
+                current = sidecar.stat(follow_symlinks=False)
+                assert loaded_payload is not None
+                if (current.st_dev, current.st_ino) != loaded_payload.identity:
+                    typer.echo(
+                        f"Warning: applied successfully but payload {sidecar} was replaced "
+                        "after it was read; the replacement was not deleted.",
+                        err=True,
+                    )
+                else:
+                    sidecar.unlink()
             except OSError as e:
                 typer.echo(
                     f"Warning: applied successfully but could not delete payload {sidecar}: {e}",

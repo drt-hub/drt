@@ -143,6 +143,128 @@ def test_include_values_writes_only_an_encrypted_private_sidecar(
     assert "a@example.com" not in (project / "plan.json").read_text()
 
 
+def test_exact_sidecar_is_atomically_replaced_with_private_mode(tmp_path: Path) -> None:
+    import os
+    import stat
+
+    from drt.cli.commands.plan import _write_new_bytes
+
+    path = tmp_path / "plan.json.payload"
+    path.write_bytes(b"old")
+    replaced_from: list[Path] = []
+    real_replace = os.replace
+
+    def tracked_replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        source_path = Path(source)
+        replaced_from.append(source_path)
+        assert source_path != path
+        assert stat.S_IMODE(source_path.stat().st_mode) == 0o600
+        real_replace(source, target)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "replace", tracked_replace)
+        _write_new_bytes(path, b"new")
+
+    assert replaced_from
+    assert path.read_bytes() == b"new"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_failed_atomic_sidecar_replace_removes_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from drt.cli.commands.plan import _write_new_bytes
+
+    path = tmp_path / "plan.json.payload"
+
+    def fail_replace(_source: str | os.PathLike[str], _target: str | os.PathLike[str]) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        _write_new_bytes(path, b"new")
+
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_failed_plan_write_removes_new_exact_sidecar(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    from drt.cli.commands import plan as plan_command
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_SECRETS_KEY", str(identity))
+
+    def fail_plan_write(_path: Path, _text: str) -> None:
+        raise OSError("plan write failed")
+
+    monkeypatch.setattr(plan_command, "_write_new_file", fail_plan_write)
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert not (project / "plan.json.payload").exists()
+
+
+def test_sidecar_cleanup_failure_does_not_mask_plan_write_error(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    from drt.cli.commands import plan as plan_command
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_SECRETS_KEY", str(identity))
+
+    def fail_plan_write(_path: Path, _text: str) -> None:
+        raise OSError("plan write failed")
+
+    monkeypatch.setattr(plan_command, "_write_new_file", fail_plan_write)
+    real_unlink = Path.unlink
+
+    def fail_sidecar_unlink(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.name == "plan.json.payload":
+            raise OSError("cleanup failed")
+        real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_sidecar_unlink)
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, OSError)
+    assert str(result.exception) == "plan write failed"
+
+
 def test_private_age_identity_is_rejected_without_echoing_it(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

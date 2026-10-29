@@ -146,6 +146,41 @@ def test_state_persisting_observer_skips_dry_run(tmp_path: Path) -> None:
     wm.save.assert_not_called()
 
 
+def test_exact_replay_updates_run_state_without_changing_cursor(tmp_path: Path) -> None:
+    from drt.state.manager import SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="test_sync",
+            last_run_at="2026-05-23T00:00:00Z",
+            records_synced=0,
+            status="failed",
+            last_cursor_value="cursor-before-exact",
+        )
+    )
+    watermark = MagicMock()
+    obs = StatePersistingObserver(state_mgr, watermark)
+    result = SyncResult(success=4, failed=0)
+    result._exact_replay = True  # type: ignore[attr-defined]
+
+    obs.on_sync_completed(
+        "test_sync",
+        result,
+        "2026-05-24T00:00:00Z",
+        "must-not-be-written",
+        "updated_at",
+    )
+
+    saved = state_mgr.get_last_sync("test_sync")
+    assert saved is not None
+    assert saved.status == "success"
+    assert saved.last_run_at == "2026-05-24T00:00:00Z"
+    assert saved.records_synced == 4
+    assert saved.last_cursor_value == "cursor-before-exact"
+    watermark.save.assert_not_called()
+
+
 def test_state_persisting_observer_marks_partial(tmp_path: Path) -> None:
     state_mgr = StateManager(tmp_path)
     obs = StatePersistingObserver(state_mgr, None)

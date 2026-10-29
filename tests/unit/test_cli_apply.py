@@ -42,6 +42,7 @@ class _World:
         self.fail_writes = False
         self.deleted: list[dict[str, Any]] = []
         self.baseline: int | None = None
+        self.real_run_sync: Any = None
 
     def diff(self) -> DiffResult:
         return DiffResult(
@@ -104,6 +105,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _World) -> P
         world.calls.append({"dry_run": args[5], "source": args[1], **kwargs})
         return _Result(world, bool(args[5]))
 
+    world.real_run_sync = sync_module.run_sync
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync)
     monkeypatch.setattr(
         creds, "load_profile", lambda *_a, **_k: creds.DuckDBProfile(type="duckdb"), raising=False
@@ -210,6 +212,39 @@ def _patch_exact_verification(
     monkeypatch.setattr(_plan_runner, "compute_plan_from_records", from_records)
 
 
+def _use_real_engine_with_io(
+    monkeypatch: pytest.MonkeyPatch,
+    world: _World,
+    destination: Any,
+) -> None:
+    from drt.cli import _helpers, _plan_runner
+    from drt.cli.commands import run as run_command
+    from drt.engine import diff as diff_module
+    from drt.engine import sync as sync_module
+
+    class Source:
+        def extract(
+            self,
+            _query: str,
+            _config: Any,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Any:
+            del query_tags
+            yield from (dict(row) for row in world.added)
+
+        def test_connection(self, _config: Any) -> bool:
+            return True
+
+    source = Source()
+    monkeypatch.setattr(sync_module, "run_sync", world.real_run_sync)
+    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [])
+    for module in (_plan_runner, run_command):
+        monkeypatch.setattr(module, "get_source", lambda *_a, **_k: source, raising=False)
+        monkeypatch.setattr(module, "get_destination", lambda *_a, **_k: destination, raising=False)
+    monkeypatch.setattr(_helpers, "get_source", lambda *_a, **_k: source)
+
+
 def test_apply_writes_through_the_normal_run_path(project: Path, world: _World) -> None:
     plan = _plan(project)
 
@@ -228,6 +263,23 @@ def test_apply_writes_through_the_normal_run_path(project: Path, world: _World) 
     claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
     assert claim["state"] == "success"
     assert claim["run_id"] == writes[0]["run_id"]
+
+
+def test_non_exact_apply_still_installs_configured_dlq_observer(
+    project: Path, world: _World
+) -> None:
+    from drt.engine.observer import DlqObserver
+
+    cfg = {**SYNC_YML, "sync": {"mode": "upsert", "dlq": {"enabled": True}}}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    [write] = _writes(world)
+    observers = write["observer"]._observers
+    assert len([observer for observer in observers if isinstance(observer, DlqObserver)]) == 1
 
 
 def test_exact_apply_ignores_source_drift_and_deletes_payload_after_success(
@@ -305,39 +357,145 @@ def test_exact_verification_matches_existing_row_with_metadata_columns(
     world: _World,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from drt.engine import diff as diff_module
-    from drt.engine import sync as sync_module
+    from drt.cli._apply_flow import load_exact_payload
+    from drt.destinations.base import SyncResult
 
     cfg = {
         **SYNC_YML,
-        "sync": {"mode": "upsert", "metadata_columns": {"synced_at": "_synced_at"}},
+        "sync": {
+            "mode": "upsert",
+            "metadata_columns": {
+                "synced_at": "_synced_at",
+                "run_id": "_run_id",
+                "sync_name": "_sync_name",
+            },
+        },
     }
     (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
     world.added = [{"id": 1, "name": "a"}]
-    existing = {"id": 1, "name": "a", "_synced_at": "old"}
-    captured = {"id": 1, "name": "a", "_synced_at": "plan-time"}
-    fixture_run_sync = sync_module.run_sync
+    loaded_rows: list[dict[str, Any]] = []
 
-    def run_with_plan_metadata(*args: Any, **kwargs: Any) -> Any:
-        if args[5]:
-            result = _Result(world, True)
-            result.diff = DiffResult(
-                updated=[(existing, captured)],
-                total_source_rows=1,
-                total_destination_rows=1,
-            )
-            result._plan_payload_records = [captured]
-            return result
-        return fixture_run_sync(*args, **kwargs)
+    class Destination:
+        def load(self, records: list[dict[str, Any]], *_args: Any) -> SyncResult:
+            loaded_rows.extend(dict(record) for record in records)
+            return SyncResult(success=len(records))
 
-    monkeypatch.setattr(sync_module, "run_sync", run_with_plan_metadata)
+    _use_real_engine_with_io(monkeypatch, world, Destination())
     _exact_plan(project, monkeypatch)
-    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [dict(existing)])
+    planned_row = load_exact_payload(
+        (project / "plan.json").read_text(),
+        project / "plan.json.payload",
+        project_dir=project,
+    ).records[0]
 
     result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
 
     assert result.exit_code == 0, result.output
-    assert len(_writes(world)) == 1
+    [applied_row] = loaded_rows
+    artifact = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    assert planned_row["_run_id"] is None
+    assert applied_row["_run_id"] == artifact["invocation"]["run_id"]
+    assert applied_row["_synced_at"] != planned_row["_synced_at"]
+    assert applied_row["_sync_name"] == "orders_to_pg"
+
+
+def test_successful_exact_apply_updates_state_but_preserves_cursor(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.destinations.base import SyncResult
+    from drt.state.manager import StateManager, SyncState
+
+    cfg = {
+        **SYNC_YML,
+        "sync": {"mode": "incremental", "cursor_field": "updated_at"},
+    }
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    world.added = [{"id": 1, "name": "a", "updated_at": "2026-10-29T00:00:00Z"}]
+
+    class Destination:
+        def load(self, records: list[dict[str, Any]], *_args: Any) -> SyncResult:
+            return SyncResult(success=len(records))
+
+    _use_real_engine_with_io(monkeypatch, world, Destination())
+    state = StateManager(project)
+    state.save_sync(
+        SyncState(
+            "orders_to_pg",
+            "2026-10-28T00:00:00Z",
+            0,
+            "failed",
+            last_cursor_value="cursor-before-exact",
+        )
+    )
+    _exact_plan(project, monkeypatch)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    saved = state.get_last_sync("orders_to_pg")
+    assert saved is not None
+    assert saved.status == "success"
+    assert saved.records_synced == 1
+    assert saved.last_run_at != "2026-10-28T00:00:00Z"
+    assert saved.last_cursor_value == "cursor-before-exact"
+
+
+@pytest.mark.parametrize("remote_backend", [False, True], ids=["local", "remote"])
+def test_exact_row_failure_never_writes_decrypted_values_to_dlq(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+    remote_backend: bool,
+) -> None:
+    import dataclasses
+    from unittest.mock import MagicMock
+
+    from drt.destinations.base import SyncResult
+    from drt.destinations.row_errors import RowError
+    from drt.state import factory as state_factory
+
+    secret = "decrypted-row-secret"
+    cfg = {**SYNC_YML, "sync": {"mode": "upsert", "dlq": {"enabled": True}}}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    world.added = [{"id": 1, "name": secret}]
+
+    class FailingDestination:
+        def load(self, records: list[dict[str, Any]], *_args: Any) -> SyncResult:
+            return SyncResult(
+                failed=1,
+                errors=["rejected"],
+                row_errors=[
+                    RowError(
+                        batch_index=0,
+                        record_preview="redacted",
+                        http_status=400,
+                        error_message="rejected",
+                    )
+                ],
+            )
+
+    _use_real_engine_with_io(monkeypatch, world, FailingDestination())
+    remote_dlq = None
+    if remote_backend:
+        remote_dlq = MagicMock()
+        real_build = state_factory.build_state_bundle
+
+        def build_with_remote_dlq(*args: Any, **kwargs: Any) -> Any:
+            return dataclasses.replace(real_build(*args, **kwargs), dlq=remote_dlq)
+
+        monkeypatch.setattr(state_factory, "build_state_bundle", build_with_remote_dlq)
+    _exact_plan(project, monkeypatch)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 1
+    if remote_dlq is not None:
+        remote_dlq.append.assert_not_called()
+    dlq_dir = project / ".drt" / "dlq"
+    assert not dlq_dir.exists()
+    assert secret not in "".join(path.read_text() for path in dlq_dir.glob("*") if path.is_file())
 
 
 def test_compute_plan_from_records_reports_missing_and_duplicate_syncs(
@@ -478,6 +636,37 @@ def test_successful_exact_apply_warns_if_payload_deletion_fails(
     assert result.exit_code == 0, result.output
     assert "could not delete payload" in result.output
     assert (project / "plan.json.payload").exists()
+
+
+def test_successful_exact_apply_does_not_delete_replaced_payload(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    from drt.cli import _apply_flow
+    from drt.engine import diff as diff_module
+
+    _exact_plan(project, monkeypatch)
+    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [])
+    real_apply = _apply_flow.apply_plan
+    replacement = b"replacement-sidecar"
+
+    def apply_then_replace(*args: Any, **kwargs: Any) -> Any:
+        outcome = real_apply(*args, **kwargs)
+        staged = project / "replacement.payload"
+        staged.write_bytes(replacement)
+        os.replace(staged, project / "plan.json.payload")
+        return outcome
+
+    monkeypatch.setattr(_apply_flow, "apply_plan", apply_then_replace)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    assert "was replaced after it was read" in result.output
+    assert (project / "plan.json.payload").read_bytes() == replacement
 
 
 def test_apply_hands_the_plan_and_approver_to_the_run_for_its_history_entry(

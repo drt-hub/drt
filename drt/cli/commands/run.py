@@ -177,7 +177,8 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
     state directly (#548); the CLI wires this up here. Dead Letter Queue
     (#278) is opt-in per sync, adding a ``DlqObserver`` that persists failed
     records to ``.drt/dlq/<sync>.jsonl`` for ``drt retry`` — skipped on dry
-    runs, since nothing is actually sent, so nothing can fail.
+    runs, since nothing is actually sent, and exact replay, since persisting
+    a failed row would write the decrypted payload back to durable storage.
     """
     from drt.engine.observer import (
         CompositeObserver,
@@ -187,13 +188,11 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
         registered_extra_observers,
     )
 
-    observers: list[Any] = [LoggingObserver()]
-    if not ctx.exact:
-        # Exact replay did not read the source, so it has no valid source
-        # cursor/watermark to persist. History is still written by run_sync;
-        # only source-read state is suppressed here.
-        observers.append(StatePersistingObserver(ctx.state_mgr, wm_storage))
-    if not ctx.dry_run and sync.sync.dlq is not None and sync.sync.dlq.enabled:
+    observers: list[Any] = [
+        LoggingObserver(),
+        StatePersistingObserver(ctx.state_mgr, wm_storage),
+    ]
+    if not ctx.dry_run and not ctx.exact and sync.sync.dlq is not None and sync.sync.dlq.enabled:
         observers.append(DlqObserver(ctx.dlq_store, max_records=sync.sync.dlq.max_records))
     # Enterprise extension point (#299, ADR 0008) — an audit-log observer
     # registered via drt.engine.observer.register_extra_observer sees

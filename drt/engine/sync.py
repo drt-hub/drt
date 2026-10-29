@@ -698,8 +698,8 @@ def _run_sync_body(
     # Exact replay consumes a destination-facing snapshot, not a source read.
     # Its rows may have had the source cursor renamed, masked, or removed, so
     # deriving a new source watermark from them is invalid. Keep cursor
-    # resolution and tracking entirely off; the CLI also suppresses the
-    # persisting observer for exact runs so neither state backend is written.
+    # resolution and tracking entirely off. The persisting observer still
+    # records run status/counts, while preserving the prior cursor unchanged.
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" and not exact else None
     last_cursor_value: str | None = None
     watermark_source: str | None = None  # "cli_override" | "storage" | "default_value"

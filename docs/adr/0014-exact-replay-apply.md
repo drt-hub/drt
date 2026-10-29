@@ -55,8 +55,9 @@ or apply aborts exactly as it does today on drift. So drift in the **destination
 caught; drift in the **source** is, by design, ignored (that is the point of the mode).
 Exact delivery bypasses the warehouse idempotency ledger: the live destination re-diff is
 the correctness check, while ledger filtering after that check could silently skip a row the
-verified plan requires. Because replay does not read the source, it also never resolves,
-advances, or persists incremental cursor/watermark state.
+verified plan requires. Because replay does not read the source, it also never resolves or
+advances incremental cursor/watermark state. It still records `last_run_at`, status and
+records synced while carrying the previous cursor forward unchanged.
 
 ### 4. Bounds and hygiene
 
@@ -68,9 +69,15 @@ advances, or persists incremental cursor/watermark state.
 - `--max-age` already bounds how old a plan may be; it covers the payload too.
 - Apply opens the sidecar without following symlinks, requires a regular file, and reads at
   most the sealed byte count plus one byte. Directory apply decrypts one plan at a time.
+- Sidecar writes use a private temporary sibling plus `os.replace`. Replacing an existing
+  plan/payload pair is not atomic across both files, but the plan's sealed payload SHA-256
+  means a mixed pair is always refused.
 - The payload is **deleted after a successful apply, including a no-op** (`--keep-payload`
-  to retain it); a failed apply leaves it, so a retry with a new plan can reuse nothing by
-  accident.
+  to retain it), but only when the path still names the exact file that was verified; a
+  replacement is never unlinked. A failed apply leaves it, so a retry with a new plan can
+  reuse nothing by accident.
+- Exact replay does not install the DLQ observer: persisting a failed exact row would write
+  the decrypted payload back to durable local or remote state.
 - The docs state the PII-at-rest trade-off plainly: an encrypted file of real rows exists
   between plan and apply.
 

@@ -65,9 +65,10 @@ def test_exact_payload_round_trips_only_in_memory(
 ) -> None:
     plan_text, path, _identity = _artifact(tmp_path, monkeypatch)
 
-    assert load_exact_payload(plan_text, path, project_dir=tmp_path) == [
-        {"id": 1, "email": "alice@example.com"}
-    ]
+    loaded = load_exact_payload(plan_text, path, project_dir=tmp_path)
+    assert loaded.records == [{"id": 1, "email": "alice@example.com"}]
+    sidecar_stat = path.stat()
+    assert loaded.identity == (sidecar_stat.st_dev, sidecar_stat.st_ino)
     assert b"alice@example.com" not in path.read_bytes()
 
 
@@ -90,7 +91,7 @@ def test_exact_payload_preserves_common_warehouse_scalar_types(
     ]
     plan_text, path, _identity = _artifact(tmp_path, monkeypatch, rows)
 
-    assert load_exact_payload(plan_text, path, project_dir=tmp_path) == rows
+    assert load_exact_payload(plan_text, path, project_dir=tmp_path).records == rows
 
 
 def test_payload_metadata_is_covered_by_the_plan_seal(

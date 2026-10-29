@@ -948,7 +948,7 @@ def test_watermark_storage_used_when_configured(tmp_path: Path) -> None:
     assert wm_storage.get("wm_sync") == "2024-01-05"
 
 
-def test_exact_replay_does_not_read_or_write_transformed_cursor_state(tmp_path: Path) -> None:
+def test_exact_replay_updates_run_state_without_using_transformed_cursor(tmp_path: Path) -> None:
     from drt.cli._apply_flow import _exact_replay_sync
     from drt.state.manager import StateManager, SyncState
     from drt.state.watermark import LocalWatermarkStorage
@@ -995,13 +995,12 @@ def test_exact_replay_does_not_read_or_write_transformed_cursor_state(tmp_path: 
 
     assert result.cursor_value_used is None
     assert destination.calls == [[{"id": 1, "delivered_cursor": "[REDACTED]"}]]
-    assert state.get_last_sync("exact_incremental") == SyncState(
-        sync_name="exact_incremental",
-        last_run_at="before",
-        records_synced=7,
-        status="success",
-        last_cursor_value="2026-10-20",
-    )
+    saved = state.get_last_sync("exact_incremental")
+    assert saved is not None
+    assert saved.last_run_at != "before"
+    assert saved.records_synced == 1
+    assert saved.status == "success"
+    assert saved.last_cursor_value == "2026-10-20"
     assert watermark.get("exact_incremental") == "2026-10-20"
 
 

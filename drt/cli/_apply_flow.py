@@ -61,6 +61,14 @@ class ApplyOutcome:
     drifted: int = 0
 
 
+@dataclass(frozen=True)
+class LoadedExactPayload:
+    """Decrypted rows plus the identity of the sidecar they came from."""
+
+    records: list[dict[str, Any]]
+    identity: tuple[int, int]
+
+
 class _ExactReplaySource:
     """In-memory source whose rows already passed source-side transforms."""
 
@@ -273,7 +281,7 @@ def load_exact_payload(
     *,
     project_dir: Path = Path("."),
     max_age: timedelta = timedelta(hours=24),
-) -> list[dict[str, Any]]:
+) -> LoadedExactPayload:
     """Vetted, decrypted sidecar rows. Plaintext never leaves memory."""
     doc = preflight_document(plan_text, project_dir=project_dir, max_age=max_age)
     expected = doc.get("payload")
@@ -304,7 +312,8 @@ def load_exact_payload(
         raise ApplyRefused(f"Cannot read exact replay sidecar {payload_path}: {e}") from e
     try:
         with os.fdopen(fd, "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            file_stat = os.fstat(handle.fileno())
+            if not stat.S_ISREG(file_stat.st_mode):
                 raise ApplyRefused(f"Exact replay sidecar must be a regular file: {payload_path}")
             # The byte count is authenticated by the plan seal. One extra byte
             # is enough to detect growth without ever reading an unbounded file.
@@ -320,7 +329,10 @@ def load_exact_payload(
     from drt.cli._plan_payload import PlanPayloadError, decrypt_rows
 
     try:
-        return decrypt_rows(ciphertext, expected)
+        return LoadedExactPayload(
+            records=decrypt_rows(ciphertext, expected),
+            identity=(file_stat.st_dev, file_stat.st_ino),
+        )
     except PlanPayloadError as e:
         raise ApplyRefused(f"Cannot apply the exact replay payload: {e}") from e
 

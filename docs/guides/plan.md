@@ -395,8 +395,12 @@ identity in `DRT_SECRETS_KEY`. Install `drt-core[encryption]` on both jobs.
 The full source snapshot after lookups, computed fields, field mappings and
 `sync.mask` is age-encrypted directly to `<plan>.payload`; plaintext is never
 written to disk. `plan.json` contains only its sealed hash, row count and
-ciphertext size. The sidecar is owner-readable only (0600 on POSIX). Planning
-reports exact replay as unavailable, without writing either artifact, above
+ciphertext size. The sidecar is owner-readable only (0600 on POSIX) and is
+staged through a temporary sibling before `os.replace`. Overwriting an existing
+plan/payload pair is not a two-file atomic operation, but a mixed pair is always
+refused because the sealed payload SHA-256 in `plan.json` must match the
+sidecar. Planning reports exact replay as unavailable, without writing either
+artifact, above
 `--max-payload-rows` (default 10,000) or the fixed 10 MiB plaintext cap.
 
 `drt apply --exact` verifies the plan seal and `--max-age`, authenticates and
@@ -406,10 +410,14 @@ drift is therefore ignored by design, while destination drift still refuses the
 apply through the usual entry comparison (`key`, `action`, `value_hash`). A
 missing, edited, swapped or wrongly encrypted sidecar is refused before any
 write. The normal destination write path still supplies rate limiting, guards,
-DLQ, state, history and alerts.
+run-state status/counts, history and alerts. Exact replay never installs the DLQ
+observer because a failed row there would copy decrypted payload values into
+durable storage, and it preserves rather than advances the prior source cursor.
 
-After a successful apply drt deletes the sidecar. `--keep-payload` retains it;
-any refused or failed apply leaves it for investigation or retry. `--max-age`
+After a successful apply drt deletes the sidecar only if it is still the same
+file that was verified and decrypted. A replacement at the same path is left
+alone. `--keep-payload` retains the original sidecar; any refused or failed
+apply leaves it for investigation or retry. `--max-age`
 also bounds how long the payload may be used. Exact runs record `exact: true` in
 `run_results.json` and history.
 

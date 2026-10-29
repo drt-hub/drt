@@ -173,8 +173,18 @@ def plan(
         if payload_bytes is not None:
             from drt.cli._plan_payload import payload_path_for
 
-            _write_new_bytes(payload_path_for(out), payload_bytes)
-        _write_new_file(out, plan_obj.to_json())
+            sidecar = payload_path_for(out)
+            _write_new_bytes(sidecar, payload_bytes)
+            try:
+                _write_new_file(out, plan_obj.to_json())
+            except BaseException:
+                try:
+                    sidecar.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+        else:
+            _write_new_file(out, plan_obj.to_json())
 
     if output == "json":
         print(plan_obj.to_json(), end="")
@@ -220,16 +230,23 @@ def _write_new_file(path: Path, text: str) -> None:
 
 
 def _write_new_bytes(path: Path, data: bytes) -> None:
-    """Write an owner-only sidecar without following a symlink."""
+    """Atomically replace an owner-only sidecar without following a symlink."""
     import os
+    import tempfile
 
-    if path.is_symlink():
-        path.unlink()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    if os.name == "posix":
-        os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        if os.name == "posix":
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _attach_payload(context: Any, recipients: list[str], max_rows: int) -> bytes | None:
