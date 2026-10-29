@@ -421,6 +421,12 @@ apply leaves it for investigation or retry. `--max-age`
 also bounds how long the payload may be used. Exact runs record `exact: true` in
 `run_results.json` and history.
 
+Do not run two `drt plan --include-values` or `drt apply --exact` against the
+same `--out` path at the same time. Cleanup checks the file identity but cannot
+make check-and-delete atomic, so a concurrent writer can lose its sidecar. The
+failure is always safe and visible: the sealed hash will not match, apply
+refuses, and you plan again. Use one plan path per concurrent job.
+
 Exact replay uses the same [destination coverage matrix](plan-coverage.md) and
 the same unsupported-sync gates as an ordinary plan. It does not make a
 non-queryable destination plannable, and `incremental_strategy: diff` remains
