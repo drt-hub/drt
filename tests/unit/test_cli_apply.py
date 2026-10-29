@@ -73,6 +73,7 @@ class _Result:
         self.failed = 1 if world.fail_writes and not dry_run else 0
         self.diff = world.diff()
         self.cursor_value_used = world.cursor
+        self._plan_payload_records = list(world.added)
 
 
 @pytest.fixture
@@ -100,7 +101,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _World) -> P
     (tmp_path / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(SYNC_YML))
 
     def fake_run_sync(*args: Any, **kwargs: Any) -> _Result:
-        world.calls.append({"dry_run": args[5], **kwargs})
+        world.calls.append({"dry_run": args[5], "source": args[1], **kwargs})
         return _Result(world, bool(args[5]))
 
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync)
@@ -146,6 +147,69 @@ def _writes(world: _World) -> list[dict[str, Any]]:
     return [c for c in world.calls if not c["dry_run"]]
 
 
+def _exact_plan(project: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    from pyrage import x25519
+
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_SECRETS_KEY", str(identity))
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    return json.loads((project / "plan.json").read_text())
+
+
+def _patch_exact_verification(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    destination_drift: bool = False,
+) -> None:
+    import dataclasses
+
+    from drt.cli import _plan_runner
+    from drt.engine.plan import build_plan
+
+    base = _plan_runner.compute_plan("orders_to_pg", project_dir=project)
+
+    def from_records(_sync_name: str, records: list[dict[str, Any]], **_kwargs: Any) -> Any:
+        replayed = list(records)
+        if destination_drift:
+            replayed.append({"id": 99, "name": "destination changed"})
+        diff = DiffResult(
+            added=replayed,
+            total_source_rows=len(records),
+            total_destination_rows=0,
+        )
+        current = build_plan(
+            diff,
+            sync_name=base.sync.name,
+            sync_mode=base.sync.sync.mode,
+            match_policy=base.sync.sync.match_policy,
+            destination=base.plan.destination,
+            config_fingerprint=base.plan.config_hash,
+            environment_fingerprint=base.plan.environment_hash,
+            plan_key=_plan_runner.load_plan_key(project),
+            drt_version=base.plan.drt_version,
+            key_columns=list(base.sync.destination.upsert_key or []),
+            mask_columns=set(base.sync.sync.mask or {}),
+            exclude_columns=_plan_runner._engine_written_columns(base.sync),
+            guards=base.sync.sync.guards,
+        )
+        return dataclasses.replace(base, plan=current, payload_records=records)
+
+    monkeypatch.setattr(_plan_runner, "compute_plan_from_records", from_records)
+
+
 def test_apply_writes_through_the_normal_run_path(project: Path, world: _World) -> None:
     plan = _plan(project)
 
@@ -164,6 +228,74 @@ def test_apply_writes_through_the_normal_run_path(project: Path, world: _World) 
     claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
     assert claim["state"] == "success"
     assert claim["run_id"] == writes[0]["run_id"]
+
+
+def test_exact_apply_ignores_source_drift_and_deletes_payload_after_success(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exact_plan(project, monkeypatch)
+    _patch_exact_verification(project, monkeypatch)
+    world.added[0] = {"id": 1, "name": "source moved on"}
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    [write] = _writes(world)
+    replayed = list(write["source"].extract("", object()))
+    assert replayed[0] == {"id": 1, "name": "a"}
+    assert write["exact"] is True
+    assert not (project / "plan.json.payload").exists()
+    artifact = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    assert artifact["results"][0]["exact"] is True
+
+
+def test_exact_apply_catches_destination_drift_and_leaves_payload(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exact_plan(project, monkeypatch)
+    _patch_exact_verification(project, monkeypatch, destination_drift=True)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "no longer matches" in result.output
+    assert _writes(world) == []
+    assert (project / "plan.json.payload").exists()
+
+
+def test_failed_exact_apply_keeps_payload(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exact_plan(project, monkeypatch)
+    _patch_exact_verification(project, monkeypatch)
+    world.fail_writes = True
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert (project / "plan.json.payload").exists()
+
+
+def test_keep_payload_retains_successful_exact_sidecar(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exact_plan(project, monkeypatch)
+    _patch_exact_verification(project, monkeypatch)
+
+    result = runner.invoke(
+        app, ["apply", "plan.json", "--exact", "--keep-payload", "--auto-approve"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (project / "plan.json.payload").exists()
 
 
 def test_apply_hands_the_plan_and_approver_to_the_run_for_its_history_entry(
@@ -799,9 +931,7 @@ def test_force_percentage_is_bounded_by_the_reviewed_baseline(project: Path, wor
     assert _writes(world) == []
 
 
-def test_force_percentage_refuses_legacy_schema_v1_plan_without_baseline(
-    project: Path, world: _World
-) -> None:
+def test_force_percentage_refuses_plan_without_baseline(project: Path, world: _World) -> None:
     world.deleted = [{"id": 100}, {"id": 101}]
     world.baseline = 10
     _guarded_sync(project, {"max_delete_pct": 10})
@@ -811,7 +941,7 @@ def test_force_percentage_refuses_legacy_schema_v1_plan_without_baseline(
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--force-guards"])
 
     assert result.exit_code == 1
-    assert "predates delete_baseline" in result.output
+    assert "omits delete_baseline" in result.output
     assert "Re-run `drt plan`" in result.output
     assert _writes(world) == []
 

@@ -58,6 +58,12 @@ def _patch_engine(monkeypatch: pytest.MonkeyPatch, diff: DiffResult, calls: list
 
         def __init__(self) -> None:
             self.diff = diff
+            self._plan_payload_records = [
+                *diff.added,
+                *(new for _old, new in diff.updated),
+                *diff.inserted,
+                *(new for _old, new in diff.replaced),
+            ]
 
     def fake_run_sync(*args: Any, **kwargs: Any) -> _Result:
         calls.append((args, kwargs))
@@ -100,6 +106,99 @@ def test_plan_writes_a_complete_unsampled_plan_file(
     assert kwargs["compute_diff"] is True
     assert kwargs["diff_limit"] > 10**9  # not a sample
     assert "plan_id" in result.output
+
+
+def test_include_values_writes_only_an_encrypted_private_sidecar(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stat
+
+    from pyrage import x25519
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_SECRETS_KEY", str(identity))
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads((project / "plan.json").read_text())
+    sidecar = project / "plan.json.payload"
+    assert document["schema_version"] == 2
+    assert document["payload"]["rows"] == 2
+    assert document["payload"]["bytes"] == len(sidecar.read_bytes())
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+    assert b"a@example.com" not in sidecar.read_bytes()
+    assert "a@example.com" not in (project / "plan.json").read_text()
+
+
+def test_include_values_over_row_cap_is_unavailable(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+            "--max-payload-rows",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "--max-payload-rows is 1" in result.output
+    assert not (project / "plan.json").exists()
+    assert not (project / "plan.json.payload").exists()
+
+
+def test_include_values_over_byte_cap_is_unavailable(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    from drt.cli import _plan_payload
+
+    _patch_engine(monkeypatch, _changes(), [])
+    monkeypatch.setattr(_plan_payload, "MAX_PAYLOAD_BYTES", 20)
+    identity = x25519.Identity.generate()
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "byte cap is 20 bytes" in result.output
+    assert not (project / "plan.json").exists()
 
 
 def test_plan_json_output_is_the_plan(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -31,7 +31,7 @@ from typing import Any
 from drt.engine.diff import DiffResult
 from drt.engine.guards import GuardTrip, evaluate_guards
 
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
 
 # Review order: destructive actions last, so a reader meets them at the end of
 # a long list rather than buried in the middle.
@@ -81,6 +81,8 @@ class Plan:
     guards_configured: dict[str, Any] | None = None
     guard_trips: list[GuardTrip] = field(default_factory=list)
     entries: list[PlanEntry] = field(default_factory=list)
+    # Metadata only. The real rows stay in an adjacent age-encrypted sidecar.
+    payload: dict[str, Any] | None = None
     plan_key: bytes = field(default=b"", repr=False)
 
     @property
@@ -116,7 +118,7 @@ class Plan:
         return document
 
     def _body(self) -> dict[str, Any]:
-        return {
+        body = {
             "schema_version": PLAN_SCHEMA_VERSION,
             "plan_id": self.plan_id,
             "created_at": self.created_at,
@@ -151,6 +153,9 @@ class Plan:
             "digest": self.digest,
             "entries": [e.to_dict() for e in self.entries],
         }
+        if self.payload is not None:
+            body["payload"] = self.payload
+        return body
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, sort_keys=True, default=str) + "\n"
@@ -600,6 +605,16 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
         },
         "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "seal": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"},
+        "payload": {
+            "type": "object",
+            "required": ["sha256", "rows", "bytes"],
+            "properties": {
+                "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "rows": {"type": "integer", "minimum": 0},
+                "bytes": {"type": "integer", "minimum": 0},
+            },
+            "additionalProperties": False,
+        },
         "entries": {
             "type": "array",
             "items": {

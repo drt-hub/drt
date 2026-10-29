@@ -344,6 +344,7 @@ def run_sync(
     reviewed_guard_baseline: int | None = None,
     plan_id: str | None = None,
     approved_by: str | None = None,
+    exact: bool | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -412,6 +413,8 @@ def run_sync(
         reviewed_forced_guards: For apply only, guard names the reviewed plan
             tripped. Together with the reviewed delete counts this bounds
             ``force_guards`` so a larger late change still refuses.
+        exact: ``True`` only for an exact-replay apply; copied to history as
+            additive lineage metadata. Ordinary runs leave it unset.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -566,6 +569,7 @@ def run_sync(
                         guards=guards_outcome,
                         plan_id=plan_id,
                         approved_by=approved_by,
+                        exact=exact,
                     )
                 )
                 history_manager.prune(sync.name, history_retention_days)
@@ -878,6 +882,12 @@ def _run_sync_body(
     # When dry_run + compute_diff, accumulate (post-lookup) records to feed
     # the diff engine after extraction completes (#413).
     dry_run_records: list[dict[str, Any]] = []
+    # Exact replay (#1221) needs the full destination-facing snapshot after
+    # masking but before run-specific metadata columns. It is captured only
+    # when the CLI planner opts in through this private in-memory signal.
+    plan_payload_records: list[dict[str, Any]] | None = (
+        [] if dry_run and compute_diff and sync.sync._capture_plan_payload else None
+    )
 
     # Idempotency ledger (#1099) — resolve the dedup key template once, not
     # per batch. Two destination shapes are out of scope for the first cut,
@@ -1021,6 +1031,12 @@ def _run_sync_body(
             # reference the destination-facing (post-rename) field names.
             # Pure transform; no observer side effects.
             record_batch = apply_mask(record_batch, sync.sync.mask)
+
+            if plan_payload_records is not None:
+                # metadata_columns mutates rows in place immediately below;
+                # copy now so the encrypted payload contains exactly the
+                # post-mask values specified by ADR 0014.
+                plan_payload_records.extend(dict(record) for record in record_batch)
 
             # Opt-in engine metadata columns (#762). Applied last — after
             # field_mappings and mask — since column names are already
@@ -1303,6 +1319,10 @@ def _run_sync_body(
         total_result.diff = _compute_diff(
             dry_run_records, sync.destination, sync.sync, limit=diff_limit
         )
+        # Deliberately not a SyncResult field: row values must never leak into
+        # normal JSON/run-results serialization. The planner reads and encrypts
+        # this process-local attribute immediately.
+        total_result._plan_payload_records = plan_payload_records  # type: ignore[attr-defined]
 
     total_result.duration_seconds = round(time.perf_counter() - t0, 3)
     total_result.watermark_source = watermark_source

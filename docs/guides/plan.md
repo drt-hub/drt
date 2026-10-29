@@ -34,6 +34,7 @@ no cloud account or cloud credential.
 | `fingerprints.cursor_hash` | Hash of the incremental cursor (never the raw value). |
 | `summary` | Counts of `create`, `insert`, `update`, `replace`, `delete`. |
 | `entries[]` | `{key, action, value_hash, changed_columns, delete_reason}` per changed record. `value_hash` is a keyed hash of the row to be written, so a changed value is detected without the value being stored. |
+| `payload` | Present only with `--include-values`: the adjacent encrypted sidecar's `sha256`, row count and ciphertext byte count. The HMAC `seal` covers this metadata; values remain outside `plan.json`. |
 
 Entries are sorted, so the content of a plan is stable across runs. The JSON Schema is in
 [`docs/schemas/plan.schema.json`](../schemas/plan.schema.json).
@@ -55,7 +56,7 @@ values are shortened to 120 characters, and control characters appear as
 
 ## What is hidden
 
-Row **values** never appear. `changed_columns` lists names only. Key values are
+Row **values** never appear in `plan.json`. `changed_columns` lists names only. Key values are
 shown so a reviewer can tell which record changes; use `--redact-keys` to hash
 them, and any column in `sync.mask` is always hashed.
 
@@ -81,6 +82,8 @@ reason when:
   update_only` / `create_only`, `incremental_strategy: diff` (snapshot
   extraction writes scratch tables, so it is not read-only), or an engine
   metadata column inside `upsert_key`.
+- `--include-values` was requested but the post-mask snapshot exceeds
+  `--max-payload-rows` (10,000 by default) or the fixed 10 MiB plaintext byte cap.
 
 See [plan coverage by destination](plan-coverage.md) for which destinations can be
 planned today.
@@ -374,6 +377,54 @@ Nothing is written, and the command exits 1, when:
 drifted. The default, 0, refuses any difference at all. Without a terminal,
 `--auto-approve` is required.
 
+### Exact replay with an encrypted payload
+
+Use exact replay when apply must write the rows captured during planning rather
+than extract the source again:
+
+```bash
+drt plan orders_to_pg --out plan.json --include-values --recipient age1...
+drt apply plan.json --exact --auto-approve --approved-by alice
+```
+
+`--recipient` is repeatable. In CI, set one or more comma- or whitespace-separated
+public keys in `DRT_PLAN_RECIPIENTS` instead. Planning needs only the public age
+X25519 recipients; applying decrypts in memory with the `AGE-SECRET-KEY-...`
+identity in `DRT_SECRETS_KEY`. Install `drt-core[encryption]` on both jobs.
+
+The full source snapshot after lookups, computed fields, field mappings and
+`sync.mask` is age-encrypted directly to `<plan>.payload`; plaintext is never
+written to disk. `plan.json` contains only its sealed hash, row count and
+ciphertext size. The sidecar is owner-readable only (0600 on POSIX). Planning
+reports exact replay as unavailable, without writing either artifact, above
+`--max-payload-rows` (default 10,000) or the fixed 10 MiB plaintext cap.
+
+`drt apply --exact` verifies the plan seal and `--max-age`, authenticates and
+decrypts the sidecar, then computes the same diff from those rows against the
+destination as it exists now. It never extracts the configured source. Source
+drift is therefore ignored by design, while destination drift still refuses the
+apply through the usual entry comparison (`key`, `action`, `value_hash`). A
+missing, edited, swapped or wrongly encrypted sidecar is refused before any
+write. The normal destination write path still supplies rate limiting, guards,
+DLQ, state, history and alerts.
+
+After a successful apply drt deletes the sidecar. `--keep-payload` retains it;
+any refused or failed apply leaves it for investigation or retry. `--max-age`
+also bounds how long the payload may be used. Exact runs record `exact: true` in
+`run_results.json` and history.
+
+Exact replay uses the same [destination coverage matrix](plan-coverage.md) and
+the same unsupported-sync gates as an ordinary plan. It does not make a
+non-queryable destination plannable, and `incremental_strategy: diff` remains
+unavailable because its planning extraction is not read-only.
+
+This opt-in creates a sensitive artifact containing real rows at rest between
+plan and apply. Age encryption limits who can read it; it does not make weak key
+storage safe. Keep the identity in a secret manager, keep artifact retention
+short, and do not upload the sidecar where its intended apply job cannot protect
+it. Exact replay is deliberately CLI-only: MCP `drt_plan` and `drt_apply` remain
+value-free and cannot stage, decrypt or retain payloads.
+
 ### What apply guarantees, and what it does not
 
 `drt apply` is a **guard in front of a normal run**, not a transaction and not
@@ -384,13 +435,14 @@ a filtered write.
   extracted row**, not only the entries listed in the plan. Rows that were
   already equal are upserted too, so triggers and "updated at" columns behave
   exactly as they do for `drt run`.
-- The source can still change between the verification extraction and the write.
-  Verification narrows that window; it does not close it.
+- In the default verify-by-replan mode, the source can still change between the
+  verification extraction and the write. Verification narrows that window;
+  `--exact` closes it by using the captured payload.
 - For incremental syncs the write is pinned to the cursor the plan was verified
   over, not to whatever the watermark says by then.
-- Writing exactly the verified rows needs the planned payloads to be stored,
-  which is the later exact-replay option
-  ([#1221](https://github.com/drt-hub/drt/issues/1221)).
+- `--exact` closes the source re-extraction window by replaying its encrypted
+  snapshot, but it is still not a destination transaction or lock. A concurrent
+  destination writer after verification remains possible.
 
 ### Plans that cannot be applied
 
@@ -399,10 +451,11 @@ two extractions never verifies. A model that returns `CURRENT_TIMESTAMP`,
 `random()` or another volatile value in a written column produces plans that
 report drift every time. Keep volatile expressions out of the written columns
 (use `metadata_columns.synced_at` for a run timestamp: those columns are
-excluded from the comparison), or wait for exact replay
-([#1221](https://github.com/drt-hub/drt/issues/1221)). Any change to the resolved
+excluded from the comparison), or use exact replay. Any change to the resolved
 config, a project var or the profile (including a rotated literal credential)
 is treated as a different environment, which is deliberately conservative.
+For volatile source expressions, exact replay is the way to preserve the
+captured values instead of requiring a second source extraction to reproduce them.
 
 ### Single use
 
@@ -423,7 +476,8 @@ run gets a normal `run_id`; the claim file and `run_results.json` link it to the
 The claim file and `run_results.json` are workspace-local. The run history is the
 record that outlives an ephemeral CI runner, so `drt apply` also writes the
 `plan_id` and the `approved_by` name onto the run's history entry (an ordinary
-`drt run` leaves both empty). That makes the question "which reviewed plan did
+`drt run` leaves both empty). Exact replay additionally records `exact: true`,
+omitted for ordinary apply and run history. That makes the question "which reviewed plan did
 this run apply, and who approved it?" answerable from history alone:
 
 - `drt status --history` adds a **Plan** column (the plan id and approver) when

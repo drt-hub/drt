@@ -162,6 +162,8 @@ class _RunContext:
     # history entry. Ordinary ``drt run`` leaves both unset.
     plan_id: str | None = None
     approved_by: str | None = None
+    # Exact replay (#1221): omit from ordinary apply/run artifacts and history.
+    exact: bool | None = None
     # Where the project lives. ``drt run`` is always invoked from it; the MCP
     # server may not be, so ``drt apply`` passes it explicitly.
     project_dir: Path = Path(".")
@@ -270,6 +272,7 @@ def _run_one(
                 reviewed_guard_baseline=ctx.reviewed_guard_baseline,
                 plan_id=ctx.plan_id,
                 approved_by=ctx.approved_by,
+                exact=ctx.exact,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console

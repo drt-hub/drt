@@ -45,6 +45,16 @@ def apply(
         "--force-guards",
         help="Apply even though a sync.guards limit trips (recorded in the run results).",
     ),
+    exact: bool = typer.Option(
+        False,
+        "--exact",
+        help="Replay the plan's encrypted .payload rows instead of extracting the source.",
+    ),
+    keep_payload: bool = typer.Option(
+        False,
+        "--keep-payload",
+        help="Retain the encrypted sidecar after a successful --exact apply.",
+    ),
     cursor_value: str = typer.Option(
         None,
         "--cursor-value",
@@ -74,13 +84,18 @@ def apply(
         ApplyAborted,
         ApplyRefused,
         apply_plan,
+        load_exact_payload,
         load_plan_directory,
         parse_duration,
     )
+    from drt.cli._plan_payload import payload_path_for
     from drt.cli._plan_runner import PlanCliError, parse_vars_option
 
     if output not in ("text", "json"):
         print_error("--output must be 'text' or 'json'.")
+        raise typer.Exit(1)
+    if keep_payload and not exact:
+        print_error("--keep-payload is only valid with --exact.")
         raise typer.Exit(1)
     try:
         max_age_delta = parse_duration(max_age)
@@ -90,7 +105,7 @@ def apply(
     try:
         if plan_file.is_dir():
             plan_texts = [
-                (Path(name), text)
+                (plan_file / name, text)
                 for name, text in load_plan_directory(plan_file, max_age=max_age_delta)
             ]
             if not plan_texts:
@@ -102,6 +117,18 @@ def apply(
         else:
             plan_texts = [(plan_file, plan_file.read_text(encoding="utf-8"))]
         cli_vars = parse_vars_option(vars_raw)
+        exact_rows = (
+            {
+                source_file: load_exact_payload(
+                    plan_text,
+                    payload_path_for(source_file),
+                    max_age=max_age_delta,
+                )
+                for source_file, plan_text in plan_texts
+            }
+            if exact
+            else {}
+        )
     except ApplyRefused as e:
         print_error(str(e))
         raise typer.Exit(1)
@@ -136,6 +163,7 @@ def apply(
                 json_output=output == "json",
                 # stderr, so `--output json` stays one parseable document on stdout.
                 notify=lambda message: typer.echo(message, err=True),
+                exact_records=exact_rows.get(source_file) if exact else None,
             )
         except ApplyRefused as e:
             if isinstance(e, ApplyAborted):  # the person declined: not an error
@@ -156,6 +184,15 @@ def apply(
                 "result": outcome.entry,
             }
         )
+        if exact and not outcome.had_error and not keep_payload:
+            sidecar = payload_path_for(source_file)
+            try:
+                sidecar.unlink()
+            except OSError as e:
+                typer.echo(
+                    f"Warning: applied successfully but could not delete payload {sidecar}: {e}",
+                    err=True,
+                )
         if outcome.had_error:
             failed = True
             break  # later plans may depend on this one having landed

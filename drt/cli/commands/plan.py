@@ -9,7 +9,7 @@ persists run state.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -73,6 +73,21 @@ def plan(
             "(sync.mask columns are always hashed)."
         ),
     ),
+    include_values: bool = typer.Option(
+        False,
+        "--include-values",
+        help="Write post-mask rows to an adjacent age-encrypted .payload sidecar.",
+    ),
+    recipient: list[str] | None = typer.Option(
+        None,
+        "--recipient",
+        help="age X25519 recipient for --include-values (repeatable).",
+    ),
+    max_payload_rows: int = typer.Option(
+        10_000,
+        "--max-payload-rows",
+        help="Maximum rows in an exact-replay payload (default 10000).",
+    ),
     cursor_value: str = typer.Option(
         None, "--cursor-value", help="Override the cursor/watermark for incremental syncs."
     ),
@@ -91,11 +106,25 @@ def plan(
       drt plan orders_to_pg --out plan.json --detailed-exitcode
       drt plan --all --out-dir plans --output markdown   # one PR comment for every sync
     """
+    from drt.cli._plan_payload import resolve_recipients
     from drt.cli._plan_runner import PlanCliError, compute_plan, parse_vars_option
     from drt.engine.plan import render_markdown, render_text
 
     if output not in ("text", "json", "markdown"):
         print_error("--output must be 'text', 'json' or 'markdown'.")
+        raise typer.Exit(1)
+    if recipient and not include_values:
+        print_error("--recipient is only valid with --include-values.")
+        raise typer.Exit(1)
+    if include_values and out is None and not all_syncs:
+        print_error("--include-values requires --out (or use --all with --out-dir).")
+        raise typer.Exit(1)
+    if max_payload_rows < 1:
+        print_error("--max-payload-rows must be at least 1.")
+        raise typer.Exit(1)
+    recipients = resolve_recipients(recipient) if include_values else []
+    if include_values and not recipients:
+        print_error("--include-values requires at least one --recipient or DRT_PLAN_RECIPIENTS.")
         raise typer.Exit(1)
 
     if all_syncs or sync_name is None:
@@ -103,19 +132,33 @@ def plan(
             print_error("Give a sync name, or --all (not both, and --all uses --out-dir).")
             raise typer.Exit(1)
         _plan_all(
-            out_dir, output, detailed_exitcode, redact_keys, cursor_value, vars_raw, profile_name
+            out_dir,
+            output,
+            detailed_exitcode,
+            redact_keys,
+            cursor_value,
+            vars_raw,
+            profile_name,
+            include_values,
+            recipients,
+            max_payload_rows,
         )
         return
 
     try:
-        plan_obj = compute_plan(
+        plan_ctx = compute_plan(
             sync_name,
             redact_keys=redact_keys,
             cursor_value=cursor_value,
             cli_vars=parse_vars_option(vars_raw),
             profile_name=profile_name,
-        ).plan
-    except PlanCliError as e:
+            include_values=include_values,
+        )
+        plan_obj = plan_ctx.plan
+        payload_bytes = (
+            _attach_payload(plan_ctx, recipients, max_payload_rows) if include_values else None
+        )
+    except (PlanCliError, ImportError, ValueError) as e:
         print_error(str(e))
         raise typer.Exit(1)
 
@@ -127,7 +170,11 @@ def plan(
         raise typer.Exit(1)
 
     if out is not None:
-        out.write_text(plan_obj.to_json(), encoding="utf-8")
+        if payload_bytes is not None:
+            from drt.cli._plan_payload import payload_path_for
+
+            _write_new_bytes(payload_path_for(out), payload_bytes)
+        _write_new_file(out, plan_obj.to_json())
 
     if output == "json":
         print(plan_obj.to_json(), end="")
@@ -166,8 +213,54 @@ def _write_new_file(path: Path, text: str) -> None:
     if path.is_symlink():
         path.unlink()  # removes the link, never its target
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    if os.name == "posix":
+        os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
+
+
+def _write_new_bytes(path: Path, data: bytes) -> None:
+    """Write an owner-only sidecar without following a symlink."""
+    import os
+
+    if path.is_symlink():
+        path.unlink()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    if os.name == "posix":
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
+
+def _attach_payload(context: Any, recipients: list[str], max_rows: int) -> bytes | None:
+    """Attach sealed metadata; over-cap exact replay is unavailable, not exceptional."""
+    from drt.cli._plan_payload import MAX_PAYLOAD_BYTES, encrypt_rows, serialize_rows
+
+    plan = context.plan
+    if not plan.available:
+        return None
+    rows = context.payload_records
+    if rows is None:
+        raise ValueError("Exact replay rows were not captured; re-run `drt plan --include-values`.")
+    if len(rows) > max_rows:
+        plan.available = False
+        plan.unavailable_reason = (
+            f"exact replay payload has {len(rows)} rows; --max-payload-rows is {max_rows}"
+        )
+        plan.entries = []
+        return None
+    plaintext_bytes = len(serialize_rows(rows))
+    if plaintext_bytes > MAX_PAYLOAD_BYTES:
+        plan.available = False
+        plan.unavailable_reason = (
+            f"exact replay payload is {plaintext_bytes} bytes; the byte cap is "
+            f"{MAX_PAYLOAD_BYTES} bytes"
+        )
+        plan.entries = []
+        return None
+    ciphertext, metadata = encrypt_rows(rows, recipients)
+    plan.payload = metadata
+    return ciphertext
 
 
 def _clear_previous_plans(out_dir: Path) -> None:
@@ -185,6 +278,7 @@ def _clear_previous_plans(out_dir: Path) -> None:
     for name in listed:
         if isinstance(name, str) and re.fullmatch(r"\d{3,}-[A-Za-z0-9._-]+\.json", name):
             (out_dir / name).unlink(missing_ok=True)
+            (out_dir / f"{name}.payload").unlink(missing_ok=True)
     manifest.unlink(missing_ok=True)
 
 
@@ -196,6 +290,9 @@ def _plan_all(
     cursor_value: str | None,
     vars_raw: str | None,
     profile_name: str | None,
+    include_values: bool,
+    recipients: list[str],
+    max_payload_rows: int,
 ) -> None:
     """``drt plan --all``: every sync, one combined report, never fatal per sync.
 
@@ -233,16 +330,23 @@ def _plan_all(
 
     plan_key = load_plan_key(Path("."))
     results: list[tuple[str, Plan | None, str, str | None]] = []  # name, plan, status, reason
+    payloads: dict[str, bytes] = {}
     for name in names:
         try:
-            one = compute_plan(
+            context = compute_plan(
                 name,
                 redact_keys=redact_keys,
                 cursor_value=cursor_value,
                 cli_vars=cli_vars,
                 profile_name=profile_name,
-            ).plan
-        except PlanCliError as e:
+                include_values=include_values,
+            )
+            one = context.plan
+            if include_values:
+                payload = _attach_payload(context, recipients, max_payload_rows)
+                if payload is not None:
+                    payloads[name] = payload
+        except (PlanCliError, ImportError, ValueError) as e:
             typer.echo(f"drt plan: {name}: {message(str(e), plan_key, 800)}", err=True)
             results.append((name, None, "error", _FAILED))
             continue
@@ -259,6 +363,8 @@ def _plan_all(
             file_name = _file_name(index, len(results), name)
             out_dir.mkdir(parents=True, exist_ok=True)
             _write_new_file(out_dir / file_name, planned.to_json())
+            if name in payloads:
+                _write_new_bytes(out_dir / f"{file_name}.payload", payloads[name])
             entry["file"] = file_name
             entry["plan_id"] = planned.plan_id
         if reason:

@@ -14,8 +14,8 @@ escape hatch of #695 / #960). So a new field is handled as an *optional column*:
   it. History is best-effort by contract; a missing optional column must never
   fail the sync it records, nor break ``drt status --history``.
 
-Values are stored as text (JSON for structured fields such as ``guards``, plain
-text for scalar ones such as ``approved_by``), the one type every
+Values are stored as text (JSON for structured/typed fields such as ``guards``
+and the ``exact`` boolean, plain text for scalars such as ``approved_by``), the one type every
 warehouse here treats the same way.
 """
 
@@ -31,11 +31,11 @@ from drt.state.history import HistoryEntry
 logger = logging.getLogger(__name__)
 
 # Order matters: it is the order of the columns appended to INSERT / SELECT.
-OPTIONAL_HISTORY_COLUMNS: tuple[str, ...] = ("guards", "plan_id", "approved_by")
+OPTIONAL_HISTORY_COLUMNS: tuple[str, ...] = ("guards", "plan_id", "approved_by", "exact")
 
-# Only structured fields are JSON text; scalar fields are stored as plain text so
-# they stay queryable (``WHERE approved_by = 'alice'``).
-_JSON_COLUMNS = frozenset({"guards"})
+# Structured and typed fields are JSON text; scalar fields are stored as plain
+# text so they stay queryable (``WHERE approved_by = 'alice'``).
+_JSON_COLUMNS = frozenset({"guards", "exact"})
 
 
 def encode_optional(entry: HistoryEntry, present: Sequence[str]) -> list[str | None]:

@@ -42,6 +42,10 @@ class PlanContext:
     # In-memory only (never written to plan.json): the window the plan was
     # computed over, so `drt apply` can run the same window.
     cursor_value_used: str | None = None
+    # In-memory only and populated solely for ``plan --include-values``.
+    # Rows are already through lookups/computed fields/mappings/mask, but do
+    # not yet contain run-specific metadata columns.
+    payload_records: list[dict[str, Any]] | None = None
 
 
 def sync_fingerprint(sync: SyncConfig, project_dir: Path = Path(".")) -> str:
@@ -132,6 +136,7 @@ def compute_plan(
     profile_name: str | None = None,
     project_dir: Path = Path("."),
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
+    include_values: bool = False,
 ) -> PlanContext:
     """Plan one sync, read-only. Raises :class:`PlanCliError` when it cannot run at all.
 
@@ -185,6 +190,7 @@ def compute_plan(
             # Cheap checks that must run before the (possibly expensive) extraction.
             preflight(project, state_bundle, sync)
         try:
+            sync.sync._capture_plan_payload = include_values
             result = run_sync(
                 sync,
                 get_source(profile),
@@ -215,6 +221,11 @@ def compute_plan(
             )
         diff = result.diff
         cursor_value_used = result.cursor_value_used
+    payload_records = (
+        getattr(result, "_plan_payload_records", None)
+        if blocker is None and include_values
+        else None
+    )
 
     plan_key = load_plan_key(project_dir)
     destination = sync.destination
@@ -235,7 +246,88 @@ def compute_plan(
         guards=sync.sync.guards,
         cursor_value=cursor_value_used,
     )
-    return PlanContext(plan, sync, project, profile, state_bundle, project_vars, cursor_value_used)
+    return PlanContext(
+        plan,
+        sync,
+        project,
+        profile,
+        state_bundle,
+        project_vars,
+        cursor_value_used,
+        payload_records,
+    )
+
+
+def compute_plan_from_records(
+    sync_name: str,
+    records: list[dict[str, Any]],
+    *,
+    redact_keys: bool = False,
+    cli_vars: dict[str, Any] | None = None,
+    profile_name: str | None = None,
+    project_dir: Path = Path("."),
+    preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
+) -> PlanContext:
+    """Recompute a plan from decrypted post-mask rows without reading the source."""
+    from drt.config.credentials import load_profile
+    from drt.config.parser import load_project, load_syncs
+    from drt.config.vars import VarError, resolve_vars
+    from drt.engine.diff import compute_diff
+    from drt.state.factory import build_state_bundle
+
+    try:
+        project = load_project(project_dir)
+    except FileNotFoundError as e:
+        raise PlanCliError(str(e)) from e
+    try:
+        profile = load_profile(resolve_profile_name(profile_name, project.profile))
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        raise PlanCliError(str(e)) from e
+    try:
+        project_vars = resolve_vars(project.vars, cli_vars)
+        syncs = load_syncs(project_dir, vars=project_vars)
+    except (VarError, ValueError) as e:
+        raise PlanCliError(str(e)) from e
+
+    matches = [sync for sync in syncs if sync.name == sync_name]
+    if not matches:
+        raise PlanCliError(f"Sync '{sync_name}' not found in syncs/.")
+    if len(matches) > 1:
+        raise PlanCliError(
+            f"Sync name '{sync_name}' is defined more than once; sync names must be unique."
+        )
+    sync = matches[0]
+    state_bundle = build_state_bundle(project, project_dir)
+    blocker = unsupported_reason(sync)
+    if blocker is not None:
+        diff = DiffResult(supported=False, fallback_reason=blocker)
+    else:
+        if preflight is not None:
+            preflight(project, state_bundle, sync)
+        try:
+            diff = compute_diff(records, sync.destination, sync.sync, limit=sys.maxsize)
+        except Exception as e:
+            raise PlanCliError(f"Could not verify exact replay for '{sync_name}': {e}") from e
+
+    plan_key = load_plan_key(project_dir)
+    destination = sync.destination
+    plan = build_plan(
+        diff,
+        sync_name=sync.name,
+        sync_mode=sync.sync.mode,
+        match_policy=sync.sync.match_policy,
+        destination=getattr(destination, "describe_safe", lambda: str(destination.type))(),
+        config_fingerprint=sync_fingerprint(sync, project_dir),
+        environment_fingerprint=environment_fingerprint(sync, project_vars, profile, plan_key),
+        plan_key=plan_key,
+        drt_version=__version__,
+        key_columns=list(getattr(destination, "upsert_key", None) or []),
+        mask_columns=set(sync.sync.mask or {}),
+        redact_keys=redact_keys,
+        exclude_columns=_engine_written_columns(sync),
+        guards=sync.sync.guards,
+    )
+    return PlanContext(plan, sync, project, profile, state_bundle, project_vars)
 
 
 def parse_vars_option(vars_raw: str | None) -> dict[str, Any] | None:

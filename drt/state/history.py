@@ -61,11 +61,13 @@ class HistoryEntry:
     # before these fields existed.
     plan_id: str | None = None
     approved_by: str | None = None
+    # Exact-replay lineage (#1221, ADR 0014). Omitted for ordinary applies.
+    exact: bool | None = None
 
     # Optional additive fields are left out of the serialized line when absent
     # (ADR 0013), so ordinary runs and re-written retained history stay as small
     # and as unchanged as before.
-    _OMIT_WHEN_NONE = ("guards", "plan_id", "approved_by")
+    _OMIT_WHEN_NONE = ("guards", "plan_id", "approved_by", "exact")
 
     def to_json_dict(self) -> dict[str, Any]:
         data = asdict(self)

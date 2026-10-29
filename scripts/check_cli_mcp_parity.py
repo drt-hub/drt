@@ -186,11 +186,31 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
             "sync per call and an agent lists syncs with drt_list_syncs (#1219)"
         ),
         "--out-dir": "only meaningful with --all; drt_plan stores each plan itself (#1219)",
+        "--include-values": (
+            "exact replay stages real row values in an encrypted sidecar; agents must not "
+            "stage row values through drt_plan (ADR 0014, #1221)"
+        ),
+        "--recipient": (
+            "age recipients only configure the CLI-only exact replay sidecar; MCP remains "
+            "value-free (ADR 0014, #1221)"
+        ),
+        "--max-payload-rows": (
+            "bounds the CLI-only encrypted exact replay sidecar; MCP never creates one "
+            "(ADR 0014, #1221)"
+        ),
     },
     "apply": {
         "--auto-approve": (
             "MCP approval is the client's permission prompt for drt_apply plus the "
             "mandatory approved_by, both recorded with the run (#1220)"
+        ),
+        "--exact": (
+            "agents must not decrypt or replay staged row values; MCP apply stays "
+            "verify-by-replan and value-free (ADR 0014, #1221)"
+        ),
+        "--keep-payload": (
+            "retention controls the CLI-only exact replay sidecar, which MCP never reads "
+            "(ADR 0014, #1221)"
         ),
     },
     "docs generate": {

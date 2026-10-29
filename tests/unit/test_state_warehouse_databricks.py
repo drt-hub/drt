@@ -329,8 +329,8 @@ class TestDatabricksWarehouseHistoryStore:
         assert "VALUES" not in sql
         # The mock probe reports no ``guards`` column and ALTER "succeeds", so the
         # optional column is written (the dedicated suite covers every branch).
-        assert ", guards, plan_id, approved_by)" in sql
-        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 15
+        assert ", guards, plan_id, approved_by, exact)" in sql
+        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 16
 
     def test_read_reconstructs_history_entry_from_a_json_string_variant(self) -> None:
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, "[]", None, False, "run-1", "sync-run-1")
@@ -834,14 +834,14 @@ class TestDatabricksHistoryOptionalColumns:
         return next((s, p) for s, p in conn.cursor.return_value.statements if "INSERT" in s)
 
     def test_writes_guards_json_when_the_column_exists(self) -> None:
-        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by", "exact"])
         guards = {"forced": True, "tripped": [{"guard": "max_deletes"}]}
 
         self._append(conn, self._entry(guards=guards))
 
         sql, params = self._insert(conn)
-        assert ", guards, plan_id, approved_by)" in sql and len(params) == 15
-        assert json.loads(params[-3]) == guards
+        assert ", guards, plan_id, approved_by, exact)" in sql and len(params) == 16
+        assert json.loads(params[-4]) == guards
         assert not any("ALTER TABLE" in s for s, _ in conn.cursor.return_value.statements)
 
     def test_adds_the_missing_column_to_a_legacy_table_before_the_insert(self) -> None:
@@ -851,14 +851,14 @@ class TestDatabricksHistoryOptionalColumns:
 
         statements = [s for s, _ in conn.cursor.return_value.statements]
         alters = [s for s in statements if "ALTER TABLE" in s]
-        assert len(alters) == 3 and "ADD COLUMNS (guards STRING)" in alters[0]
+        assert len(alters) == 4 and "ADD COLUMNS (guards STRING)" in alters[0]
         assert statements.index(alters[0]) < next(
             i for i, s in enumerate(statements) if "INSERT" in s
         )
-        assert len(self._insert(conn)[1]) == 15
+        assert len(self._insert(conn)[1]) == 16
 
     def test_stores_null_without_guards(self) -> None:
-        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by", "exact"])
 
         self._append(conn, self._entry())
 
@@ -880,8 +880,8 @@ class TestDatabricksHistoryOptionalColumns:
         guards = {"forced": True, "tripped": [{"guard": "max_delete_pct"}]}
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "r", "sr")
         conn = self._conn(
-            [*self._BASE, "guards", "plan_id", "approved_by"],
-            rows=[(*row, json.dumps(guards), None, None)],
+            [*self._BASE, "guards", "plan_id", "approved_by", "exact"],
+            rows=[(*row, json.dumps(guards), None, None, None)],
         )
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
@@ -903,7 +903,7 @@ class TestDatabricksHistoryOptionalColumns:
         assert not any("guards" in s for s in statements if "ORDER BY" in s)
 
     def test_resolution_is_cached_per_store_instance(self) -> None:
-        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by"])
+        conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by", "exact"])
         src = "drt.sources.databricks.DatabricksSource"
         store = DatabricksWarehouseHistoryStore(_profile())
         with (

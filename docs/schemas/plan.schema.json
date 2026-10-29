@@ -136,8 +136,31 @@
       "pattern": "^plan-[0-9a-f]{16}$",
       "type": "string"
     },
+    "payload": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha256",
+        "rows",
+        "bytes"
+      ],
+      "type": "object"
+    },
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "seal": {
       "pattern": "^hmac-sha256:[0-9a-f]{64}$",

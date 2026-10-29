@@ -368,6 +368,7 @@ class TestHistoryEntryCorrelationIds:
 
     def test_plan_lineage_round_trips_and_defaults_to_none(self, tmp_path: Path) -> None:
         assert _entry().plan_id is None and _entry().approved_by is None
+        assert _entry().exact is None
         mgr = HistoryManager(tmp_path)
         entry = HistoryEntry(
             sync_name="s",
@@ -379,11 +380,13 @@ class TestHistoryEntryCorrelationIds:
             records_failed=0,
             plan_id="sha256:abc",
             approved_by="alice",
+            exact=True,
         )
         mgr.append(entry)
 
         [loaded] = mgr.read(sync_name="s")
         assert (loaded.plan_id, loaded.approved_by) == ("sha256:abc", "alice")
+        assert loaded.exact is True
 
     def test_absent_optional_fields_are_left_out_of_the_serialized_line(
         self, tmp_path: Path
@@ -396,7 +399,7 @@ class TestHistoryEntryCorrelationIds:
             (tmp_path / ".drt" / "history" / f"{entry.sync_name}.jsonl").read_text().splitlines()
         )
 
-        assert not {"guards", "plan_id", "approved_by"} & set(json.loads(line))
+        assert not {"guards", "plan_id", "approved_by", "exact"} & set(json.loads(line))
 
     def test_a_pre_762_jsonl_line_still_loads(self, tmp_path: Path) -> None:
         """The reader unpacks each line via HistoryEntry(**data); a line

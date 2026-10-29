@@ -22,7 +22,7 @@ import os
 import re
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +57,38 @@ class ApplyOutcome:
     had_error: bool = False
     guards_forced: list[dict[str, Any]] = field(default_factory=list)
     drifted: int = 0
+
+
+class _ExactReplaySource:
+    """In-memory source whose rows already passed source-side transforms."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def extract(
+        self,
+        _query: str,
+        _config: Any,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        del query_tags
+        for row in self._rows:
+            yield dict(row)
+
+    def test_connection(self, _config: Any) -> bool:
+        return True
+
+
+def _exact_replay_sync(sync: Any) -> Any:
+    """Clone a sync and disable transforms already represented in the payload."""
+    replay = sync.model_copy(deep=True)
+    replay.sync.computed_fields = None
+    replay.sync.field_mappings = None
+    replay.sync.mask = None
+    if hasattr(replay.destination, "lookups"):
+        replay.destination.lookups = None
+    return replay
 
 
 def parse_duration(text: str) -> timedelta:
@@ -233,6 +265,39 @@ def preflight_document(
     return doc
 
 
+def load_exact_payload(
+    plan_text: str,
+    payload_path: Path,
+    *,
+    project_dir: Path = Path("."),
+    max_age: timedelta = timedelta(hours=24),
+) -> list[dict[str, Any]]:
+    """Vetted, decrypted sidecar rows. Plaintext never leaves memory."""
+    doc = preflight_document(plan_text, project_dir=project_dir, max_age=max_age)
+    expected = doc.get("payload")
+    if not isinstance(expected, dict):
+        raise ApplyRefused(
+            "The plan has no exact replay payload. Re-run `drt plan --include-values`."
+        )
+    if payload_path.is_symlink():
+        raise ApplyRefused(
+            f"Exact replay sidecar must be a regular file, not a symlink: {payload_path}"
+        )
+    try:
+        ciphertext = payload_path.read_bytes()
+    except FileNotFoundError as e:
+        raise ApplyRefused(f"Exact replay sidecar is missing: {payload_path}") from e
+    except OSError as e:
+        raise ApplyRefused(f"Cannot read exact replay sidecar {payload_path}: {e}") from e
+
+    from drt.cli._plan_payload import PlanPayloadError, decrypt_rows
+
+    try:
+        return decrypt_rows(ciphertext, expected)
+    except PlanPayloadError as e:
+        raise ApplyRefused(f"Cannot apply the exact replay payload: {e}") from e
+
+
 MANIFEST_NAME = "manifest.json"
 _PLAN_FILE = re.compile(r"\d{3,}-[A-Za-z0-9._-]+\.json")
 
@@ -316,6 +381,7 @@ def apply_plan(
     json_output: bool = False,
     notify: Callable[[str], None] | None = None,
     expect_plan_id: str | None = None,
+    exact_records: list[dict[str, Any]] | None = None,
 ) -> ApplyOutcome:
     """Verify a plan against the live world and, only if it still matches, write it.
 
@@ -325,7 +391,7 @@ def apply_plan(
     """
     from drt._identifiers import new_run_id
     from drt.cli._helpers import get_source
-    from drt.cli._plan_runner import PlanCliError, compute_plan
+    from drt.cli._plan_runner import PlanCliError, compute_plan, compute_plan_from_records
     from drt.cli.commands.run import _run_one, _RunContext, _write_run_results
     from drt.engine.plan import drift_report
 
@@ -345,20 +411,37 @@ def apply_plan(
             f"The stored plan is {plan_id}, not the requested {expect_plan_id}; refusing it. "
             "Call drt_plan again."
         )
+    exact = exact_records is not None
+    if exact and not isinstance(doc.get("payload"), dict):
+        raise ApplyRefused(
+            "The plan has no exact replay payload. Re-run `drt plan --include-values`."
+        )
 
     def preflight(_project: Any, _state_bundle: Any, _sync: Any) -> None:
         _refuse_if_claimed(project_dir, plan_id)
 
     try:
-        ctx_plan = compute_plan(
-            sync_name,
-            redact_keys=bool(doc["options"]["redact_keys"]),
-            cursor_value=cursor_value,
-            cli_vars=cli_vars,
-            profile_name=profile_name,
-            project_dir=project_dir,
-            preflight=preflight,
-        )
+        if exact:
+            assert exact_records is not None
+            ctx_plan = compute_plan_from_records(
+                sync_name,
+                exact_records,
+                redact_keys=bool(doc["options"]["redact_keys"]),
+                cli_vars=cli_vars,
+                profile_name=profile_name,
+                project_dir=project_dir,
+                preflight=preflight,
+            )
+        else:
+            ctx_plan = compute_plan(
+                sync_name,
+                redact_keys=bool(doc["options"]["redact_keys"]),
+                cursor_value=cursor_value,
+                cli_vars=cli_vars,
+                profile_name=profile_name,
+                project_dir=project_dir,
+                preflight=preflight,
+            )
     except PlanCliError as e:
         raise ApplyRefused(str(e)) from e
 
@@ -376,7 +459,7 @@ def apply_plan(
             "vars, environment variables or the resolved destination). Re-run `drt plan` "
             "here, or apply from the environment that made the plan."
         )
-    if current.cursor_hash != doc["fingerprints"]["cursor_hash"]:
+    if not exact and current.cursor_hash != doc["fingerprints"]["cursor_hash"]:
         raise ApplyRefused(
             "The incremental watermark moved since the plan was made, so the plan covers a "
             "different window. Re-run `drt plan`."
@@ -431,7 +514,7 @@ def apply_plan(
             elif not larger and trip.guard == "max_delete_pct":
                 if not reviewed_baseline_present:
                     raise ApplyRefused(
-                        "The reviewed schema-v1 plan predates delete_baseline, so "
+                        "The reviewed plan omits delete_baseline, so "
                         "--force-guards cannot safely bound max_delete_pct. Re-run `drt plan`."
                     )
                 if current.delete_baseline and reviewed_baseline:
@@ -480,8 +563,9 @@ def apply_plan(
 
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
+    replay_sync = _exact_replay_sync(ctx_plan.sync) if exact else ctx_plan.sync
     ctx = _RunContext(
-        source=get_source(ctx_plan.profile),
+        source=_ExactReplaySource(exact_records or []) if exact else get_source(ctx_plan.profile),
         state_mgr=state_bundle.state,
         history_mgr=state_bundle.history,
         dlq_store=state_bundle.dlq,
@@ -506,10 +590,11 @@ def apply_plan(
         reviewed_guard_baseline=reviewed_baseline if force_guards else None,
         plan_id=plan_id,
         approved_by=approved_by or None,
+        exact=True if exact else None,
         project_dir=project_dir,
     )
     try:
-        _name, entry, had_error = _run_one(ctx_plan.sync, ctx, ctx_plan.profile)
+        _name, entry, had_error = _run_one(replay_sync, ctx, ctx_plan.profile)
     except BaseException:
         _finish_claim(project_dir, plan_id, "failed")  # never raises: cannot mask this error
         raise
@@ -517,6 +602,8 @@ def apply_plan(
     entry["plan_id"] = plan_id
     if approved_by:
         entry["approved_by"] = approved_by
+    if exact:
+        entry["exact"] = True
     if tripped:
         # Apply records the reviewed override under one canonical key. The
         # engine's generic ``guards`` field is for plain run/MCP run output and
