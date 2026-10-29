@@ -43,8 +43,8 @@ class PlanContext:
     # computed over, so `drt apply` can run the same window.
     cursor_value_used: str | None = None
     # In-memory only and populated solely for ``plan --include-values``.
-    # Rows are already through lookups/computed fields/mappings/mask, but do
-    # not yet contain run-specific metadata columns.
+    # Rows are already through all destination-facing transforms, including
+    # run-specific metadata columns from the plan run.
     payload_records: list[dict[str, Any]] | None = None
 
 
@@ -268,7 +268,7 @@ def compute_plan_from_records(
     project_dir: Path = Path("."),
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
 ) -> PlanContext:
-    """Recompute a plan from decrypted post-mask rows without reading the source."""
+    """Recompute a plan from decrypted destination-facing rows without reading the source."""
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
     from drt.config.vars import VarError, resolve_vars

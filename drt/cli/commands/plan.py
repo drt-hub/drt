@@ -76,7 +76,7 @@ def plan(
     include_values: bool = typer.Option(
         False,
         "--include-values",
-        help="Write post-mask rows to an adjacent age-encrypted .payload sidecar.",
+        help="Write destination-facing rows to an adjacent age-encrypted .payload sidecar.",
     ),
     recipient: list[str] | None = typer.Option(
         None,

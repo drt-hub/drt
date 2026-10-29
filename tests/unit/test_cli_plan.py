@@ -143,6 +143,87 @@ def test_include_values_writes_only_an_encrypted_private_sidecar(
     assert "a@example.com" not in (project / "plan.json").read_text()
 
 
+def test_private_age_identity_is_rejected_without_echoing_it(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    _patch_engine(monkeypatch, _changes(), [])
+    private_identity = str(x25519.Identity.generate())
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            private_identity,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert private_identity not in result.output
+    assert "that is a private identity" in result.output
+    assert "public key (age1...)" in result.output.replace("\n", " ")
+
+
+def test_invalid_age_recipient_is_never_echoed(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+    invalid = "not-a-recipient-sensitive-input"
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            invalid,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert invalid not in result.output
+    assert "Invalid age X25519 recipient." in result.output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["orders_to_pg", "--recipient", "age1notused"],
+        ["orders_to_pg", "--include-values", "--recipient", "age1missingout"],
+        ["orders_to_pg", "--max-payload-rows", "0"],
+        ["orders_to_pg", "--out", "plan.json", "--include-values"],
+    ],
+)
+def test_exact_plan_option_validation(project: Path, args: list[str]) -> None:
+    result = runner.invoke(app, ["plan", *args])
+
+    assert result.exit_code == 1
+
+
+def test_plan_recipients_can_come_from_environment(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_PLAN_RECIPIENTS", str(identity.to_public()))
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--out", "plan.json", "--include-values"])
+
+    assert result.exit_code == 0, result.output
+    assert (project / "plan.json.payload").exists()
+
+
 def test_include_values_over_row_cap_is_unavailable(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

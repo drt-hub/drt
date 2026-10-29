@@ -187,10 +187,12 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
         registered_extra_observers,
     )
 
-    observers: list[Any] = [
-        LoggingObserver(),
-        StatePersistingObserver(ctx.state_mgr, wm_storage),
-    ]
+    observers: list[Any] = [LoggingObserver()]
+    if not ctx.exact:
+        # Exact replay did not read the source, so it has no valid source
+        # cursor/watermark to persist. History is still written by run_sync;
+        # only source-read state is suppressed here.
+        observers.append(StatePersistingObserver(ctx.state_mgr, wm_storage))
     if not ctx.dry_run and sync.sync.dlq is not None and sync.sync.dlq.enabled:
         observers.append(DlqObserver(ctx.dlq_store, max_records=sync.sync.dlq.max_records))
     # Enterprise extension point (#299, ADR 0008) — an audit-log observer
@@ -659,7 +661,12 @@ def _write_run_results(
         # `Path.replace()` is an atomic same-filesystem rename (os.replace),
         # so the final path only ever holds a complete write or its
         # previous (possibly absent) content.
-        tmp_path.write_text(json.dumps(run_results, indent=2, default=str))
+        # Create privately and exclusively, then write through that same file
+        # descriptor. This cannot inherit a permissive umask-derived mode or
+        # follow a symlink swapped into the pathname after creation.
+        fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(run_results, handle, indent=2, default=str)
         tmp_path.replace(final_path)
     except OSError as e:
         logging.getLogger(__name__).warning("Failed to write run_results.json: %s", e)

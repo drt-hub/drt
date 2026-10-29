@@ -235,8 +235,12 @@ def test_exact_apply_ignores_source_drift_and_deletes_payload_after_success(
     world: _World,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from drt.engine import diff as diff_module
+
     _exact_plan(project, monkeypatch)
-    _patch_exact_verification(project, monkeypatch)
+    # Exercise the real compute_plan_from_records path; only the destination
+    # read is faked, like a queryable empty PostgreSQL table.
+    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [])
     world.added[0] = {"id": 1, "name": "source moved on"}
 
     result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
@@ -249,6 +253,159 @@ def test_exact_apply_ignores_source_drift_and_deletes_payload_after_success(
     assert not (project / "plan.json.payload").exists()
     artifact = json.loads((project / "target" / "drt" / "run_results.json").read_text())
     assert artifact["results"][0]["exact"] is True
+
+
+def test_noop_exact_apply_deletes_payload_after_success(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.engine import diff as diff_module
+
+    world.added.clear()
+    _exact_plan(project, monkeypatch)
+    monkeypatch.setattr(diff_module, "fetch_rows", lambda *_a, **_k: [])
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    assert "nothing to apply" in result.output
+    assert not (project / "plan.json.payload").exists()
+
+
+def test_exact_apply_does_not_pass_configured_ledger_to_delivery(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dataclasses
+
+    from drt.engine import diff as diff_module
+    from drt.state import factory as state_factory
+
+    _exact_plan(project, monkeypatch)
+    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [])
+    real_build = state_factory.build_state_bundle
+    configured_ledger = object()
+
+    def build_with_ledger(*args: Any, **kwargs: Any) -> Any:
+        return dataclasses.replace(real_build(*args, **kwargs), ledger=configured_ledger)
+
+    monkeypatch.setattr(state_factory, "build_state_bundle", build_with_ledger)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    [write] = _writes(world)
+    assert write["idempotency_ledger"] is None
+
+
+def test_exact_verification_matches_existing_row_with_metadata_columns(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.engine import diff as diff_module
+    from drt.engine import sync as sync_module
+
+    cfg = {
+        **SYNC_YML,
+        "sync": {"mode": "upsert", "metadata_columns": {"synced_at": "_synced_at"}},
+    }
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    world.added = [{"id": 1, "name": "a"}]
+    existing = {"id": 1, "name": "a", "_synced_at": "old"}
+    captured = {"id": 1, "name": "a", "_synced_at": "plan-time"}
+    fixture_run_sync = sync_module.run_sync
+
+    def run_with_plan_metadata(*args: Any, **kwargs: Any) -> Any:
+        if args[5]:
+            result = _Result(world, True)
+            result.diff = DiffResult(
+                updated=[(existing, captured)],
+                total_source_rows=1,
+                total_destination_rows=1,
+            )
+            result._plan_payload_records = [captured]
+            return result
+        return fixture_run_sync(*args, **kwargs)
+
+    monkeypatch.setattr(sync_module, "run_sync", run_with_plan_metadata)
+    _exact_plan(project, monkeypatch)
+    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [dict(existing)])
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    assert len(_writes(world)) == 1
+
+
+def test_compute_plan_from_records_reports_missing_and_duplicate_syncs(
+    project: Path,
+) -> None:
+    from drt.cli._plan_runner import PlanCliError, compute_plan_from_records
+
+    with pytest.raises(PlanCliError, match="not found"):
+        compute_plan_from_records("missing", [], project_dir=project)
+
+    duplicate = {**SYNC_YML, "model": "SELECT 2"}
+    (project / "syncs" / "duplicate.yml").write_text(yaml.dump(duplicate))
+    with pytest.raises(PlanCliError, match="defined more than once"):
+        compute_plan_from_records("orders_to_pg", [], project_dir=project)
+
+
+def test_compute_plan_from_records_wraps_destination_diff_failure(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli._plan_runner import PlanCliError, compute_plan_from_records
+    from drt.engine import diff as diff_module
+
+    def fail_diff(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("destination read failed")
+
+    monkeypatch.setattr(diff_module, "compute_diff", fail_diff)
+
+    with pytest.raises(PlanCliError, match="Could not verify exact replay"):
+        compute_plan_from_records("orders_to_pg", [{"id": 1}], project_dir=project)
+
+
+def test_compute_plan_from_records_returns_known_unavailable_result(project: Path) -> None:
+    from drt.cli._plan_runner import compute_plan_from_records
+
+    cfg = {**SYNC_YML, "sync": {"mode": "upsert", "match_policy": "update_only"}}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+
+    context = compute_plan_from_records("orders_to_pg", [{"id": 1}], project_dir=project)
+
+    assert not context.plan.available
+    assert "match_policy" in str(context.plan.unavailable_reason)
+
+
+def test_apply_artifact_drops_raw_exception_and_is_private(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import stat
+
+    from drt.cli.commands import run as run_module
+
+    _plan(project)
+    secret = "postgres://user:private-password@db.internal"
+
+    def fail_destination(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(run_module, "get_destination", fail_destination)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    artifact_path = project / "target" / "drt" / "run_results.json"
+    artifact = json.loads(artifact_path.read_text())
+    assert "error" not in artifact["results"][0]
+    assert secret not in artifact_path.read_text()
+    assert stat.S_IMODE(artifact_path.stat().st_mode) == 0o600
 
 
 def test_exact_apply_catches_destination_drift_and_leaves_payload(
@@ -295,6 +452,31 @@ def test_keep_payload_retains_successful_exact_sidecar(
     )
 
     assert result.exit_code == 0, result.output
+    assert (project / "plan.json.payload").exists()
+
+
+def test_successful_exact_apply_warns_if_payload_deletion_fails(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.engine import diff as diff_module
+
+    _exact_plan(project, monkeypatch)
+    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [])
+    real_unlink = Path.unlink
+
+    def fail_payload_unlink(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.name == "plan.json.payload":
+            raise OSError("read-only artifact store")
+        real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_payload_unlink)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    assert "could not delete payload" in result.output
     assert (project / "plan.json.payload").exists()
 
 
@@ -523,6 +705,8 @@ def test_plan_without_changes_applies_nothing(project: Path, world: _World) -> N
 def test_bad_options_and_missing_file(project: Path) -> None:
     assert runner.invoke(app, ["apply", "nope.json"]).exit_code == 1
     _plan(project)
+    assert runner.invoke(app, ["apply", "plan.json", "--keep-payload"]).exit_code == 1
+    assert runner.invoke(app, ["apply", "plan.json", "--exact"]).exit_code == 1
     assert runner.invoke(app, ["apply", "plan.json", "--max-age", "soon"]).exit_code == 1
     assert runner.invoke(app, ["apply", "plan.json", "--allow-drift-pct", "150"]).exit_code == 1
     assert runner.invoke(app, ["apply", "plan.json", "--output", "yaml"]).exit_code == 1

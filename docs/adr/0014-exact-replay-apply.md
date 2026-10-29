@@ -42,7 +42,9 @@ The payload is encrypted to one or more **age recipient public keys** (`--recipi
 `DRT_PLAN_RECIPIENTS`), using the same `pyrage` dependency as `secrets.toml` encryption.
 The planner needs only public keys. `drt apply --exact` decrypts with the age identity in
 `DRT_SECRETS_KEY`. So the machine (or CI job) that plans need not be able to read the data
-it staged, and the approver's apply environment is the only place the values reappear.
+it staged, and the approver's apply environment is the only place the values reappear. A
+rejected recipient is never echoed; if it starts with `AGE-SECRET-KEY-`, drt explains that
+it is a private identity and asks for the `age1...` public key instead.
 
 ### 3. Apply sends the payload and re-verifies the destination
 
@@ -51,15 +53,24 @@ it staged, and the approver's apply environment is the only place the values rea
 it is now. The result must equal the reviewed entries (same keys, actions and `value_hash`)
 or apply aborts exactly as it does today on drift. So drift in the **destination** is still
 caught; drift in the **source** is, by design, ignored (that is the point of the mode).
+Exact delivery bypasses the warehouse idempotency ledger: the live destination re-diff is
+the correctness check, while ledger filtering after that check could silently skip a row the
+verified plan requires. Because replay does not read the source, it also never resolves,
+advances, or persists incremental cursor/watermark state.
 
 ### 4. Bounds and hygiene
 
-- `sync.mask` is applied **before** encryption; the payload is what would be written.
+- `sync.mask` and `metadata_columns` are applied **before** encryption; capturing metadata
+  after injection keeps verification's row classification identical for existing rows. The
+  delivery run replaces run-specific metadata values through the normal metadata step.
 - Limits: `--max-payload-rows` (default 10,000) and a byte cap; planning fails clearly
   beyond them rather than producing a huge file.
 - `--max-age` already bounds how old a plan may be; it covers the payload too.
-- The payload is **deleted after a successful apply** (`--keep-payload` to retain it); a
-  failed apply leaves it, so a retry with a new plan can reuse nothing by accident.
+- Apply opens the sidecar without following symlinks, requires a regular file, and reads at
+  most the sealed byte count plus one byte. Directory apply decrypts one plan at a time.
+- The payload is **deleted after a successful apply, including a no-op** (`--keep-payload`
+  to retain it); a failed apply leaves it, so a retry with a new plan can reuse nothing by
+  accident.
 - The docs state the PII-at-rest trade-off plainly: an encrypted file of real rows exists
   between plan and apply.
 
@@ -93,5 +104,6 @@ Confirmed by the maintainer on 2026-10-28, all as proposed:
 2. **Public-key recipients at plan time, `DRT_SECRETS_KEY` identity at apply**; the planner
    cannot read the data.
 3. **Size cap 10,000 rows**; over the cap exact-replay is unavailable (a result, not an error).
-   The payload is **deleted after a successful apply**; a failed apply leaves it.
+   The payload is **deleted after a successful apply (including a no-op)**; a failed apply
+   leaves it.
 4. **No MCP exposure in v1.3**, recorded as a parity exclusion with the reason.

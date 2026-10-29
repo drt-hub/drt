@@ -469,8 +469,9 @@ class SyncOptions(BaseModel):
     _reviewed_forced_guards: set[str] | None = PrivateAttr(default=None)
     _reviewed_guard_deletes: int | None = PrivateAttr(default=None)
     _reviewed_guard_baseline: int | None = PrivateAttr(default=None)
-    # CLI planner-only signal: retain the post-mask row snapshot in memory so
-    # it can be encrypted directly into an exact-replay sidecar (#1221).
+    # CLI planner-only signal: retain the fully destination-facing row
+    # snapshot (including metadata_columns) in memory so it can be encrypted
+    # directly into an exact-replay sidecar (#1221).
     _capture_plan_payload: bool = PrivateAttr(default=False)
 
     @model_validator(mode="after")

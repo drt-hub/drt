@@ -15,11 +15,13 @@ applies across machines needs a shared claim store (not built yet).
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 from collections.abc import Callable, Iterator
@@ -279,16 +281,41 @@ def load_exact_payload(
         raise ApplyRefused(
             "The plan has no exact replay payload. Re-run `drt plan --include-values`."
         )
-    if payload_path.is_symlink():
+    sealed_bytes = expected["bytes"]
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    elif payload_path.is_symlink():
+        # O_NOFOLLOW is unavailable on this platform. Preserve the explicit
+        # refusal even though POSIX platforms take the race-free branch above.
         raise ApplyRefused(
             f"Exact replay sidecar must be a regular file, not a symlink: {payload_path}"
         )
     try:
-        ciphertext = payload_path.read_bytes()
+        fd = os.open(payload_path, flags)
     except FileNotFoundError as e:
         raise ApplyRefused(f"Exact replay sidecar is missing: {payload_path}") from e
     except OSError as e:
+        if nofollow and e.errno == errno.ELOOP:
+            raise ApplyRefused(
+                f"Exact replay sidecar must be a regular file, not a symlink: {payload_path}"
+            ) from e
         raise ApplyRefused(f"Cannot read exact replay sidecar {payload_path}: {e}") from e
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ApplyRefused(f"Exact replay sidecar must be a regular file: {payload_path}")
+            # The byte count is authenticated by the plan seal. One extra byte
+            # is enough to detect growth without ever reading an unbounded file.
+            ciphertext = handle.read(sealed_bytes + 1)
+    except OSError as e:
+        raise ApplyRefused(f"Cannot read exact replay sidecar {payload_path}: {e}") from e
+    if len(ciphertext) > sealed_bytes:
+        raise ApplyRefused(
+            "Cannot apply the exact replay payload: the sidecar is larger than "
+            "the byte count sealed in the plan."
+        )
 
     from drt.cli._plan_payload import PlanPayloadError, decrypt_rows
 
@@ -392,7 +419,12 @@ def apply_plan(
     from drt._identifiers import new_run_id
     from drt.cli._helpers import get_source
     from drt.cli._plan_runner import PlanCliError, compute_plan, compute_plan_from_records
-    from drt.cli.commands.run import _run_one, _RunContext, _write_run_results
+    from drt.cli.commands.run import (
+        _run_one,
+        _RunContext,
+        _sanitize_entry_for_artifact,
+        _write_run_results,
+    )
     from drt.engine.plan import drift_report
 
     say = notify or (lambda _message: None)
@@ -580,7 +612,10 @@ def apply_plan(
         vars=ctx_plan.project_vars,
         query_tagging=project.query_tagging,
         run_id=run_id,
-        idempotency_ledger=state_bundle.ledger,
+        # Verification already re-diffed these exact rows against the live
+        # destination. Ledger filtering would make delivery disagree with the
+        # verified plan and could turn a required write into a silent skip.
+        idempotency_ledger=None if exact else state_bundle.ledger,
         audit_trail=state_bundle.audit_trail,
         audit_fields=project.state.audit_trail.fields,
         audit_retain_days=project.state.audit_trail.retain_days or 30,
@@ -614,7 +649,7 @@ def apply_plan(
         project_dir / "target" / "drt",
         run_id=run_id,
         started_at=started_at,
-        results=[entry],
+        results=[_sanitize_entry_for_artifact(entry)],
         succeeded=0 if had_error else 1,
         failed=1 if had_error else 0,
         skipped=0,

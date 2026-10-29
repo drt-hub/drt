@@ -259,7 +259,7 @@ class StatePersistingObserver:
         # never calls destination.load() — persisting here would record a
         # cursor/run/count for data that was only previewed, never sent,
         # and the next real run would then skip it (#978).
-        if result.dry_run:
+        if result.dry_run or getattr(result, "_exact_replay", False):
             return
 
         from drt.engine.cursor import cursor_gt

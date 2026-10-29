@@ -117,18 +117,6 @@ def apply(
         else:
             plan_texts = [(plan_file, plan_file.read_text(encoding="utf-8"))]
         cli_vars = parse_vars_option(vars_raw)
-        exact_rows = (
-            {
-                source_file: load_exact_payload(
-                    plan_text,
-                    payload_path_for(source_file),
-                    max_age=max_age_delta,
-                )
-                for source_file, plan_text in plan_texts
-            }
-            if exact
-            else {}
-        )
     except ApplyRefused as e:
         print_error(str(e))
         raise typer.Exit(1)
@@ -149,6 +137,17 @@ def apply(
     failed = False
     for source_file, plan_text in plan_texts:
         try:
+            # Directory applies deliberately decrypt one sidecar at a time;
+            # aggregate payload bytes are never retained in memory.
+            exact_records = (
+                load_exact_payload(
+                    plan_text,
+                    payload_path_for(source_file),
+                    max_age=max_age_delta,
+                )
+                if exact
+                else None
+            )
             outcome = apply_plan(
                 plan_text,
                 approved=auto_approve,
@@ -163,7 +162,7 @@ def apply(
                 json_output=output == "json",
                 # stderr, so `--output json` stays one parseable document on stdout.
                 notify=lambda message: typer.echo(message, err=True),
-                exact_records=exact_rows.get(source_file) if exact else None,
+                exact_records=exact_records,
             )
         except ApplyRefused as e:
             if isinstance(e, ApplyAborted):  # the person declined: not an error
@@ -173,6 +172,15 @@ def apply(
                 print_error(f"{label}{e}")
             raise typer.Exit(1)
 
+        if exact and not outcome.had_error and not keep_payload:
+            sidecar = payload_path_for(source_file)
+            try:
+                sidecar.unlink()
+            except OSError as e:
+                typer.echo(
+                    f"Warning: applied successfully but could not delete payload {sidecar}: {e}",
+                    err=True,
+                )
         if not outcome.applied:
             console.print(outcome.message, markup=False)
             continue
@@ -184,15 +192,6 @@ def apply(
                 "result": outcome.entry,
             }
         )
-        if exact and not outcome.had_error and not keep_payload:
-            sidecar = payload_path_for(source_file)
-            try:
-                sidecar.unlink()
-            except OSError as e:
-                typer.echo(
-                    f"Warning: applied successfully but could not delete payload {sidecar}: {e}",
-                    err=True,
-                )
         if outcome.had_error:
             failed = True
             break  # later plans may depend on this one having landed

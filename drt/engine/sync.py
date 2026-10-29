@@ -426,6 +426,9 @@ def run_sync(
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
     total_result = SyncResult()
+    # Private observer signal: an exact replay did not read the source and
+    # must never persist source cursor/watermark state.
+    total_result._exact_replay = bool(exact)  # type: ignore[attr-defined]
     total_result.run_id = run_id
     total_result.sync_run_id = sync_run_id
     total_result.dry_run = dry_run
@@ -483,9 +486,10 @@ def run_sync(
                     extract_limit=extract_limit,
                     vars=vars,
                     query_tagging=query_tagging,
-                    idempotency_ledger=idempotency_ledger,
+                    idempotency_ledger=None if exact else idempotency_ledger,
                     audit_trail=audit_trail,
                     audit_fields=audit_fields,
+                    exact=bool(exact),
                 )
             except BaseException as exc:
                 raised = exc
@@ -584,7 +588,7 @@ def run_sync(
         # config block) — same scope-narrowing call made on #755; a
         # configurable retention is a defensible follow-up, not a gap that
         # needs solving now.
-        if not dry_run and idempotency_ledger is not None:
+        if not dry_run and not exact and idempotency_ledger is not None:
             try:
                 idempotency_ledger.prune(sync.name, retention_days=7)
             except Exception as exc:  # noqa: BLE001 — best-effort
@@ -673,6 +677,7 @@ def _run_sync_body(
     idempotency_ledger: IdempotencyLedger | None = None,
     audit_trail: ComplianceAuditTrail | None = None,
     audit_fields: list[str] | None = None,
+    exact: bool = False,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -690,7 +695,12 @@ def _run_sync_body(
     sync.sync._interrupted = False
 
     # Load last cursor value for incremental syncs (fallback chain)
-    cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
+    # Exact replay consumes a destination-facing snapshot, not a source read.
+    # Its rows may have had the source cursor renamed, masked, or removed, so
+    # deriving a new source watermark from them is invalid. Keep cursor
+    # resolution and tracking entirely off; the CLI also suppresses the
+    # persisting observer for exact runs so neither state backend is written.
+    cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" and not exact else None
     last_cursor_value: str | None = None
     watermark_source: str | None = None  # "cli_override" | "storage" | "default_value"
 
@@ -882,8 +892,7 @@ def _run_sync_body(
     # When dry_run + compute_diff, accumulate (post-lookup) records to feed
     # the diff engine after extraction completes (#413).
     dry_run_records: list[dict[str, Any]] = []
-    # Exact replay (#1221) needs the full destination-facing snapshot after
-    # masking but before run-specific metadata columns. It is captured only
+    # Exact replay (#1221) needs the full destination-facing snapshot. It is captured only
     # when the CLI planner opts in through this private in-memory signal.
     plan_payload_records: list[dict[str, Any]] | None = (
         [] if dry_run and compute_diff and sync.sync._capture_plan_payload else None
@@ -1032,12 +1041,6 @@ def _run_sync_body(
             # Pure transform; no observer side effects.
             record_batch = apply_mask(record_batch, sync.sync.mask)
 
-            if plan_payload_records is not None:
-                # metadata_columns mutates rows in place immediately below;
-                # copy now so the encrypted payload contains exactly the
-                # post-mask values specified by ADR 0014.
-                plan_payload_records.extend(dict(record) for record in record_batch)
-
             # Opt-in engine metadata columns (#762). Applied last — after
             # field_mappings and mask — since column names are already
             # destination-facing (chosen directly in metadata_columns
@@ -1050,6 +1053,14 @@ def _run_sync_body(
                 run_id=total_result.run_id,
                 sync_name=sync.name,
             )
+
+            if plan_payload_records is not None:
+                # Exact verification re-diffs these rows directly. Capturing
+                # after metadata injection preserves the original diff's row
+                # classification when a matching destination row already
+                # exists. The delivery run replaces these run-specific values
+                # through the same metadata step before writing.
+                plan_payload_records.extend(dict(record) for record in record_batch)
 
             if dry_run:
                 total_result.success += len(record_batch)

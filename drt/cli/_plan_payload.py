@@ -139,7 +139,15 @@ def encrypt_rows(rows: list[dict[str, Any]], recipients: list[str]) -> tuple[byt
         try:
             parsed.append(pyrage.x25519.Recipient.from_str(value))
         except (pyrage.RecipientError, ValueError) as exc:
-            raise PlanPayloadError(f"Invalid age X25519 recipient: {value!r}.") from exc
+            if value.lstrip().startswith("AGE-SECRET-KEY-"):
+                raise PlanPayloadError(
+                    "Invalid age X25519 recipient: that is a private identity, "
+                    "pass the public key (age1...)."
+                ) from exc
+            # Recipient input can be secret material accidentally pasted into
+            # the public-key option. Never reflect any rejected value into
+            # console output, logs, or CI artifacts.
+            raise PlanPayloadError("Invalid age X25519 recipient.") from exc
     try:
         ciphertext: bytes = pyrage.encrypt(plaintext, parsed)
     except pyrage.EncryptError as exc:
