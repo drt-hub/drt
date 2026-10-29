@@ -87,6 +87,7 @@ PLAN_COVERAGE: dict[str, PlanCoverage] = {
     "sendgrid": PlanCoverage("unavailable", _EVENT),
     "twilio": PlanCoverage("unavailable", _EVENT),
     "sqs": PlanCoverage("unavailable", "Queue: " + _EVENT),
+    "kafka": PlanCoverage("unavailable", "Topic: " + _EVENT),
     "github_actions": PlanCoverage("unavailable", "Triggers a workflow run; " + _EVENT),
     "rest_api": PlanCoverage(
         "unavailable", "Generic HTTP endpoint: drt has no read-back contract for it."
