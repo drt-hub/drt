@@ -786,6 +786,7 @@
       "description": "One portable source column declared by a sync (#761).",
       "properties": {
         "name": {
+          "minLength": 1,
           "title": "Name",
           "type": "string"
         },
@@ -5919,6 +5920,16 @@
       "type": "object"
     }
   },
+  "if": {
+    "properties": {
+      "contract": {
+        "type": "object"
+      }
+    },
+    "required": [
+      "contract"
+    ]
+  },
   "properties": {
     "name": {
       "title": "Name",
@@ -6109,6 +6120,7 @@
         }
       ],
       "default": null,
+      "description": "Portable source columns. Names must be unique; JSON Schema cannot express property-level uniqueness, so drt validate enforces it.",
       "title": "Columns"
     },
     "contract": {
@@ -6128,6 +6140,11 @@
     "model",
     "destination"
   ],
+  "then": {
+    "required": [
+      "columns"
+    ]
+  },
   "title": "SyncConfig",
   "type": "object",
   "$schema": "http://json-schema.org/draft-07/schema#"

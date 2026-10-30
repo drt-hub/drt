@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from drt.config.schema import (
     generate_project_schema,
     generate_sync_schema,
@@ -49,8 +51,13 @@ class TestGenerateSchemas:
         column = schema["$defs"]["ColumnConfig"]
         contract = schema["$defs"]["ContractConfig"]
         assert column["additionalProperties"] is False
+        assert column["properties"]["name"]["minLength"] == 1
         assert contract["additionalProperties"] is False
         assert contract["properties"]["on_extra_columns"]["default"] == "fail"
+        assert schema["then"] == {"required": ["columns"]}
+        columns = schema["properties"]["columns"]
+        assert columns["anyOf"][0]["minItems"] == 1
+        assert "drt validate enforces" in columns["description"]
 
     def test_schemas_are_valid_json(self) -> None:
         """Generated schemas should be valid JSON."""
@@ -144,6 +151,38 @@ sync:
 
         assert len(errors) > 0
         assert any("model" in err or "destination" in err for err in errors)
+
+    @pytest.mark.parametrize(
+        "column_block",
+        [
+            "",
+            "columns: []",
+            "columns:\n  - name: ''\n    type: integer",
+        ],
+    )
+    def test_column_contract_constraints_fail_in_generated_schema(
+        self,
+        tmp_path: Path,
+        column_block: str,
+    ) -> None:
+        yaml_file = tmp_path / "sync.yml"
+        yaml_file.write_text(
+            f"""
+name: contracted
+model: ref('users')
+destination:
+  type: slack
+  webhook_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+contract:
+  enforced: true
+{column_block}
+"""
+        )
+
+        errors = validate_yaml_against_schema(yaml_file, generate_sync_schema())
+
+        assert errors
+        assert any("columns" in error for error in errors)
 
     def test_invalid_enum_value_fails(self, tmp_path: Path) -> None:
         """Invalid enum value should fail validation."""

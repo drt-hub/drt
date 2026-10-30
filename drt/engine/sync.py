@@ -823,6 +823,9 @@ def _run_sync_body(
     # drained eagerly (bounded by the removed set, not the table — see
     # SnapshotDiffResult) for SyncResult.diff_removed_keys and
     # mirror.strategy: diff's destination-side finalize pass.
+    contract = sync.contract if sync.columns is not None else None
+    contract_checked = False
+    contract_failed = False
     diff_removed_keys: list[dict[str, Any]] | None = None
     if sync.sync.incremental_strategy == "diff":
         if not isinstance(source, SnapshotDiffSource):
@@ -848,6 +851,22 @@ def _run_sync_body(
                 hash_columns=sync.sync.diff.hash_columns,
                 query_tags=query_tags,
             )
+            # The added/changed streams do not contain unchanged rows. Check
+            # the newly extracted full snapshot first so a removal-only diff
+            # cannot bypass the contract and reach a destructive finalizer.
+            if contract is not None and contract.enforced:
+                snapshot_sample = list(diff_result.snapshot_sample)
+                if snapshot_sample:
+                    contract_checked = True
+                    assert sync.columns is not None
+                    contract_check = check_contract(
+                        snapshot_sample, sync.columns, contract.on_extra_columns
+                    )
+                    if not contract_check.passed:
+                        contract_failed = True
+                        total_result.failed += 1
+                        total_result.errors.append(contract_check.message())
+
             # Masked before SyncResult.diff_removed_keys is populated below,
             # and before the _diff_removed_keys smuggle just underneath —
             # both the removed-keys observability result and
@@ -862,14 +881,18 @@ def _run_sync_body(
             # (destination-facing) passed straight into the *source* query,
             # so a field_mappings rename of an upsert_key column doesn't fit
             # this strategy's extraction step either, independent of this.
-            diff_removed_keys = apply_mask(list(diff_result.removed_keys), sync.sync.mask)
-            # Smuggled to the destination side the same way _query_tags/
-            # _sync_name already are (#1110) — mirror.strategy: diff reads
-            # this in BaseSqlDestination._finalize_mirror_diff instead of
-            # finalize_sync()'s duck-typed signature growing a parameter
-            # every other dialect's implementation would have to ignore.
-            sync.sync._diff_removed_keys = diff_removed_keys
-        records_iter = _wrap_stage_ctx(chain(diff_result.added, diff_result.changed), "source")
+            if not contract_failed:
+                diff_removed_keys = apply_mask(list(diff_result.removed_keys), sync.sync.mask)
+                # Smuggled to the destination side the same way _query_tags/
+                # _sync_name already are (#1110) — mirror.strategy: diff reads
+                # this in BaseSqlDestination._finalize_mirror_diff instead of
+                # finalize_sync()'s duck-typed signature growing a parameter
+                # every other dialect's implementation would have to ignore.
+                sync.sync._diff_removed_keys = diff_removed_keys
+        records_iter = _wrap_stage_ctx(
+            chain(diff_result.added, diff_result.changed) if not contract_failed else iter(()),
+            "source",
+        )
     else:
         records_iter = _staged_source_iter(
             source,
@@ -898,10 +921,6 @@ def _run_sync_body(
     plan_payload_records: list[dict[str, Any]] | None = (
         [] if dry_run and compute_diff and sync.sync._capture_plan_payload else None
     )
-    contract = sync.contract if sync.columns is not None else None
-    contract_checked = False
-    contract_failed = False
-
     # Idempotency ledger (#1099) — resolve the dedup key template once, not
     # per batch. Two destination shapes are out of scope for the first cut,
     # both because a batch's reported success there isn't the same thing as

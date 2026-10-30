@@ -93,6 +93,8 @@ class _ExactReplaySource:
 def _exact_replay_sync(sync: Any) -> Any:
     """Clone a sync and disable transforms already represented in the payload."""
     replay = sync.model_copy(deep=True)
+    replay.columns = None
+    replay.contract = None
     replay.sync.computed_fields = None
     replay.sync.field_mappings = None
     replay.sync.mask = None

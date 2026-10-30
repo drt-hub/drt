@@ -30,11 +30,13 @@ class FakeSnapshotDiffSource:
         added: list[dict],
         changed: list[dict],
         removed_keys: list[dict],
+        snapshot_rows: list[dict] | None = None,
         is_first_run: bool = False,
     ) -> None:
         self._added = added
         self._changed = changed
         self._removed_keys = removed_keys
+        self._snapshot_rows = snapshot_rows if snapshot_rows is not None else added + changed
         self._is_first_run = is_first_run
         self.commit_calls: list[str] = []
         self.extract_calls: list[dict[str, Any]] = []
@@ -61,6 +63,7 @@ class FakeSnapshotDiffSource:
             {"sync_name": sync_name, "key_columns": key_columns, "hash_columns": hash_columns}
         )
         return SnapshotDiffResult(
+            snapshot_sample=iter(self._snapshot_rows[:1]),
             added=iter(self._added),
             changed=iter(self._changed),
             removed_keys=iter(self._removed_keys),
@@ -177,6 +180,64 @@ def test_diff_strategy_commits_snapshot_on_success(tmp_path: Path) -> None:
     run_sync(sync, source, dest, _make_profile(), tmp_path)
 
     assert source.commit_calls == ["diff_sync"]
+
+
+def test_diff_contract_failure_blocks_removal_and_snapshot_commit(tmp_path: Path) -> None:
+    """An unchanged row still defines the full snapshot's source schema."""
+
+    class MirrorDestination(FakeDestination):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted: list[dict[str, Any]] = []
+
+        def finalize_sync(self, config: DestinationConfig, sync_options: SyncOptions) -> SyncResult:
+            self.deleted.extend(sync_options._diff_removed_keys or [])
+            return SyncResult()
+
+        def supported_modes(self) -> frozenset[str]:
+            return frozenset({"mirror"})
+
+    source = FakeSnapshotDiffSource(
+        added=[],
+        changed=[],
+        removed_keys=[{"id": 2}],
+        snapshot_rows=[{"id": 1}],
+    )
+    destination = MirrorDestination()
+    sync = SyncConfig.model_validate(
+        {
+            "name": "diff_sync",
+            "model": "ref('table')",
+            "columns": [
+                {"name": "id", "type": "integer"},
+                {"name": "email", "type": "string"},
+            ],
+            "contract": {"enforced": True},
+            "destination": {
+                "type": "postgres",
+                "host": "localhost",
+                "dbname": "db",
+                "user": "u",
+                "password": "p",
+                "table": "public.scores",
+                "upsert_key": ["id"],
+            },
+            "sync": {
+                "mode": "mirror",
+                "incremental_strategy": "diff",
+                "diff": {"hash_columns": ["id"]},
+                "mirror": {"strategy": "diff"},
+            },
+        }
+    )
+
+    result = run_sync(sync, source, destination, _make_profile(), tmp_path)
+
+    assert result.failed == 1
+    assert "'email' expected string, actual missing" in result.errors[0]
+    assert destination.calls == []
+    assert destination.deleted == []
+    assert source.commit_calls == []
 
 
 def test_diff_strategy_does_not_commit_on_limited_run(tmp_path: Path) -> None:

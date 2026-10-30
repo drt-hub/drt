@@ -194,7 +194,10 @@ class ManagedTableCapable(Protocol):
 class SnapshotDiffResult:
     """Classification of one run's rows against the previous snapshot (#755).
 
-    ``added``/``changed`` are iterators of full records (streamed, not
+    ``snapshot_sample`` contains at most the first row of the newly extracted
+    full snapshot. The engine uses it to enforce a source-column contract
+    before processing the diff or any removal. ``added``/``changed`` are
+    iterators of full records (streamed, not
     materialized — same discipline as :meth:`Source.extract`), meant to be
     chained into the engine's normal upsert write path unchanged.
     ``removed_keys`` is an iterator of ``{column: value}`` dicts containing
@@ -207,6 +210,7 @@ class SnapshotDiffResult:
     without a destination-side scan.
     """
 
+    snapshot_sample: Iterator[dict[str, Any]]
     added: Iterator[dict[str, Any]]
     changed: Iterator[dict[str, Any]]
     removed_keys: Iterator[dict[str, Any]]

@@ -495,7 +495,18 @@ class BigQuerySource:
             else:
                 changed = iter(())
 
+        def snapshot_sample() -> Iterator[dict[str, Any]]:
+            yield from self._stream_query(
+                config,
+                f"SELECT * FROM {scratch_ident} LIMIT 1",
+                scratch_table=scratch_table,
+                expected_token=run_token,
+                sync_name=sync_name,
+                query_tags=query_tags,
+            )
+
         return SnapshotDiffResult(
+            snapshot_sample=snapshot_sample(),
             added=added,
             changed=changed,
             removed_keys=removed_keys,

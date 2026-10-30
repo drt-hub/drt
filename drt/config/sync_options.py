@@ -179,7 +179,7 @@ class ColumnConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str
+    name: str = Field(min_length=1)
     type: Literal["string", "number", "integer", "boolean", "timestamp", "date", "json"]
     description: str | None = None
 
@@ -1025,6 +1025,16 @@ class SyncMetaConfig(BaseModel):
 
 
 class SyncConfig(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "if": {
+                "properties": {"contract": {"type": "object"}},
+                "required": ["contract"],
+            },
+            "then": {"required": ["columns"]},
+        }
+    )
+
     name: str
     description: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -1041,7 +1051,14 @@ class SyncConfig(BaseModel):
     # matches dbt's schema shape and separates it from destination-facing
     # transforms under ``sync:``. A declaration may be documentation-only;
     # run-time checking is explicit through ``contract.enforced``.
-    columns: list[ColumnConfig] | None = Field(default=None, min_length=1)
+    columns: list[ColumnConfig] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Portable source columns. Names must be unique; JSON Schema cannot express "
+            "property-level uniqueness, so drt validate enforces it."
+        ),
+    )
     contract: ContractConfig | None = None
 
     @model_validator(mode="after")
