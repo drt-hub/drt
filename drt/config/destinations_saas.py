@@ -323,6 +323,42 @@ class HubSpotDestinationConfig(DescribableConfig):
         return f"{self.type}:{_auth_identity(self.auth)}"
 
 
+class PipedriveDestinationConfig(DescribableConfig):
+    """Pipedrive CRM destination: search by match_field, then create or update."""
+
+    _detail_is_public = True  # object identity only (#696) - safe for hosted docs
+    type: Literal["pipedrive"]
+    api_token: str | None = None
+    api_token_env: str | None = "PIPEDRIVE_API_TOKEN"
+    # Default is https://api.pipedrive.com/api/v2; override for a different host.
+    base_url: str | None = None
+    object: Literal["person"] = "person"  # organization / deal come in follow-up PRs
+    match_field: Literal["email", "name", "phone"] = "email"
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+
+    def _describe_detail(self) -> str:
+        return f"{self.object}"
+
+    def rate_limit_key(self) -> str:
+        """Per Pipedrive API token (#769)."""
+        account = self.api_token_env or (LITERAL_CREDENTIAL_KEY if self.api_token else "unset")
+        return f"{self.type}:{account}"
+
+    @field_validator("base_url", mode="after")
+    @classmethod
+    def _check_base_url(cls, value: str | None) -> str | None:
+        if value is not None and not value.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://.")
+        return value
+
+    @model_validator(mode="after")
+    def _check_api_token(self) -> PipedriveDestinationConfig:
+        if not self.api_token and not self.api_token_env:
+            raise ValueError("api_token or api_token_env is required.")
+        return self
+
+
 class ZendeskDestinationConfig(DescribableConfig):
     _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["zendesk"]

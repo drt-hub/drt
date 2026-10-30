@@ -3460,6 +3460,95 @@
       "title": "ParquetDestinationConfig",
       "type": "object"
     },
+    "PipedriveDestinationConfig": {
+      "description": "Pipedrive CRM destination: search by match_field, then create or update.",
+      "properties": {
+        "type": {
+          "const": "pipedrive",
+          "title": "Type",
+          "type": "string"
+        },
+        "api_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Token"
+        },
+        "api_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "PIPEDRIVE_API_TOKEN",
+          "title": "Api Token Env"
+        },
+        "base_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Url"
+        },
+        "object": {
+          "const": "person",
+          "default": "person",
+          "title": "Object",
+          "type": "string"
+        },
+        "match_field": {
+          "default": "email",
+          "enum": [
+            "email",
+            "name",
+            "phone"
+          ],
+          "title": "Match Field",
+          "type": "string"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "PipedriveDestinationConfig",
+      "type": "object"
+    },
     "PostgresDestinationConfig": {
       "properties": {
         "connection_string_env": {
@@ -5893,6 +5982,9 @@
         },
         {
           "$ref": "#/$defs/HubSpotDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/PipedriveDestinationConfig"
         },
         {
           "$ref": "#/$defs/ZendeskDestinationConfig"

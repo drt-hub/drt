@@ -1268,6 +1268,38 @@ host. Configs with the same explicit key share one limiter bucket.
 
 ---
 
+### `type: pipedrive`
+
+No extra package is needed.
+
+```yaml
+destination:
+  type: pipedrive
+  api_token_env: PIPEDRIVE_API_TOKEN     # default; or api_token (prefer the env var)
+  base_url: https://api.pipedrive.com/api/v2   # optional: this is the default
+  object: person                         # only person is supported for now
+  match_field: email                     # email | name | phone: column for the exact search
+  retry:                                 # optional: overrides sync.retry as a whole
+    max_attempts: 3
+    initial_backoff: 1.0
+  rate_limit:                            # optional: overrides sync.rate_limit as a whole
+    requests_per_second: 5
+sync:
+  mode: full                             # full/incremental/upsert; replace/mirror rejected
+  match_policy: upsert                   # upsert | update_only | create_only
+  field_mappings:
+    customer_tier: 9d5bd2d0f3a3c5ee1b2c3d4e5f60718293a4b5c6   # Pipedrive custom-field key
+```
+
+Each row is looked up with an exact search on `match_field`; one match is updated
+(`PATCH`), no match is created (`POST`), and more than one match is a RowError with
+nothing written. `name`, `owner_id`, `org_id`, `visible_to` and `label_ids` pass
+through, `email`/`phone` become `emails`/`phones` lists, and every other column goes to
+`custom_fields`, so `field_mappings` must rename it to Pipedrive's 40-character key (an
+unknown key is rejected by Pipedrive and becomes a per-row error). The token is sent in
+the `x-api-token` header. Each row costs about 25 API tokens (search 20 + write 5). See
+[Pipedrive connector docs](../connectors/pipedrive.md).
+
 ### `type: sqs`
 
 Requires `pip install 'drt-core[sqs]'`; boto3 is optional and lazily imported.

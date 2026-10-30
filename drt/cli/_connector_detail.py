@@ -72,6 +72,7 @@ DESTINATION_CONFIG_CLASSES: dict[str, type[BaseModel]] = {
     "mysql": _models.MySQLDestinationConfig,
     "notion": _models.NotionDestinationConfig,
     "parquet": _models.ParquetDestinationConfig,
+    "pipedrive": _models.PipedriveDestinationConfig,
     "postgres": _models.PostgresDestinationConfig,
     "rest_api": _models.RestApiDestinationConfig,
     "s3": _models.S3DestinationConfig,
