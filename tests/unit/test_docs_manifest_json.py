@@ -19,6 +19,7 @@ from drt.docs import (
     Project,
     Source,
     Sync,
+    SyncColumn,
     SyncField,
     SyncRun,
     SyncStateSnapshot,
@@ -28,8 +29,8 @@ from drt.docs import (
 runner = CliRunner()
 
 
-def test_schema_version_is_5() -> None:
-    assert SCHEMA_VERSION == 5
+def test_schema_version_is_6() -> None:
+    assert SCHEMA_VERSION == 6
 
 
 def _write_project(project_dir: Path, profile: str = "bq_prod", name: str = "demo") -> None:
@@ -142,6 +143,10 @@ class TestManifestRoundTrip:
                         SyncField(name="email_address", source_name="email", mask="hash"),
                         SyncField(name="phone", source_name="phone", mask="truncate"),
                     ),
+                    columns=(
+                        SyncColumn(name="email", type="string", description="Primary ID"),
+                        SyncColumn(name="score", type="number"),
+                    ),
                     dlq_depth=3,
                     config_hash="0123456789abcdef",
                 ),
@@ -173,7 +178,7 @@ class TestManifestRoundTrip:
         # omitted when absent rather than emitted as a null placeholder.
         assert "config_hash" not in roundtrip.to_dict()["syncs"][0]
 
-    @pytest.mark.parametrize("schema_version", [1, 2])
+    @pytest.mark.parametrize("schema_version", [1, 2, 3, 4, 5])
     def test_old_shape_without_config_hash_loads_as_none(self, schema_version: int) -> None:
         old_shape = {
             "schema_version": schema_version,
@@ -199,6 +204,7 @@ class TestManifestRoundTrip:
 
         assert manifest.schema_version == schema_version
         assert manifest.syncs[0].config_hash is None
+        assert manifest.syncs[0].columns == ()
 
     def test_edge_from_is_serialized_as_from_keyword(self) -> None:
         m = Manifest(
@@ -230,6 +236,46 @@ class TestManifestRoundTrip:
         assert "runs" not in sync_dict
         assert "fields" not in sync_dict
         assert "dlq_depth" not in sync_dict
+        assert "columns" not in sync_dict
+
+    def test_v6_columns_omit_description_when_absent(self) -> None:
+        manifest = Manifest(
+            schema_version=SCHEMA_VERSION,
+            drt_version="1.3.0",
+            syncs=[
+                Sync(
+                    name="s",
+                    source="src",
+                    destination="dst",
+                    mode="full",
+                    columns=(
+                        SyncColumn(name="email", type="string", description="Primary ID"),
+                        SyncColumn(name="score", type="number"),
+                    ),
+                )
+            ],
+        )
+        assert manifest.to_dict()["syncs"][0]["columns"] == [
+            {"name": "email", "type": "string", "description": "Primary ID"},
+            {"name": "score", "type": "number"},
+        ]
+
+    def test_builder_includes_authored_columns_without_state(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        sync = _pg_sync("users", "public.users")
+        sync["columns"] = [
+            {"name": "id", "type": "integer", "description": "Warehouse key"},
+            {"name": "email", "type": "string"},
+        ]
+        sync["contract"] = {"enforced": True}
+        _write_sync(tmp_path, "users.yml", sync)
+
+        manifest = build_manifest(tmp_path, include_state=False)
+
+        assert manifest.syncs[0].columns == (
+            SyncColumn(name="id", type="integer", description="Warehouse key"),
+            SyncColumn(name="email", type="string"),
+        )
 
 
 class TestBuildManifestWithState:

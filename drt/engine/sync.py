@@ -35,6 +35,7 @@ from drt.destinations.lookup import (
     detect_ambiguous_lookup_ordering,
 )
 from drt.engine.computed_fields import apply_computed_fields
+from drt.engine.contract import check_contract, drop_extra_columns
 from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
@@ -897,6 +898,9 @@ def _run_sync_body(
     plan_payload_records: list[dict[str, Any]] | None = (
         [] if dry_run and compute_diff and sync.sync._capture_plan_payload else None
     )
+    contract = sync.contract if sync.columns is not None else None
+    contract_checked = False
+    contract_failed = False
 
     # Idempotency ledger (#1099) — resolve the dedup key template once, not
     # per batch. Two destination shapes are out of scope for the first cut,
@@ -977,6 +981,31 @@ def _run_sync_body(
                         str_val = _stringify_cursor_value(val)
                         if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
                             new_cursor_value = str_val
+
+            # Opt-in model-output contract (#761). It sees the raw source
+            # batch: destination lookups and payload transforms below are not
+            # part of what the model emitted. Validation happens exactly once,
+            # before the first destination write; a failure becomes a normal
+            # failed SyncResult reported through the observer, not an exception.
+            if contract is not None and contract.enforced and not contract_checked:
+                contract_checked = True
+                assert sync.columns is not None
+                contract_check = check_contract(
+                    record_batch, sync.columns, contract.on_extra_columns
+                )
+                if not contract_check.passed:
+                    contract_failed = True
+                    total_result.failed += 1
+                    total_result.errors.append(contract_check.message())
+                    new_cursor_value = durable_cursor_value
+                    break
+
+            # ``drop`` is a payload policy, so it applies to every extracted
+            # batch even though schema/type validation deliberately samples
+            # only the first. Fresh dicts keep source-owned rows unmodified.
+            if contract is not None and contract.enforced and contract.on_extra_columns == "drop":
+                assert sync.columns is not None
+                record_batch = drop_extra_columns(record_batch, sync.columns)
 
             # Apply destination lookups (FK resolution)
             lookup_fatal = False
@@ -1281,7 +1310,7 @@ def _run_sync_body(
     # (e.g. swap-finalize for replace_strategy=swap on Postgres/MySQL/ClickHouse).
     # The hook is intentionally NOT a Protocol — destinations opt in by simply
     # defining a finalize_sync() method.
-    if not is_staged and not dry_run:
+    if not is_staged and not dry_run and not contract_failed:
         finalizer = getattr(destination, "finalize_sync", None)
         if callable(finalizer):
             with _stage_ctx("destination"):

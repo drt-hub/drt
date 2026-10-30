@@ -43,6 +43,14 @@ class TestGenerateSchemas:
         assert "name" in schema["properties"]
         assert "model" in schema["properties"]
         assert "destination" in schema["properties"]
+        assert "columns" in schema["properties"]
+        assert "contract" in schema["properties"]
+
+        column = schema["$defs"]["ColumnConfig"]
+        contract = schema["$defs"]["ContractConfig"]
+        assert column["additionalProperties"] is False
+        assert contract["additionalProperties"] is False
+        assert contract["properties"]["on_extra_columns"]["default"] == "fail"
 
     def test_schemas_are_valid_json(self) -> None:
         """Generated schemas should be valid JSON."""

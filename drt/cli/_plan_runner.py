@@ -214,10 +214,14 @@ def compute_plan(
             raise PlanCliError(f"No diff was produced for '{sync_name}'.")
         if result.failed or result.interrupted:
             # A diff over a partial extraction would read as "nothing else changes".
+            errors = getattr(result, "errors", [])
+            if errors and errors[0].startswith("Column contract violation:"):
+                raise PlanCliError(f"Plan unavailable for '{sync_name}': {errors[0]}")
+            detail = f": {errors[0].rstrip('.')}" if errors else ""
             raise PlanCliError(
                 f"Plan unavailable for '{sync_name}': extraction did not complete "
                 f"({result.failed} failed row(s)"
-                f"{', interrupted' if result.interrupted else ''})."
+                f"{', interrupted' if result.interrupted else ''}){detail}."
             )
         diff = result.diff
         cursor_value_used = result.cursor_value_used

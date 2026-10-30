@@ -781,6 +781,47 @@
       "title": "ClickHouseDestinationConfig",
       "type": "object"
     },
+    "ColumnConfig": {
+      "additionalProperties": false,
+      "description": "One portable source column declared by a sync (#761).",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "timestamp",
+            "date",
+            "json"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "ColumnConfig",
+      "type": "object"
+    },
     "ConditionThreshold": {
       "description": "One comparison for a degraded-sync condition (#784).\n\nExactly one operator is set \u2014 ``{gt: 1}``, ``{eq: 0}``, etc. The metric it\napplies to is the key it sits under in ``on_degraded.conditions``.",
       "properties": {
@@ -846,6 +887,31 @@
         }
       },
       "title": "ConditionThreshold",
+      "type": "object"
+    },
+    "ContractConfig": {
+      "additionalProperties": false,
+      "description": "Run-time enforcement policy for a sync's declared columns (#761).",
+      "properties": {
+        "enforced": {
+          "title": "Enforced",
+          "type": "boolean"
+        },
+        "on_extra_columns": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "ignore",
+            "drop"
+          ],
+          "title": "On Extra Columns",
+          "type": "string"
+        }
+      },
+      "required": [
+        "enforced"
+      ],
+      "title": "ContractConfig",
       "type": "object"
     },
     "CursorPaginationConfig": {
@@ -6022,6 +6088,33 @@
       "anyOf": [
         {
           "$ref": "#/$defs/SyncMetaConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "columns": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ColumnConfig"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Columns"
+    },
+    "contract": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContractConfig"
         },
         {
           "type": "null"
