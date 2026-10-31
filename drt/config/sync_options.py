@@ -179,7 +179,7 @@ class ColumnConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1)
+    name: str = Field(min_length=1, json_schema_extra={"pattern": r"\S"})
     type: Literal["string", "number", "integer", "boolean", "timestamp", "date", "json"]
     description: str | None = None
 
@@ -1031,7 +1031,10 @@ class SyncConfig(BaseModel):
                 "properties": {"contract": {"type": "object"}},
                 "required": ["contract"],
             },
-            "then": {"required": ["columns"]},
+            "then": {
+                "properties": {"columns": {"type": "array", "minItems": 1}},
+                "required": ["columns"],
+            },
         }
     )
 

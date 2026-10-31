@@ -892,8 +892,12 @@ async def test_get_schema_sync(server: FastMCP) -> None:
     assert "$defs" in schema or "properties" in schema
     assert "columns" in schema["properties"]
     assert "contract" in schema["properties"]
-    assert schema["then"] == {"required": ["columns"]}
+    assert schema["then"] == {
+        "properties": {"columns": {"type": "array", "minItems": 1}},
+        "required": ["columns"],
+    }
     assert schema["$defs"]["ColumnConfig"]["properties"]["name"]["minLength"] == 1
+    assert schema["$defs"]["ColumnConfig"]["properties"]["name"]["pattern"] == r"\S"
 
 
 @pytest.mark.asyncio

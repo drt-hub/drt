@@ -856,6 +856,12 @@ def _run_sync_body(
             # cannot bypass the contract and reach a destructive finalizer.
             if contract is not None and contract.enforced:
                 snapshot_sample = list(diff_result.snapshot_sample)
+                if not snapshot_sample and diff_result.snapshot_columns is not None:
+                    # An empty snapshot has no values to type-check, but its
+                    # scratch table still has a schema. Nulls are compatible
+                    # with every portable type, so this checks missing/extra
+                    # names without inventing value types.
+                    snapshot_sample = [dict.fromkeys(diff_result.snapshot_columns)]
                 if snapshot_sample:
                     contract_checked = True
                     assert sync.columns is not None

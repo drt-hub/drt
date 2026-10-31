@@ -195,8 +195,10 @@ class SnapshotDiffResult:
     """Classification of one run's rows against the previous snapshot (#755).
 
     ``snapshot_sample`` contains at most the first row of the newly extracted
-    full snapshot. The engine uses it to enforce a source-column contract
-    before processing the diff or any removal. ``added``/``changed`` are
+    full snapshot. ``snapshot_columns`` carries the same snapshot's column
+    names even when it has no rows. The engine uses both to enforce a
+    source-column contract before processing the diff or any removal.
+    ``added``/``changed`` are
     iterators of full records (streamed, not
     materialized — same discipline as :meth:`Source.extract`), meant to be
     chained into the engine's normal upsert write path unchanged.
@@ -215,6 +217,7 @@ class SnapshotDiffResult:
     changed: Iterator[dict[str, Any]]
     removed_keys: Iterator[dict[str, Any]]
     is_first_run: bool
+    snapshot_columns: list[str] | None = None
 
 
 @runtime_checkable

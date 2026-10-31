@@ -787,6 +787,7 @@
       "properties": {
         "name": {
           "minLength": 1,
+          "pattern": "\\S",
           "title": "Name",
           "type": "string"
         },
@@ -6141,6 +6142,12 @@
     "destination"
   ],
   "then": {
+    "properties": {
+      "columns": {
+        "minItems": 1,
+        "type": "array"
+      }
+    },
     "required": [
       "columns"
     ]

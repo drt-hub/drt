@@ -447,7 +447,7 @@ class DatabricksSource:
         scratch_ident = _managed_table_identifier(config, scratch_table)
         run_token = str(uuid.uuid4())
 
-        def _setup() -> tuple[bool, bool, list[str], dict[str, str], list[str]]:
+        def _setup() -> tuple[bool, bool, list[str], dict[str, str], list[str], list[str]]:
             self.ensure_managed_schema(config)
             conn = self._connect(config, query_tags=query_tags)
             try:
@@ -523,11 +523,24 @@ class DatabricksSource:
                         ]
             finally:
                 conn.close()
-            return is_first_run, reclassify_all_existing, sql_keys, key_rename, diff_columns
+            snapshot_columns = [key_rename.get(column, column) for column in all_columns]
+            return (
+                is_first_run,
+                reclassify_all_existing,
+                sql_keys,
+                key_rename,
+                diff_columns,
+                snapshot_columns,
+            )
 
-        is_first_run, reclassify_all_existing, sql_keys, key_rename, diff_columns = with_retry(
-            _setup, RetryConfig(), retry_on=self._is_transient
-        )
+        (
+            is_first_run,
+            reclassify_all_existing,
+            sql_keys,
+            key_rename,
+            diff_columns,
+            snapshot_columns,
+        ) = with_retry(_setup, RetryConfig(), retry_on=self._is_transient)
 
         if is_first_run:
             added = self._stream_query(
@@ -607,6 +620,7 @@ class DatabricksSource:
             changed=changed,
             removed_keys=removed_keys,
             is_first_run=is_first_run,
+            snapshot_columns=snapshot_columns,
         )
 
     def _stream_query(

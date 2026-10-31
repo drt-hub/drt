@@ -546,6 +546,7 @@ class PostgresSource:
             changed=changed,
             removed_keys=removed_keys,
             is_first_run=is_first_run,
+            snapshot_columns=all_columns,
         )
 
     def _stream_query(

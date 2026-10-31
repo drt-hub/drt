@@ -31,12 +31,14 @@ class FakeSnapshotDiffSource:
         changed: list[dict],
         removed_keys: list[dict],
         snapshot_rows: list[dict] | None = None,
+        snapshot_columns: list[str] | None = None,
         is_first_run: bool = False,
     ) -> None:
         self._added = added
         self._changed = changed
         self._removed_keys = removed_keys
         self._snapshot_rows = snapshot_rows if snapshot_rows is not None else added + changed
+        self._snapshot_columns = snapshot_columns
         self._is_first_run = is_first_run
         self.commit_calls: list[str] = []
         self.extract_calls: list[dict[str, Any]] = []
@@ -68,6 +70,7 @@ class FakeSnapshotDiffSource:
             changed=iter(self._changed),
             removed_keys=iter(self._removed_keys),
             is_first_run=self._is_first_run,
+            snapshot_columns=self._snapshot_columns,
         )
 
     def commit_snapshot_diff(self, config: ProfileConfig, sync_name: str) -> None:
@@ -235,6 +238,66 @@ def test_diff_contract_failure_blocks_removal_and_snapshot_commit(tmp_path: Path
 
     assert result.failed == 1
     assert "'email' expected string, actual missing" in result.errors[0]
+    assert destination.calls == []
+    assert destination.deleted == []
+    assert source.commit_calls == []
+
+
+def test_empty_diff_snapshot_schema_failure_blocks_removals(tmp_path: Path) -> None:
+    """An empty changed snapshot must not turn schema drift into delete-all."""
+
+    class MirrorDestination(FakeDestination):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted: list[dict[str, Any]] = []
+
+        def finalize_sync(self, config: DestinationConfig, sync_options: SyncOptions) -> SyncResult:
+            self.deleted.extend(sync_options._diff_removed_keys or [])
+            return SyncResult()
+
+        def supported_modes(self) -> frozenset[str]:
+            return frozenset({"mirror"})
+
+    source = FakeSnapshotDiffSource(
+        added=[],
+        changed=[],
+        removed_keys=[{"id": 1}],
+        snapshot_rows=[],
+        snapshot_columns=["id", "renamed_email"],
+    )
+    destination = MirrorDestination()
+    sync = SyncConfig.model_validate(
+        {
+            "name": "diff_sync",
+            "model": "ref('table')",
+            "columns": [
+                {"name": "id", "type": "integer"},
+                {"name": "email", "type": "string"},
+            ],
+            "contract": {"enforced": True},
+            "destination": {
+                "type": "postgres",
+                "host": "localhost",
+                "dbname": "db",
+                "user": "u",
+                "password": "p",
+                "table": "public.scores",
+                "upsert_key": ["id"],
+            },
+            "sync": {
+                "mode": "mirror",
+                "incremental_strategy": "diff",
+                "diff": {"hash_columns": ["id"]},
+                "mirror": {"strategy": "diff"},
+            },
+        }
+    )
+
+    result = run_sync(sync, source, destination, _make_profile(), tmp_path)
+
+    assert result.failed == 1
+    assert "'email' expected string, actual missing" in result.errors[0]
+    assert "'renamed_email' expected not declared, actual null" in result.errors[0]
     assert destination.calls == []
     assert destination.deleted == []
     assert source.commit_calls == []

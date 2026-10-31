@@ -52,9 +52,13 @@ class TestGenerateSchemas:
         contract = schema["$defs"]["ContractConfig"]
         assert column["additionalProperties"] is False
         assert column["properties"]["name"]["minLength"] == 1
+        assert column["properties"]["name"]["pattern"] == r"\S"
         assert contract["additionalProperties"] is False
         assert contract["properties"]["on_extra_columns"]["default"] == "fail"
-        assert schema["then"] == {"required": ["columns"]}
+        assert schema["then"] == {
+            "properties": {"columns": {"type": "array", "minItems": 1}},
+            "required": ["columns"],
+        }
         columns = schema["properties"]["columns"]
         assert columns["anyOf"][0]["minItems"] == 1
         assert "drt validate enforces" in columns["description"]
@@ -157,7 +161,9 @@ sync:
         [
             "",
             "columns: []",
+            "columns: null",
             "columns:\n  - name: ''\n    type: integer",
+            "columns:\n  - name: '   '\n    type: integer",
         ],
     )
     def test_column_contract_constraints_fail_in_generated_schema(
