@@ -406,9 +406,12 @@ class TestBigQueryWarehouseHistoryStore:
             store.append(_history_entry(guards={"forced": False, "tripped": []}))
 
         sqls = _sqls(client)
-        for i, column in enumerate(("guards", "plan_id", "approved_by", "exact", "ddl")):
-            assert f"ADD COLUMN IF NOT EXISTS {column} STRING" in sqls[i]
-        assert sqls[5].startswith("INSERT INTO") and "@guards" in sqls[5]
+        assert "ADD COLUMN IF NOT EXISTS guards STRING" in sqls[0]
+        assert sqls[1].startswith("INSERT INTO") and "@guards" in sqls[1]
+        assert all(
+            f"ADD COLUMN IF NOT EXISTS {column} STRING" not in "\n".join(sqls)
+            for column in ("plan_id", "approved_by", "exact", "ddl")
+        )
 
     def test_append_falls_back_to_the_legacy_insert_when_alter_is_refused(
         self, caplog: pytest.LogCaptureFixture

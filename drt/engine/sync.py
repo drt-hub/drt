@@ -36,7 +36,7 @@ from drt.destinations.lookup import (
     detect_ambiguous_lookup_ordering,
 )
 from drt.engine.computed_fields import apply_computed_fields
-from drt.engine.contract import check_contract, drop_extra_columns
+from drt.engine.contract import check_contract, declared_destination_types, drop_extra_columns
 from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
@@ -448,7 +448,13 @@ def run_sync(
     sync.sync._managed_new_columns = set()
     sync.sync._managed_table_unavailable_reason = None
     sync.sync._executed_ddl = []
-    sync.sync._source_column_types = {}
+    # A declared contract is stable config and therefore wins over optional,
+    # connector-specific cursor metadata. Names are mapped to the exact
+    # destination-facing shape used by managed-table reconciliation.
+    sync.sync._source_column_types = declared_destination_types(
+        sync.columns, sync.sync.field_mappings
+    )
+    sync.sync._source_column_metadata_loaded = False
     raised: BaseException | None = None
     tracer = get_tracer()
 
@@ -1140,9 +1146,19 @@ def _run_sync_body(
             # capture or the first write. A source may expose cursor metadata
             # through an additive capability; otherwise the destination uses
             # its documented portable TEXT fallback.
-            if not sync.sync._source_column_types and isinstance(source, SourceColumnMetadata):
+            if not sync.sync._source_column_metadata_loaded and isinstance(
+                source, SourceColumnMetadata
+            ):
                 with _stage_ctx("source"):
-                    sync.sync._source_column_types = source.source_column_types()
+                    metadata_types = source.source_column_types()
+                # Declarations are the stable public contract and win for
+                # overlapping columns; metadata can still type undeclared
+                # computed/plugin columns.
+                sync.sync._source_column_types = {
+                    **metadata_types,
+                    **sync.sync._source_column_types,
+                }
+                sync.sync._source_column_metadata_loaded = True
             if isinstance(destination, ManagedDestinationTableCapable):
                 with _stage_ctx("destination"):
                     preparation = destination.prepare_table(

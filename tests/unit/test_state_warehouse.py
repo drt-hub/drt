@@ -244,14 +244,13 @@ class TestPostgresWarehouseHistoryStore:
 
         statements = [s for s, _ in conn.cursor.return_value.statements]
         alters = [s for s in statements if "ALTER TABLE" in s]
-        assert len(alters) == 5 and all("ADD COLUMN IF NOT EXISTS" in a for a in alters)
-        for column in _OPTIONAL:
-            assert any(column in a for a in alters)
+        assert len(alters) == 1
+        assert "ADD COLUMN IF NOT EXISTS" in alters[0] and "guards" in alters[0]
         assert statements.index(alters[0]) < next(
             i for i, s in enumerate(statements) if "INSERT" in s
         )
         _sql, params = self._insert(conn)
-        assert len(params) == 17
+        assert len(params) == 13
 
     def test_append_stores_null_when_the_entry_has_no_guards(self) -> None:
         conn = self._history_conn([*self._BASE_COLUMNS, *_OPTIONAL])

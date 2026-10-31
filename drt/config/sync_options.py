@@ -508,6 +508,7 @@ class SyncOptions(BaseModel):
     _managed_table_unavailable_reason: str | None = PrivateAttr(default=None)
     _executed_ddl: list[str] = PrivateAttr(default_factory=list)
     _source_column_types: dict[str, str] = PrivateAttr(default_factory=dict)
+    _source_column_metadata_loaded: bool = PrivateAttr(default=False)
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:

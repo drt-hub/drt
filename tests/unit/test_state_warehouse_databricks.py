@@ -329,8 +329,8 @@ class TestDatabricksWarehouseHistoryStore:
         assert "VALUES" not in sql
         # The mock probe reports no ``guards`` column and ALTER "succeeds", so the
         # optional column is written (the dedicated suite covers every branch).
-        assert ", guards, plan_id, approved_by, exact, ddl)" in sql
-        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 17
+        assert ", guards)" in sql
+        assert len(conn.cursor.return_value.execute.call_args.args[1]) == 13
 
     def test_read_reconstructs_history_entry_from_a_json_string_variant(self) -> None:
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, "[]", None, False, "run-1", "sync-run-1")
@@ -851,11 +851,11 @@ class TestDatabricksHistoryOptionalColumns:
 
         statements = [s for s, _ in conn.cursor.return_value.statements]
         alters = [s for s in statements if "ALTER TABLE" in s]
-        assert len(alters) == 5 and "ADD COLUMNS (guards STRING)" in alters[0]
+        assert len(alters) == 1 and "ADD COLUMNS (guards STRING)" in alters[0]
         assert statements.index(alters[0]) < next(
             i for i, s in enumerate(statements) if "INSERT" in s
         )
-        assert len(self._insert(conn)[1]) == 17
+        assert len(self._insert(conn)[1]) == 13
 
     def test_stores_null_without_guards(self) -> None:
         conn = self._conn([*self._BASE, "guards", "plan_id", "approved_by", "exact", "ddl"])

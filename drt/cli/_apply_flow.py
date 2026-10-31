@@ -72,8 +72,9 @@ class LoadedExactPayload:
 class _ExactReplaySource:
     """In-memory source whose rows already passed source-side transforms."""
 
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
+    def __init__(self, rows: list[dict[str, Any]], column_types: dict[str, str]) -> None:
         self._rows = rows
+        self._column_types = column_types
 
     def extract(
         self,
@@ -88,6 +89,10 @@ class _ExactReplaySource:
 
     def test_connection(self, _config: Any) -> bool:
         return True
+
+    def source_column_types(self) -> dict[str, str]:
+        """Reproduce only config-declared types; cursor metadata was not sealed."""
+        return dict(self._column_types)
 
 
 def _exact_replay_sync(sync: Any) -> Any:
@@ -511,6 +516,13 @@ def apply_plan(
             "different window. Re-run `drt plan`."
         )
     if current.ddl != doc.get("ddl", []):
+        if exact:
+            raise ApplyRefused(
+                "Exact replay could not reproduce the plan's DDL. The destination schema may "
+                "have changed, or the plan may have depended on source cursor type metadata, "
+                "which is not stored in the replay payload. Declare managed columns and portable "
+                "types in sync.columns, then re-run `drt plan --include-values`."
+            )
         raise ApplyRefused(
             "The destination schema changed since the plan was made, so the DDL preview no "
             "longer matches. Re-run `drt plan`."
@@ -614,9 +626,18 @@ def apply_plan(
 
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
+    from drt.engine.contract import declared_destination_types
+
+    exact_column_types = declared_destination_types(
+        ctx_plan.sync.columns, ctx_plan.sync.sync.field_mappings
+    )
     replay_sync = _exact_replay_sync(ctx_plan.sync) if exact else ctx_plan.sync
     ctx = _RunContext(
-        source=_ExactReplaySource(exact_records or []) if exact else get_source(ctx_plan.profile),
+        source=(
+            _ExactReplaySource(exact_records or [], exact_column_types)
+            if exact
+            else get_source(ctx_plan.profile)
+        ),
         state_mgr=state_bundle.state,
         history_mgr=state_bundle.history,
         dlq_store=state_bundle.dlq,

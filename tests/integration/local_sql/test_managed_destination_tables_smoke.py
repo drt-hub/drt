@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from drt.config.models import MySQLDestinationConfig, PostgresDestinationConfig, SyncOptions
+from drt.config.models import (
+    MySQLDestinationConfig,
+    PostgresDestinationConfig,
+    SyncConfig,
+    SyncOptions,
+)
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
+from drt.engine.contract import declared_destination_types
 
 from .conftest import require_docker
 
@@ -39,18 +45,35 @@ def test_postgres_create_append_and_hostile_identifier_are_live_valid() -> None:
             "table": "managed_users",
             "upsert_key": ["id"],
         }
+        create_options = SyncOptions()
+        declared = SyncConfig.model_validate(
+            {
+                "name": "typed_postgres",
+                "model": "select 1",
+                "destination": {**common, "type": "postgres"},
+                "columns": [
+                    {"name": "id", "type": "integer"},
+                    {"name": hostile, "type": "string"},
+                ],
+            }
+        )
+        create_options._source_column_types = declared_destination_types(
+            declared.columns, declared.sync.field_mappings
+        )
         created = PostgresDestination().load(
             [{"id": "1", hostile: "Ada"}],
             PostgresDestinationConfig(**common, manage_table=True),
-            SyncOptions(),
+            create_options,
         )
         assert created.success == 1
         assert created.ddl == [
             'CREATE TABLE IF NOT EXISTS "managed_users" '
-            '("id" TEXT NOT NULL, "profile.name""; DROP TABLE audit; --" TEXT, '
+            '("id" BIGINT NOT NULL, "profile.name""; DROP TABLE audit; --" TEXT, '
             'PRIMARY KEY ("id"))'
         ]
 
+        append_options = SyncOptions()
+        append_options._source_column_types = {"score": "number"}
         appended = PostgresDestination().load(
             [{"id": "1", hostile: "Ada Lovelace", "score": "10"}],
             PostgresDestinationConfig(
@@ -58,10 +81,12 @@ def test_postgres_create_append_and_hostile_identifier_are_live_valid() -> None:
                 manage_table=False,
                 on_schema_change="append_new_columns",
             ),
-            SyncOptions(),
+            append_options,
         )
         assert appended.success == 1
-        assert appended.ddl == ['ALTER TABLE "managed_users" ADD COLUMN "score" TEXT NULL']
+        assert appended.ddl == [
+            'ALTER TABLE "managed_users" ADD COLUMN IF NOT EXISTS "score" NUMERIC NULL'
+        ]
 
         conn = psycopg2.connect(
             host=host, port=port, dbname="testdb", user="admin", password="adminpass"
@@ -75,7 +100,7 @@ def test_postgres_create_append_and_hostile_identifier_are_live_valid() -> None:
                         sql.Identifier(hostile)
                     )
                 )
-                assert cur.fetchall() == [("1", "Ada Lovelace", "10")]
+                assert cur.fetchall() == [(1, "Ada Lovelace", 10)]
         finally:
             conn.close()
 
@@ -95,18 +120,35 @@ def test_mysql_create_append_and_hostile_identifier_are_live_valid() -> None:
             "table": "managed_users",
             "upsert_key": ["id"],
         }
+        create_options = SyncOptions()
+        declared = SyncConfig.model_validate(
+            {
+                "name": "typed_mysql",
+                "model": "select 1",
+                "destination": {**common, "type": "mysql"},
+                "columns": [
+                    {"name": "id", "type": "integer"},
+                    {"name": hostile, "type": "string"},
+                ],
+            }
+        )
+        create_options._source_column_types = declared_destination_types(
+            declared.columns, declared.sync.field_mappings
+        )
         created = MySQLDestination().load(
             [{"id": "1", hostile: "Ada"}],
             MySQLDestinationConfig(**common, manage_table=True),
-            SyncOptions(),
+            create_options,
         )
         assert created.success == 1
         assert created.ddl == [
             "CREATE TABLE IF NOT EXISTS `managed_users` "
-            "(`id` VARCHAR(255) NOT NULL, `profile.name``; DROP TABLE audit; --` TEXT NULL, "
+            "(`id` BIGINT NOT NULL, `profile.name``; DROP TABLE audit; --` TEXT NULL, "
             "PRIMARY KEY (`id`))"
         ]
 
+        append_options = SyncOptions()
+        append_options._source_column_types = {"score": "number"}
         appended = MySQLDestination().load(
             [{"id": "1", hostile: "Ada Lovelace", "score": "10"}],
             MySQLDestinationConfig(
@@ -114,10 +156,12 @@ def test_mysql_create_append_and_hostile_identifier_are_live_valid() -> None:
                 manage_table=False,
                 on_schema_change="append_new_columns",
             ),
-            SyncOptions(),
+            append_options,
         )
         assert appended.success == 1
-        assert appended.ddl == ["ALTER TABLE `managed_users` ADD COLUMN `score` TEXT NULL"]
+        assert appended.ddl == [
+            "ALTER TABLE `managed_users` ADD COLUMN `score` DECIMAL(65, 30) NULL"
+        ]
 
         conn = pymysql.connect(
             host=host,
@@ -130,6 +174,6 @@ def test_mysql_create_append_and_hostile_identifier_are_live_valid() -> None:
             with conn.cursor() as cur:
                 escaped = hostile.replace("`", "``")
                 cur.execute(f"SELECT id, `{escaped}`, score FROM managed_users")  # noqa: S608
-                assert cur.fetchall() == (("1", "Ada Lovelace", "10"),)
+                assert cur.fetchall() == ((1, "Ada Lovelace", 10),)
         finally:
             conn.close()

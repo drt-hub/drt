@@ -586,6 +586,87 @@ def test_compute_plan_from_records_returns_known_unavailable_result(project: Pat
     assert "match_policy" in str(context.plan.unavailable_reason)
 
 
+def test_compute_plan_from_records_reproduces_contract_declared_typed_ddl(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _plan_runner
+    from drt.destinations.base import TablePreparation
+    from drt.engine import diff as diff_module
+
+    cfg = {
+        **SYNC_YML,
+        "columns": [
+            {"name": "id", "type": "integer"},
+            {"name": "score", "type": "number"},
+        ],
+        "destination": {**SYNC_YML["destination"], "manage_table": True},
+        "sync": {"mode": "upsert", "batch_size": 1},
+    }
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+
+    class ManagedDestination:
+        calls = 0
+
+        def prepare_table(
+            self,
+            records: list[dict[str, Any]],
+            config: Any,
+            sync_options: Any,
+            *,
+            dry_run: bool,
+        ) -> TablePreparation:
+            del config
+            assert dry_run is True
+            assert sync_options._source_column_types == {
+                "id": "integer",
+                "score": "number",
+            }
+            self.calls += 1
+            ddl = (
+                ['CREATE TABLE IF NOT EXISTS "orders" ("id" BIGINT PRIMARY KEY)']
+                if self.calls == 1
+                else ['ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS "score" NUMERIC NULL']
+            )
+            return TablePreparation(records, ddl=ddl)
+
+        def reset_write_state(self, config: Any, sync_options: Any) -> None:
+            del config, sync_options
+
+    monkeypatch.setattr(_plan_runner, "get_destination", lambda _sync: ManagedDestination())
+    monkeypatch.setattr(
+        diff_module,
+        "compute_diff",
+        lambda records, *_a, **_k: DiffResult(
+            added=records, total_source_rows=len(records), total_destination_rows=0
+        ),
+    )
+
+    context = _plan_runner.compute_plan_from_records(
+        "orders_to_pg", [{"id": 1}, {"id": 2, "score": 3.5}], project_dir=project
+    )
+    assert context.plan.ddl == [
+        'CREATE TABLE IF NOT EXISTS "orders" ("id" BIGINT PRIMARY KEY)',
+        'ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS "score" NUMERIC NULL',
+    ]
+
+
+def test_exact_apply_clearly_refuses_unreproducible_source_metadata_ddl(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.engine import diff as diff_module
+
+    world.ddl = ['CREATE TABLE IF NOT EXISTS "orders" ("id" BIGINT PRIMARY KEY)']
+    _exact_plan(project, monkeypatch)
+    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [])
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "not stored in the replay payload" in result.output
+    assert "sync.columns" in result.output
+    assert _writes(world) == []
+
+
 def test_apply_artifact_drops_raw_exception_and_is_private(
     project: Path,
     world: _World,

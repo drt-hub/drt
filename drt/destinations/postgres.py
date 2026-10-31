@@ -236,7 +236,7 @@ class PostgresDestination(BaseSqlDestination):
     ) -> str:
         data_type = self._managed_postgres_type(source_type)
         return (
-            f"ALTER TABLE {double_quote_ident(config.table)} ADD COLUMN "
+            f"ALTER TABLE {double_quote_ident(config.table)} ADD COLUMN IF NOT EXISTS "
             f"{double_quote_ident_part(column)} {data_type} NULL"
         )
 

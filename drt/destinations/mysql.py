@@ -37,6 +37,7 @@ from drt.destinations.sql_base import (
 from drt.destinations.sql_utils import backtick_quote_ident_part
 
 _MYSQL_DUPLICATE_ENTRY = 1062
+_MYSQL_DUPLICATE_COLUMN = 1060
 
 
 def _is_duplicate_entry(exc: Exception) -> bool:
@@ -145,6 +146,44 @@ class MySQLDestination(BaseSqlDestination):
                 )
             )
         return result
+
+    def _managed_validate_upsert_constraint(
+        self, cur: Any, config: MySQLDestinationConfig, upsert_keys: list[str]
+    ) -> None:
+        """Require an exact PRIMARY/UNIQUE key for MySQL's upsert semantics."""
+        if not upsert_keys:
+            return
+        if "." in config.table:
+            schema, table = config.table.rsplit(".", 1)
+            schema_predicate = "%s"
+            params: list[Any] = [table, schema]
+        else:
+            table = config.table
+            schema_predicate = "DATABASE()"
+            params = [table]
+        cur.execute(
+            "SELECT index_name, column_name, seq_in_index "
+            "FROM information_schema.statistics WHERE table_name = %s "
+            f"AND table_schema = {schema_predicate} AND non_unique = 0 "
+            "ORDER BY index_name, seq_in_index",
+            params,
+        )
+        indexes: dict[str, list[tuple[int, str]]] = {}
+        for row in cur.fetchall():
+            values = list(row.values()) if isinstance(row, dict) else list(row)
+            indexes.setdefault(str(values[0]), []).append((int(values[2]), str(values[1]).lower()))
+        expected = sorted(column.lower() for column in upsert_keys)
+        if any(sorted(column for _, column in columns) == expected for columns in indexes.values()):
+            return
+        raise ValueError(
+            f"Destination table {config.table!r} must have a PRIMARY or UNIQUE index exactly "
+            f"covering destination.upsert_key {upsert_keys} before MySQL can upsert. "
+            "Add the index manually; drt never changes constraints on an existing table."
+        )
+
+    @staticmethod
+    def _managed_is_duplicate_column_error(exc: Exception) -> bool:
+        return bool(exc.args) and exc.args[0] == _MYSQL_DUPLICATE_COLUMN
 
     @staticmethod
     def _managed_normalize_identifier(identifier: str) -> str:

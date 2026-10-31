@@ -27,6 +27,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
+from drt._redaction import redact_error_text
 from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult, TablePreparation
 from drt.destinations.row_errors import RowError
@@ -159,11 +160,13 @@ class BaseSqlDestination:
         # sync. ``None`` value = introspection ran but is unavailable; the key
         # being absent = not yet fetched.
         self._schema_cache: dict[str, dict[str, str] | None] = {}
-        # Managed destination tables (#760): checked once, on the first
-        # destination-facing batch. ``_managed_allowed_columns`` is populated
-        # only for on_schema_change=ignore and filters every later batch too.
+        # Managed destination tables (#760): retain every source column seen
+        # across batches. A genuinely new key triggers another reconciliation
+        # before that batch is written; stable batches stay on the fast path.
         self._managed_table_checked = False
+        self._managed_known_columns: dict[str, str] = {}
         self._managed_allowed_columns: set[str] | None = None
+        self._managed_dry_run_created = False
 
     def prepare_table(
         self,
@@ -173,7 +176,7 @@ class BaseSqlDestination:
         *,
         dry_run: bool,
     ) -> TablePreparation:
-        """Reconcile a Postgres/MySQL table before the first write (#760).
+        """Reconcile a Postgres/MySQL table before each new batch shape (#760).
 
         The method is also the read-only engine capability used by ``--dry-run``
         and ``drt plan``. Other SQL destinations inherit this base but have no
@@ -184,16 +187,40 @@ class BaseSqlDestination:
         managed_keys_present = bool({"manage_table", "on_schema_change"} & set(configured_fields))
         if not records or not hasattr(config, "manage_table") or not managed_keys_present:
             return TablePreparation(records)
-        if self._managed_table_checked:
+        cfg: Any = config
+        batch_columns = _union_columns(records)
+        normalized_batch: dict[str, str] = {}
+        collisions: dict[str, list[str]] = {}
+        for column in batch_columns:
+            normalized = self._managed_normalize_identifier(column)
+            previous = normalized_batch.get(normalized)
+            if previous is not None and previous != column:
+                collisions.setdefault(normalized, [previous]).append(column)
+            else:
+                normalized_batch[normalized] = column
+        if collisions:
+            names = sorted({name for values in collisions.values() for name in values})
+            raise ValueError(
+                f"Source column names {names} collide under the destination's "
+                "case-insensitive identifier rules. Rename them before loading."
+            )
+
+        unseen = set(normalized_batch) - self._managed_known_columns.keys()
+        if self._managed_table_checked and not unseen:
             return TablePreparation(self._filter_managed_columns(records))
 
-        cfg: Any = config
-        source_columns = _union_columns(records)
+        source_by_name = dict(self._managed_known_columns)
+        source_by_name.update(normalized_batch)
+        source_columns = list(source_by_name.values())
         active_upsert_keys = list(cfg.upsert_key) if sync_options.mode != "replace" else []
-        missing_keys = [column for column in active_upsert_keys if column not in source_columns]
+        missing_keys = [
+            column
+            for column in active_upsert_keys
+            if self._managed_normalize_identifier(column) not in source_by_name
+        ]
         if missing_keys:
             raise ValueError(
-                f"destination.upsert_key column(s) {missing_keys} are absent from the first "
+                f"destination.upsert_key column(s) {missing_keys} are absent from the "
                 "source batch; refusing schema reconciliation before any DDL or write."
             )
 
@@ -204,6 +231,38 @@ class BaseSqlDestination:
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
             destination_columns = self._managed_describe_table(cur, cfg)
+            if not destination_columns and self._managed_dry_run_created:
+                # Earlier dry-run DDL is intentionally not visible through
+                # information_schema. Simulate that approved CREATE and plan
+                # the same policy for this later batch shape.
+                new_columns = [normalized_batch[name] for name in unseen]
+                sync_options._managed_new_columns.update(new_columns)
+                if cfg.on_schema_change == "fail":
+                    raise ValueError(
+                        f"Source has new column(s) {sorted(new_columns)} not present in the "
+                        f"planned destination table {cfg.table!r}. Set "
+                        "destination.on_schema_change to ignore or append_new_columns, or "
+                        "declare/migrate the complete schema before planning."
+                    )
+                if cfg.on_schema_change == "ignore":
+                    self._managed_allowed_columns = set(self._managed_known_columns)
+                    warnings.append(
+                        f"Ignoring new source column(s) {sorted(new_columns)} for destination "
+                        f"table {cfg.table!r}; only columns in the planned table will be loaded."
+                    )
+                else:
+                    for column in new_columns:
+                        ddl.append(
+                            self._managed_build_add_column(
+                                cfg, column, sync_options._source_column_types.get(column)
+                            )
+                        )
+                self._managed_known_columns.update(normalized_batch)
+                self._managed_table_checked = True
+                return TablePreparation(
+                    self._filter_managed_columns(records), ddl=ddl, warnings=warnings
+                )
+
             if not destination_columns:
                 sync_options._managed_table_missing = True
                 if not cfg.manage_table:
@@ -213,6 +272,7 @@ class BaseSqlDestination:
                     )
                     if sync_options._planning:
                         sync_options._managed_table_unavailable_reason = message
+                        self._managed_known_columns.update(normalized_batch)
                         self._managed_table_checked = True
                         return TablePreparation(records)
                     raise ValueError(message)
@@ -223,19 +283,27 @@ class BaseSqlDestination:
                     active_upsert_keys,
                 )
                 ddl.append(statement)
-                if not dry_run:
-                    self._execute_managed_ddl(conn, cur, statement, "CREATE", cfg.table)
+                if dry_run:
+                    self._managed_dry_run_created = True
+                    self._managed_known_columns.update(normalized_batch)
+                    self._managed_table_checked = True
+                    return TablePreparation(records, ddl=ddl)
+
+                if self._execute_managed_ddl(conn, cur, statement, "CREATE", cfg.table):
                     sync_options._executed_ddl.append(statement)
-                self._managed_table_checked = True
+                # CREATE IF NOT EXISTS may have lost a race to a differently
+                # shaped table. Never trust the attempted definition: inspect
+                # the table that now exists and reconcile it below.
+                destination_columns = self._managed_describe_table(cur, cfg)
+                if not destination_columns:
+                    raise RuntimeError(
+                        f"Destination table {cfg.table!r} is still unavailable after CREATE."
+                    )
                 self._schema_cache.pop(cfg.table, None)
-                return TablePreparation(records, ddl=ddl)
 
             by_name = {
                 self._managed_normalize_identifier(column.name): column
                 for column in destination_columns
-            }
-            source_by_name = {
-                self._managed_normalize_identifier(column): column for column in source_columns
             }
             missing_upsert_columns = [
                 column
@@ -248,6 +316,7 @@ class BaseSqlDestination:
                     f"{missing_upsert_columns}. Add the columns and the required primary/unique "
                     "constraint manually; drt never adds constraints to an existing table."
                 )
+            self._managed_validate_upsert_constraint(cur, cfg, active_upsert_keys)
 
             required_but_absent = sorted(
                 column.name
@@ -266,7 +335,7 @@ class BaseSqlDestination:
                 for column in source_columns
                 if self._managed_normalize_identifier(column) not in by_name
             ]
-            sync_options._managed_new_columns = set(new_columns)
+            sync_options._managed_new_columns.update(new_columns)
             if new_columns and cfg.on_schema_change == "fail":
                 raise ValueError(
                     f"Source has new column(s) {sorted(new_columns)} not present in destination "
@@ -303,12 +372,16 @@ class BaseSqlDestination:
                         column,
                         sync_options._source_column_types.get(column),
                     )
-                    ddl.append(statement)
-                    if not dry_run:
-                        self._execute_managed_ddl(conn, cur, statement, "ALTER", cfg.table)
+                    if dry_run:
+                        ddl.append(statement)
+                    elif self._execute_managed_ddl(
+                        conn, cur, statement, "ALTER", cfg.table, column=column, config=cfg
+                    ):
+                        ddl.append(statement)
                         sync_options._executed_ddl.append(statement)
                 self._schema_cache.pop(cfg.table, None)
 
+            self._managed_known_columns.update(normalized_batch)
             self._managed_table_checked = True
             return TablePreparation(
                 self._filter_managed_columns(records),
@@ -321,23 +394,47 @@ class BaseSqlDestination:
             conn.close()
 
     def _execute_managed_ddl(
-        self, conn: Any, cur: Any, statement: str, privilege: str, table: str
-    ) -> None:
+        self,
+        conn: Any,
+        cur: Any,
+        statement: str,
+        privilege: str,
+        table: str,
+        *,
+        column: str | None = None,
+        config: Any = None,
+    ) -> bool:
         """Execute and commit one DDL statement with actionable privilege context."""
         try:
             cur.execute(statement)
             # Intentionally commit each compatible DDL before loading. This
             # gives Postgres and MySQL the same documented non-atomic contract.
             conn.commit()
+            return True
         except Exception as exc:
             try:
                 conn.rollback()
             except Exception:  # noqa: BLE001 — preserve the original DDL failure
                 pass
-            raise RuntimeError(
-                f"Could not {privilege} destination table {table!r} before loading. "
-                f"Grant {privilege} on the target schema/table or pre-provision the change."
-            ) from exc
+            if column is not None and self._managed_is_duplicate_column_error(exc):
+                destination_columns = self._managed_describe_table(cur, config)
+                normalized = self._managed_normalize_identifier(column)
+                if any(
+                    self._managed_normalize_identifier(existing.name) == normalized
+                    for existing in destination_columns
+                ):
+                    return False
+            if self._managed_is_permission_error(exc):
+                message = (
+                    f"Could not {privilege} destination table {table!r} before loading. "
+                    f"Grant {privilege} on the target schema/table or pre-provision the change."
+                )
+            else:
+                detail = redact_error_text(f"{type(exc).__name__}: {exc}")
+                message = (
+                    f"Could not {privilege} destination table {table!r} before loading: {detail}"
+                )
+            raise RuntimeError(message) from exc
 
     def _filter_managed_columns(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self._managed_allowed_columns is None:
@@ -393,6 +490,24 @@ class BaseSqlDestination:
     def _managed_describe_table(self, cur: Any, config: Any) -> list[DestinationTableColumn]:
         raise NotImplementedError
 
+    def _managed_validate_upsert_constraint(
+        self, cur: Any, config: Any, upsert_keys: list[str]
+    ) -> None:
+        del cur, config, upsert_keys
+
+    @staticmethod
+    def _managed_is_duplicate_column_error(exc: Exception) -> bool:
+        del exc
+        return False
+
+    @staticmethod
+    def _managed_is_permission_error(exc: Exception) -> bool:
+        if isinstance(exc, PermissionError):
+            return True
+        errno = exc.args[0] if exc.args and isinstance(exc.args[0], int) else None
+        sqlstate = getattr(exc, "sqlstate", None) or getattr(exc, "pgcode", None)
+        return errno in {1044, 1045, 1142, 1143, 1227} or sqlstate == "42501"
+
     def _managed_build_create_table(
         self,
         config: Any,
@@ -418,7 +533,9 @@ class BaseSqlDestination:
         """Clear per-run schema state, including after a failed first write."""
         del config, sync_options
         self._managed_table_checked = False
+        self._managed_known_columns = {}
         self._managed_allowed_columns = None
+        self._managed_dry_run_created = False
         self._schema_cache.clear()
 
     def load(

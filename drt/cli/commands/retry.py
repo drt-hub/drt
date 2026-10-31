@@ -12,6 +12,7 @@ replay verbatim) — no source extraction or profile resolution involved.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,6 +105,40 @@ def replay_dead_letters(
         }
 
     dest = get_destination(sync)
+    from drt.engine.contract import declared_destination_types
+
+    retry_started_at = datetime.now(timezone.utc).isoformat()
+    retry_t0 = time.perf_counter()
+    sync.sync._executed_ddl = []
+    sync.sync._source_column_types = declared_destination_types(
+        sync.columns, sync.sync.field_mappings
+    )
+
+    def record_retry_ddl(status: str, synced: int, failed: int, errors: list[str]) -> None:
+        """Audit only retries that actually changed destination schema."""
+        if not sync.sync._executed_ddl:
+            return
+        from drt.state.history import HistoryEntry
+
+        try:
+            bundle.history.append(
+                HistoryEntry(
+                    sync_name=sync.name,
+                    started_at=retry_started_at,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                    duration_seconds=time.perf_counter() - retry_t0,
+                    status=status,
+                    records_synced=synced,
+                    records_failed=failed,
+                    errors=errors[:5],
+                    ddl=list(sync.sync._executed_ddl),
+                )
+            )
+            bundle.history.prune(sync.name, project.history.retention_days)
+        except Exception as exc:  # noqa: BLE001 — history is best-effort
+            logging.getLogger(__name__).warning(
+                "history append for DLQ retry DDL failed for sync=%r: %s", sync.name, exc
+            )
 
     # Idempotency ledger + compliance audit log (#1099/#1100 via #1118).
     # Mirrors run_sync()'s own exclusion (drt/engine/sync.py): a staged
@@ -399,7 +434,7 @@ def replay_dead_letters(
             # above -- does it count as processed for the except block's
             # legacy-duplicate-id guard.
             processed_count += len(retry_group)
-    except Exception:
+    except Exception as exc:
         # A later chunk's dest.load() raised (documented, uncaught contract --
         # drt/destinations/base.py) before the final reconcile() below could
         # run. Persist whatever remove_ids/updates were already accumulated
@@ -436,6 +471,12 @@ def replay_dead_letters(
                 sync.name,
                 reconcile_exc,
             )
+        record_retry_ddl(
+            "partial" if succeeded else "failed",
+            succeeded,
+            max(len(to_retry) - succeeded, 1),
+            [f"{type(exc).__name__}: {exc}"],
+        )
         raise
 
     # reconcile() (#955) re-reads the queue itself rather than trusting the
@@ -453,7 +494,9 @@ def replay_dead_letters(
     final = store.reconcile(
         sync.name, remove_ids=remove_ids - {e.id for e in untouched}, updates=updates
     )
-    return {
+    status = "success" if failed_again == 0 else ("partial" if succeeded else "failed")
+    record_retry_ddl(status, succeeded, failed_again, [])
+    summary = {
         "sync": sync.name,
         "queued": len(entries),
         "retried": len(to_retry),
@@ -463,6 +506,9 @@ def replay_dead_letters(
         "remaining_depth": len(final),
         "status": "ok",
     }
+    if sync.sync._executed_ddl:
+        summary["ddl"] = list(sync.sync._executed_ddl)
+    return summary
 
 
 @app.command()
@@ -542,6 +588,8 @@ def retry(
         f"[{style}]Retry complete for '{sync_name}': "
         f"{summary['succeeded']} succeeded, {summary['still_failing']} still failing.[/{style}]"
     )
+    for statement in summary.get("ddl", []):
+        console.print(f"  DDL executed: {statement}", markup=False)
     if summary.get("skipped_duplicate"):
         console.print(
             f"[dim]{summary['skipped_duplicate']} record(s) skipped (already delivered) "

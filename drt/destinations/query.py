@@ -843,18 +843,19 @@ def _fetch_all_keys_mysql(
     clause (explicit ``%s`` list, flattened params; pymysql has no
     tuple auto-expansion)."""
     from drt.destinations.mysql import MySQLDestination
+    from drt.destinations.sql_utils import backtick_quote_ident_part
 
-    col_list = ", ".join(f"`{c}`" for c in key_cols)
+    col_list = ", ".join(backtick_quote_ident_part(c) for c in key_cols)
     table_q = MySQLDestination._quote_ident(config.table)
     where = ""
     params: list[Any] = []
     if scope_cols and scopes:
         if len(scope_cols) == 1:
             placeholders = ", ".join(["%s"] * len(scopes))
-            where = f" WHERE `{scope_cols[0]}` IN ({placeholders})"
+            where = f" WHERE {backtick_quote_ident_part(scope_cols[0])} IN ({placeholders})"
             params = [s[0] for s in scopes]
         else:
-            col_tuple = "(" + ", ".join(f"`{c}`" for c in scope_cols) + ")"
+            col_tuple = "(" + ", ".join(backtick_quote_ident_part(c) for c in scope_cols) + ")"
             row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
             placeholders = ", ".join([row] * len(scopes))
             where = f" WHERE {col_tuple} IN ({placeholders})"

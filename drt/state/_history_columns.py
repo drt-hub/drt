@@ -87,6 +87,7 @@ def resolve_optional_columns(
     add_column: Callable[[str], None] | None,
     *,
     table: str,
+    required: Iterable[str] | None = None,
 ) -> tuple[str, ...]:
     """Which optional history columns the table has, adding the missing ones.
 
@@ -104,7 +105,10 @@ def resolve_optional_columns(
         return ()
 
     present = [name for name in OPTIONAL_HISTORY_COLUMNS if name in existing]
-    missing = [name for name in OPTIONAL_HISTORY_COLUMNS if name not in existing]
+    requested = set(OPTIONAL_HISTORY_COLUMNS if required is None else required)
+    missing = [
+        name for name in OPTIONAL_HISTORY_COLUMNS if name in requested and name not in existing
+    ]
     if add_column is None or not missing:
         return tuple(present)
 

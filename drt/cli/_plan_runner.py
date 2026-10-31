@@ -310,6 +310,11 @@ def compute_plan_from_records(
             f"Sync name '{sync_name}' is defined more than once; sync names must be unique."
         )
     sync = matches[0]
+    from drt.engine.contract import declared_destination_types
+
+    sync.sync._source_column_types = declared_destination_types(
+        sync.columns, sync.sync.field_mappings
+    )
     state_bundle = build_state_bundle(project, project_dir)
     blocker = unsupported_reason(sync)
     planned_ddl: list[str] = []
@@ -325,14 +330,17 @@ def compute_plan_from_records(
             destination_impl = get_destination(sync)
             sync.sync._planning = True
             if isinstance(destination_impl, ManagedDestinationTableCapable):
-                preparation = destination_impl.prepare_table(
-                    records,
-                    sync.destination,
-                    sync.sync,
-                    dry_run=True,
-                )
-                records = preparation.records
-                planned_ddl = preparation.ddl
+                prepared_records: list[dict[str, Any]] = []
+                for offset in range(0, len(records), sync.sync.batch_size):
+                    preparation = destination_impl.prepare_table(
+                        records[offset : offset + sync.sync.batch_size],
+                        sync.destination,
+                        sync.sync,
+                        dry_run=True,
+                    )
+                    prepared_records.extend(preparation.records)
+                    planned_ddl.extend(preparation.ddl)
+                records = prepared_records
             diff = compute_diff(records, sync.destination, sync.sync, limit=sys.maxsize)
         except Exception as e:
             raise PlanCliError(f"Could not verify exact replay for '{sync_name}': {e}") from e

@@ -118,6 +118,22 @@ def test_a_successful_add_is_reported_present_and_listing_failure_means_legacy(
     assert "could not inspect columns" in caplog.text
 
 
+def test_append_with_no_optional_values_does_not_add_ddl_or_any_other_optional_column() -> None:
+    added: list[str] = []
+    assert (
+        resolve_optional_columns(lambda: ["sync_name"], added.append, table="t", required=()) == ()
+    )
+    assert added == []
+
+
+def test_append_adds_only_optional_columns_used_by_that_entry() -> None:
+    added: list[str] = []
+    assert resolve_optional_columns(
+        lambda: ["sync_name"], added.append, table="t", required=("ddl",)
+    ) == ("ddl",)
+    assert added == ["ddl"]
+
+
 def test_scalar_columns_are_plain_text_and_structured_values_stay_json() -> None:
     entry = HistoryEntry(
         sync_name="s",
