@@ -58,9 +58,25 @@ A hand-written `columns:` block always wins when both are present. `drt
 validate` warns if its names, types, or descriptions disagree with dbt (and
 `--strict` promotes the warning to an error). The manifest must still be valid:
 a missing manifest, a non-`ref()` model, a missing or ambiguous model, a model
-without declared columns, a column without `data_type`, or an unmappable type
-is a validation error. An ambiguous unqualified ref names the packages that
-define it; drt does not guess. There is no `catalog.json` fallback.
+without an **enforced dbt contract** (`config.contract.enforced: true`; plain
+documented columns are not a contract), a model without declared columns, a
+column without `data_type`, or an unmappable type is a validation error.
+Messages quote manifest text with control characters and square brackets
+replaced and a length limit, because a manifest is an artifact that can come
+from elsewhere.
+
+Limits, stated plainly:
+
+- Only an unqualified `ref('name')` resolves. A model that exists in more than
+  one package, or in several dbt model versions, is rejected as ambiguous (drt
+  does not choose); package-qualified and versioned refs are not supported, so
+  write the `columns:` block by hand for those.
+- A local override `syncs/models/<name>.sql` takes precedence over the dbt model
+  at run time, so combining it with `contract.source: dbt` is a validation
+  error (the contract would describe a query that never runs).
+- `--manifest-path` is available on `validate`, `run`, `plan`, `apply` and `docs
+  generate`; `drt build` and `drt test` read the default `target/manifest.json`.
+- There is no `catalog.json` fallback.
 
 ### dbt type normalization
 
@@ -69,13 +85,16 @@ Matching is case-insensitive, and precision/length suffixes such as
 
 | dbt `data_type` | Portable type |
 |---|---|
-| `varchar`, `text`, `string` | `string` |
-| `int`, `bigint`, `smallint` | `integer` |
-| `numeric`, `decimal`, `float`, `double`, `real` | `number` |
+| `varchar`, `char`, `character varying`, `text`, `string` | `string` |
+| `int`, `integer`, `int64`, `bigint`, `smallint`, `tinyint` | `integer` |
+| `numeric`, `number`, `decimal`, `bignumeric`, `float`, `float64`, `double`, `real` | `number` |
 | `bool`, `boolean` | `boolean` |
 | `timestamp*`, `datetime` | `timestamp` |
 | `date` | `date` |
-| `json`, `jsonb`, `variant`, `object`, `array` | `json` |
+| `json`, `jsonb`, `variant`, `object`, `array`, `struct`, `record`, `map` | `json` |
+
+BigQuery's composite spelling `ARRAY<STRING>` / `STRUCT<a INT64>` is reduced to
+its base type before matching. `NUMBER(38,0)` maps to `number`.
 
 ## When the check runs
 

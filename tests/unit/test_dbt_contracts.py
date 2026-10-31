@@ -33,12 +33,14 @@ def _node(
     package: str = "analytics",
     relation_name: str = '"warehouse"."marts"."customers"',
     columns: dict[str, dict[str, Any]] | None = None,
+    enforced: bool = True,
 ) -> dict[str, Any]:
     return {
         "resource_type": "model",
         "name": name,
         "package_name": package,
         "relation_name": relation_name,
+        "config": {"contract": {"enforced": enforced}},
         "columns": columns
         if columns is not None
         else {
@@ -474,3 +476,76 @@ def test_validate_accepts_explicit_manifest_path(
 
     assert result.exit_code == 0
     assert "customers_to_api" in result.output
+
+
+def test_adapter_native_dbt_types_map_to_the_portable_vocabulary() -> None:
+    cases = {
+        "INT64": "integer",
+        "FLOAT64": "number",
+        "BIGNUMERIC": "number",
+        "NUMBER(38,0)": "number",
+        "ARRAY<STRING>": "json",
+        "STRUCT<a INT64, b STRING>": "json",
+        "character varying(255)": "string",
+        "TIMESTAMP_TZ": "timestamp",
+    }
+    for raw, expected in cases.items():
+        assert portable_type_from_dbt(raw) == expected, raw
+
+
+def test_manifest_text_is_made_safe_before_it_reaches_messages() -> None:
+    from drt.integrations.dbt import _safe
+
+    cleaned = _safe("x\x1b[31m\n[bold]" + "y" * 200)
+    assert "\x1b" not in cleaned and "\n" not in cleaned
+    assert "[" not in cleaned and "]" not in cleaned
+    assert len(cleaned) <= 80
+
+
+def test_a_model_without_an_enforced_dbt_contract_is_rejected(tmp_path: Path) -> None:
+    _write_project(tmp_path)
+    _write_sync(tmp_path)
+    _write_manifest(tmp_path, {"model.analytics.customers": _node(enforced=False)})
+
+    with pytest.raises(ValueError, match="no enforced dbt contract"):
+        load_syncs(tmp_path)
+
+
+def test_a_local_sql_override_cannot_use_a_dbt_derived_contract(tmp_path: Path) -> None:
+    _write_project(tmp_path)
+    _write_sync(tmp_path)
+    _write_manifest(tmp_path, {"model.analytics.customers": _node()})
+    (tmp_path / "syncs" / "models").mkdir()
+    (tmp_path / "syncs" / "models" / "customers.sql").write_text("SELECT 1 AS other")
+
+    with pytest.raises(ValueError, match="local SQL override"):
+        load_syncs(tmp_path)
+
+
+def test_a_versioned_model_is_reported_as_versioned_not_just_ambiguous(tmp_path: Path) -> None:
+    _write_project(tmp_path)
+    _write_sync(tmp_path)
+    v1 = {**_node(), "version": 1}
+    v2 = {**_node(), "version": 2}
+    _write_manifest(
+        tmp_path, {"model.analytics.customers.v1": v1, "model.analytics.customers.v2": v2}
+    )
+
+    with pytest.raises(ValueError, match="several versions"):
+        load_syncs(tmp_path)
+
+
+def test_the_manifest_is_parsed_once_per_file_version(tmp_path: Path, monkeypatch) -> None:
+    import drt.integrations.dbt as dbt_module
+
+    path = _write_manifest(tmp_path, {"model.analytics.customers": _node()})
+    calls: list[int] = []
+    real_loads = dbt_module.json.loads
+    monkeypatch.setattr(dbt_module.json, "loads", lambda text: calls.append(1) or real_loads(text))
+
+    first = dbt_module._read_manifest(path)
+    second = dbt_module._read_manifest(path)
+
+    assert first is second and len(calls) == 1
+    path.write_text(json.dumps({"nodes": {}, "metadata": {"changed": True}}))
+    assert dbt_module._read_manifest(path) is not first and len(calls) == 2

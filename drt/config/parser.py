@@ -110,6 +110,12 @@ def _resolve_dbt_contract(
         raise ValueError(
             f"contract.source: dbt requires model: ref('model_name'); got {sync.model!r}."
         )
+    if (project_dir / "syncs" / "models" / f"{model_name}.sql").is_file():
+        raise ValueError(
+            f"contract.source: dbt cannot be used with ref({model_name!r}): the local SQL "
+            f"override syncs/models/{model_name}.sql runs instead of the dbt model, so the "
+            "dbt contract would describe a different query. Write columns: by hand."
+        )
     path = _manifest_path(project_dir, manifest_path)
     try:
         dbt_model = resolve_contract_from_manifest(model_name, path)
