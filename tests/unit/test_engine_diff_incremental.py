@@ -97,12 +97,28 @@ class FakeDestination:
         return result
 
 
+class FakeMirrorDestination(FakeDestination):
+    def __init__(self) -> None:
+        super().__init__()
+        self.deleted: list[dict[str, Any]] = []
+
+    def finalize_sync(self, config: DestinationConfig, sync_options: SyncOptions) -> SyncResult:
+        self.deleted.extend(sync_options._diff_removed_keys or [])
+        return SyncResult()
+
+    def supported_modes(self) -> frozenset[str]:
+        return frozenset({"mirror"})
+
+
 def _make_profile() -> BigQueryProfile:
     return BigQueryProfile(type="bigquery", project="p", dataset="d")
 
 
 def _make_diff_sync(
-    mode: str = "upsert", batch_size: int = 10, mask: dict[str, Any] | None = None
+    mode: str = "upsert",
+    batch_size: int = 10,
+    mask: dict[str, Any] | None = None,
+    columns: list[dict[str, str]] | None = None,
 ) -> SyncConfig:
     sync_opts: dict[str, Any] = {
         "mode": mode,
@@ -112,22 +128,24 @@ def _make_diff_sync(
     }
     if mask:
         sync_opts["mask"] = mask
-    return SyncConfig.model_validate(
-        {
-            "name": "diff_sync",
-            "model": "ref('table')",
-            "destination": {
-                "type": "postgres",
-                "host": "localhost",
-                "dbname": "db",
-                "user": "u",
-                "password": "p",
-                "table": "public.scores",
-                "upsert_key": ["id"],
-            },
-            "sync": sync_opts,
-        }
-    )
+    config: dict[str, Any] = {
+        "name": "diff_sync",
+        "model": "ref('table')",
+        "destination": {
+            "type": "postgres",
+            "host": "localhost",
+            "dbname": "db",
+            "user": "u",
+            "password": "p",
+            "table": "public.scores",
+            "upsert_key": ["id"],
+        },
+        "sync": sync_opts,
+    }
+    if columns is not None:
+        config["columns"] = columns
+        config["contract"] = {"enforced": True}
+    return SyncConfig.model_validate(config)
 
 
 def test_diff_strategy_chains_added_and_changed_into_the_load_path(tmp_path: Path) -> None:
@@ -300,6 +318,86 @@ def test_empty_diff_snapshot_schema_failure_blocks_removals(tmp_path: Path) -> N
     assert "'renamed_email' expected not declared, actual null" in result.errors[0]
     assert destination.calls == []
     assert destination.deleted == []
+    assert source.commit_calls == []
+
+
+def test_legacy_diff_result_without_snapshot_metadata_only_fails_when_empty(
+    tmp_path: Path,
+) -> None:
+    """An old plugin cannot authorize deletes without blocking non-empty diffs."""
+
+    class PluginSnapshotDiffResult:
+        def __init__(
+            self, added: list[dict], changed: list[dict], removed_keys: list[dict]
+        ) -> None:
+            self.added = iter(added)
+            self.changed = iter(changed)
+            self.removed_keys = iter(removed_keys)
+            self.is_first_run = False
+
+    class PluginSnapshotDiffSource(FakeSnapshotDiffSource):
+        def extract_snapshot_diff(
+            self,
+            query: str,
+            config: ProfileConfig,
+            *,
+            sync_name: str,
+            key_columns: list[str],
+            hash_columns: Any,
+            query_tags: dict[str, str] | None = None,
+        ) -> Any:
+            return PluginSnapshotDiffResult(self._added, self._changed, self._removed_keys)
+
+    source = PluginSnapshotDiffSource(added=[], changed=[], removed_keys=[{"id": 1}])
+    destination = FakeMirrorDestination()
+    sync = _make_diff_sync(mode="mirror", columns=[{"name": "id", "type": "integer"}])
+
+    result = run_sync(sync, source, destination, _make_profile(), tmp_path)
+
+    assert result.failed == 1
+    assert "return snapshot_columns or disable the contract" in result.errors[0]
+    assert result.diff_removed_keys is None
+    assert destination.calls == []
+    assert destination.deleted == []
+    assert source.commit_calls == []
+
+    nonempty_source = PluginSnapshotDiffSource(added=[{"id": 2}], changed=[], removed_keys=[])
+    nonempty_destination = FakeDestination()
+    nonempty_result = run_sync(
+        _make_diff_sync(columns=[{"name": "id", "type": "integer"}]),
+        nonempty_source,
+        nonempty_destination,
+        _make_profile(),
+        tmp_path,
+    )
+
+    assert nonempty_result.success == 1
+    assert nonempty_destination.calls == [[{"id": 2}]]
+    assert nonempty_source.commit_calls == ["diff_sync"]
+
+
+def test_diff_snapshot_sample_does_not_replace_first_batch_type_check(tmp_path: Path) -> None:
+    source = FakeSnapshotDiffSource(
+        added=[
+            {"id": 1, "payload": {"kind": "object"}},
+            {"id": 2, "payload": "scalar"},
+        ],
+        changed=[],
+        removed_keys=[],
+    )
+    destination = FakeDestination()
+    sync = _make_diff_sync(
+        columns=[
+            {"name": "id", "type": "integer"},
+            {"name": "payload", "type": "json"},
+        ]
+    )
+
+    result = run_sync(sync, source, destination, _make_profile(), tmp_path)
+
+    assert result.failed == 1
+    assert "'payload' expected json, actual string" in result.errors[0]
+    assert destination.calls == []
     assert source.commit_calls == []
 
 

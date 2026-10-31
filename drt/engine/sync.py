@@ -851,19 +851,20 @@ def _run_sync_body(
                 hash_columns=sync.sync.diff.hash_columns,
                 query_tags=query_tags,
             )
+            diff_records = chain(diff_result.added, diff_result.changed)
             # The added/changed streams do not contain unchanged rows. Check
             # the newly extracted full snapshot first so a removal-only diff
             # cannot bypass the contract and reach a destructive finalizer.
             if contract is not None and contract.enforced:
-                snapshot_sample = list(diff_result.snapshot_sample)
-                if not snapshot_sample and diff_result.snapshot_columns is not None:
+                snapshot_sample = list(getattr(diff_result, "snapshot_sample", None) or ())
+                snapshot_columns = getattr(diff_result, "snapshot_columns", None)
+                if not snapshot_sample and snapshot_columns is not None:
                     # An empty snapshot has no values to type-check, but its
                     # scratch table still has a schema. Nulls are compatible
                     # with every portable type, so this checks missing/extra
                     # names without inventing value types.
-                    snapshot_sample = [dict.fromkeys(diff_result.snapshot_columns)]
+                    snapshot_sample = [dict.fromkeys(snapshot_columns)]
                 if snapshot_sample:
-                    contract_checked = True
                     assert sync.columns is not None
                     contract_check = check_contract(
                         snapshot_sample, sync.columns, contract.on_extra_columns
@@ -872,6 +873,20 @@ def _run_sync_body(
                         contract_failed = True
                         total_result.failed += 1
                         total_result.errors.append(contract_check.message())
+                elif snapshot_columns is None:
+                    try:
+                        first_diff_record = next(diff_records)
+                    except StopIteration:
+                        contract_failed = True
+                        total_result.failed += 1
+                        total_result.errors.append(
+                            "Column contract validation failed closed: the diff source "
+                            "returned no added or changed rows and provided neither "
+                            "snapshot_sample nor snapshot_columns. Update the source to "
+                            "return snapshot_columns or disable the contract."
+                        )
+                    else:
+                        diff_records = chain((first_diff_record,), diff_records)
 
             # Masked before SyncResult.diff_removed_keys is populated below,
             # and before the _diff_removed_keys smuggle just underneath —
@@ -896,7 +911,7 @@ def _run_sync_body(
                 # every other dialect's implementation would have to ignore.
                 sync.sync._diff_removed_keys = diff_removed_keys
         records_iter = _wrap_stage_ctx(
-            chain(diff_result.added, diff_result.changed) if not contract_failed else iter(()),
+            diff_records if not contract_failed else iter(()),
             "source",
         )
     else:

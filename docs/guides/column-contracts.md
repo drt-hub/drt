@@ -38,10 +38,12 @@ extraction and before destination lookups, computed fields, field mappings,
 masking, metadata columns, or the first destination write. A violation fails
 the run through the normal result/observer path; nothing from that run has been
 sent. An empty extraction has no batch to inspect and therefore passes without
-a contract check. Diff-based incremental extraction is the exception: drt also
-checks the materialized snapshot's column names when it is empty, before any
-removal is finalized, because an empty changed schema must not turn into an
-unchecked delete-all run.
+a contract check. Diff-based incremental extraction is the exception: drt
+preflights the materialized snapshot's sample or column names before any
+removal is finalized, then still checks the first added/changed batch when one
+exists. If a diff run has no added or changed rows and its source provides
+neither snapshot metadata field, an enforced contract fails closed; the source
+must return `snapshot_columns`, or the contract must be disabled.
 
 The check unions keys across every row in the first batch, which supports
 sparse records. It checks all non-null values in that batch and reports every
