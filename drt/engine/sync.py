@@ -36,6 +36,7 @@ from drt.destinations.lookup import (
     detect_ambiguous_lookup_ordering,
 )
 from drt.engine.computed_fields import apply_computed_fields
+from drt.engine.contract import check_contract, drop_extra_columns
 from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
@@ -834,6 +835,9 @@ def _run_sync_body(
     # drained eagerly (bounded by the removed set, not the table — see
     # SnapshotDiffResult) for SyncResult.diff_removed_keys and
     # mirror.strategy: diff's destination-side finalize pass.
+    contract = sync.contract if sync.columns is not None else None
+    contract_checked = False
+    contract_failed = False
     diff_removed_keys: list[dict[str, Any]] | None = None
     if sync.sync.incremental_strategy == "diff":
         if not isinstance(source, SnapshotDiffSource):
@@ -859,6 +863,43 @@ def _run_sync_body(
                 hash_columns=sync.sync.diff.hash_columns,
                 query_tags=query_tags,
             )
+            diff_records = chain(diff_result.added, diff_result.changed)
+            # The added/changed streams do not contain unchanged rows. Check
+            # the newly extracted full snapshot first so a removal-only diff
+            # cannot bypass the contract and reach a destructive finalizer.
+            if contract is not None and contract.enforced:
+                snapshot_sample = list(getattr(diff_result, "snapshot_sample", None) or ())
+                snapshot_columns = getattr(diff_result, "snapshot_columns", None)
+                if not snapshot_sample and snapshot_columns is not None:
+                    # An empty snapshot has no values to type-check, but its
+                    # scratch table still has a schema. Nulls are compatible
+                    # with every portable type, so this checks missing/extra
+                    # names without inventing value types.
+                    snapshot_sample = [dict.fromkeys(snapshot_columns)]
+                if snapshot_sample:
+                    assert sync.columns is not None
+                    contract_check = check_contract(
+                        snapshot_sample, sync.columns, contract.on_extra_columns
+                    )
+                    if not contract_check.passed:
+                        contract_failed = True
+                        total_result.failed += 1
+                        total_result.errors.append(contract_check.message())
+                elif snapshot_columns is None:
+                    try:
+                        first_diff_record = next(diff_records)
+                    except StopIteration:
+                        contract_failed = True
+                        total_result.failed += 1
+                        total_result.errors.append(
+                            "Column contract validation failed closed: the diff source "
+                            "returned no added or changed rows and provided neither "
+                            "snapshot_sample nor snapshot_columns. Update the source to "
+                            "return snapshot_columns or disable the contract."
+                        )
+                    else:
+                        diff_records = chain((first_diff_record,), diff_records)
+
             # Masked before SyncResult.diff_removed_keys is populated below,
             # and before the _diff_removed_keys smuggle just underneath —
             # both the removed-keys observability result and
@@ -873,14 +914,18 @@ def _run_sync_body(
             # (destination-facing) passed straight into the *source* query,
             # so a field_mappings rename of an upsert_key column doesn't fit
             # this strategy's extraction step either, independent of this.
-            diff_removed_keys = apply_mask(list(diff_result.removed_keys), sync.sync.mask)
-            # Smuggled to the destination side the same way _query_tags/
-            # _sync_name already are (#1110) — mirror.strategy: diff reads
-            # this in BaseSqlDestination._finalize_mirror_diff instead of
-            # finalize_sync()'s duck-typed signature growing a parameter
-            # every other dialect's implementation would have to ignore.
-            sync.sync._diff_removed_keys = diff_removed_keys
-        records_iter = _wrap_stage_ctx(chain(diff_result.added, diff_result.changed), "source")
+            if not contract_failed:
+                diff_removed_keys = apply_mask(list(diff_result.removed_keys), sync.sync.mask)
+                # Smuggled to the destination side the same way _query_tags/
+                # _sync_name already are (#1110) — mirror.strategy: diff reads
+                # this in BaseSqlDestination._finalize_mirror_diff instead of
+                # finalize_sync()'s duck-typed signature growing a parameter
+                # every other dialect's implementation would have to ignore.
+                sync.sync._diff_removed_keys = diff_removed_keys
+        records_iter = _wrap_stage_ctx(
+            diff_records if not contract_failed else iter(()),
+            "source",
+        )
     else:
         records_iter = _staged_source_iter(
             source,
@@ -909,7 +954,6 @@ def _run_sync_body(
     plan_payload_records: list[dict[str, Any]] | None = (
         [] if dry_run and compute_diff and sync.sync._capture_plan_payload else None
     )
-
     # Idempotency ledger (#1099) — resolve the dedup key template once, not
     # per batch. Two destination shapes are out of scope for the first cut,
     # both because a batch's reported success there isn't the same thing as
@@ -989,6 +1033,31 @@ def _run_sync_body(
                         str_val = _stringify_cursor_value(val)
                         if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
                             new_cursor_value = str_val
+
+            # Opt-in model-output contract (#761). It sees the raw source
+            # batch: destination lookups and payload transforms below are not
+            # part of what the model emitted. Validation happens exactly once,
+            # before the first destination write; a failure becomes a normal
+            # failed SyncResult reported through the observer, not an exception.
+            if contract is not None and contract.enforced and not contract_checked:
+                contract_checked = True
+                assert sync.columns is not None
+                contract_check = check_contract(
+                    record_batch, sync.columns, contract.on_extra_columns
+                )
+                if not contract_check.passed:
+                    contract_failed = True
+                    total_result.failed += 1
+                    total_result.errors.append(contract_check.message())
+                    new_cursor_value = durable_cursor_value
+                    break
+
+            # ``drop`` is a payload policy, so it applies to every extracted
+            # batch even though schema/type validation deliberately samples
+            # only the first. Fresh dicts keep source-owned rows unmodified.
+            if contract is not None and contract.enforced and contract.on_extra_columns == "drop":
+                assert sync.columns is not None
+                record_batch = drop_extra_columns(record_batch, sync.columns)
 
             # Apply destination lookups (FK resolution)
             lookup_fatal = False
@@ -1314,7 +1383,7 @@ def _run_sync_body(
     # (e.g. swap-finalize for replace_strategy=swap on Postgres/MySQL/ClickHouse).
     # The hook is intentionally NOT a Protocol — destinations opt in by simply
     # defining a finalize_sync() method.
-    if not is_staged and not dry_run:
+    if not is_staged and not dry_run and not contract_failed:
         finalizer = getattr(destination, "finalize_sync", None)
         if callable(finalizer):
             with _stage_ctx("destination"):

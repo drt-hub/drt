@@ -462,6 +462,31 @@ def test_partial_extraction_is_never_an_available_plan(
     assert not (project / "plan.json").exists()
 
 
+def test_contract_violation_is_reported_clearly_and_writes_no_plan(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.engine import sync as sync_module
+
+    _patch_engine(monkeypatch, DiffResult(total_source_rows=0), [])
+
+    class _Failed:
+        failed = 1
+        interrupted = False
+        cursor_value_used: str | None = None
+        diff = DiffResult(total_source_rows=0)
+        errors = ["Column contract violation: 'id' expected integer, actual string."]
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _Failed())
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--out", "plan.json"])
+
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert "Column contract violation" in output
+    assert "expected integer, actual string" in output
+    assert not (project / "plan.json").exists()
+
+
 def test_unsupported_sync_is_refused_before_the_engine_runs(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

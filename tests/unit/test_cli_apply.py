@@ -309,6 +309,51 @@ def test_exact_apply_ignores_source_drift_and_deletes_payload_after_success(
     assert artifact["results"][0]["exact"] is True
 
 
+def test_exact_apply_preserves_post_transform_payload_with_column_contract(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.cli._apply_flow import load_exact_payload
+    from drt.destinations.base import SyncResult
+
+    cfg = {
+        **SYNC_YML,
+        "columns": [
+            {"name": "id", "type": "integer"},
+            {"name": "name", "type": "string"},
+        ],
+        "contract": {"enforced": True, "on_extra_columns": "drop"},
+        "sync": {
+            "mode": "upsert",
+            "computed_fields": {"tier": "gold"},
+            "field_mappings": {"name": "full_name"},
+        },
+    }
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    world.added = [{"id": 1, "name": "a", "ignored": "drop me"}]
+    loaded_rows: list[dict[str, Any]] = []
+
+    class Destination:
+        def load(self, records: list[dict[str, Any]], *_args: Any) -> SyncResult:
+            loaded_rows.extend(dict(record) for record in records)
+            return SyncResult(success=len(records))
+
+    _use_real_engine_with_io(monkeypatch, world, Destination())
+    _exact_plan(project, monkeypatch)
+    planned_rows = load_exact_payload(
+        (project / "plan.json").read_text(),
+        project / "plan.json.payload",
+        project_dir=project,
+    ).records
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    assert planned_rows == [{"id": 1, "full_name": "a", "tier": "gold"}]
+    assert loaded_rows == planned_rows
+
+
 def test_noop_exact_apply_deletes_payload_after_success(
     project: Path,
     world: _World,

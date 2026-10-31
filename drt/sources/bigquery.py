@@ -390,7 +390,7 @@ class BigQuerySource:
         scratch_id = _managed_table_id(config, scratch_table)
         run_token = str(uuid.uuid4())
 
-        def _setup() -> tuple[bool, bool, list[str]]:
+        def _setup() -> tuple[bool, bool, list[str], list[str]]:
             self.ensure_managed_schema(config)
             client = self._build_client(config)
             # A destination query job with WRITE_TRUNCATE materializes the
@@ -435,9 +435,9 @@ class BigQuerySource:
                         column not in baseline_columns for column in diff_columns
                     )
                     diff_columns = [column for column in diff_columns if column in baseline_columns]
-            return is_first_run, reclassify_all_existing, diff_columns
+            return is_first_run, reclassify_all_existing, diff_columns, all_columns
 
-        is_first_run, reclassify_all_existing, diff_columns = with_retry(
+        is_first_run, reclassify_all_existing, diff_columns, snapshot_columns = with_retry(
             _setup, RetryConfig(), retry_on=self._is_transient
         )
 
@@ -495,11 +495,25 @@ class BigQuerySource:
             else:
                 changed = iter(())
 
+        def snapshot_sample() -> Iterator[dict[str, Any]]:
+            def _connect_and_list() -> tuple[Any, Any]:
+                client = self._build_client(config)
+                self._assert_snapshot_token(client, config, scratch_table, run_token, sync_name)
+                table_ref = scratch_id
+                return client, client.list_rows(table_ref, max_results=1)
+
+            client, rows = with_retry(_connect_and_list, RetryConfig(), retry_on=self._is_transient)
+            for row in rows:
+                yield dict(row)
+            self._assert_snapshot_token(client, config, scratch_table, run_token, sync_name)
+
         return SnapshotDiffResult(
+            snapshot_sample=snapshot_sample(),
             added=added,
             changed=changed,
             removed_keys=removed_keys,
             is_first_run=is_first_run,
+            snapshot_columns=snapshot_columns,
         )
 
     def _stream_query(
