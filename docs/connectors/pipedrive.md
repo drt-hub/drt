@@ -34,9 +34,9 @@ Set `PIPEDRIVE_API_TOKEN` to your Pipedrive API token. In this example the model
 | `type`         | `"pipedrive"`  | —                                  | Required                                                                                     |
 | `api_token`    | string \| null | null                               | API token. Prefer `api_token_env` so no secret sits in YAML                                  |
 | `api_token_env`| string \| null | `PIPEDRIVE_API_TOKEN`              | Name of the environment variable that holds the API token                                    |
-| `base_url`     | string \| null | `https://api.pipedrive.com/api/v2` | Override the API base URL (must start with `http://` or `https://`)                          |
+| `base_url` | string \| null | `https://api.pipedrive.com/api/v2` | Override the API base URL. Must use `https` (plain `http` is accepted only for `localhost`) |
 | `object`       | `"person"`     | `person`                           | Pipedrive object to write. Only `person` is supported for now                                |
-| `match_field`  | string         | `email`                            | Column used to find an existing person: `email`, `name` or `phone`                           |
+| `match_field` | string | `email` | Column used to find an existing person: `email`, `name` or `phone`. A list or `{value, primary}` object is reduced to one trimmed value (the primary entry, else the first) |
 | `retry`        | object \| null | null                               | Retry settings; overrides `sync.retry` as a whole when set                                   |
 | `rate_limit`   | object \| null | null                               | Request pacing; overrides `sync.rate_limit` as a whole when set                              |
 
@@ -44,7 +44,7 @@ At least one of `api_token` and `api_token_env` is required.
 
 ## Authentication
 
-The token is sent in the `x-api-token` request header and never in the URL, so it cannot end up in request logs. A Pipedrive API token belongs to one user in one company, and requests can do whatever that user is allowed to do. OAuth is not supported.
+The token is sent in the `x-api-token` request header and never in the URL, so it cannot end up in request logs. A Pipedrive API token belongs to one user in one company, and requests can do whatever that user is allowed to do. OAuth is not supported. `base_url` must use `https`; plain `http` is accepted only for `localhost` (for tests), so the token is never sent unencrypted to another host.
 
 ## How matching works
 
@@ -58,9 +58,9 @@ For every row, drt reads the value of the `match_field` column and searches Pipe
 
 drt never guesses which of several matching people to update. Skipped rows are counted as `skipped`, and the ones skipped because of the policy are also counted in `skipped_no_match`. A row with an empty `match_field` value is a row error, and so is a search response that drt cannot read: it does not write in that case, because it could create a duplicate.
 
-Within one batch, match values are remembered (case-insensitively). A second row with the same key updates the person the first row just created, or found, without searching again. If Pipedrive ever answers a create without returning the new person's id, a later row with the same key becomes a row error rather than risking a duplicate.
+If the `match_field` column holds structured data (for example a list of emails, or `{"value": ..., "primary": true}` objects), drt reduces it to one trimmed value, the primary entry or else the first, and uses that same value for the search, the memory described below and the create. An empty result is a row error.
 
-The memory lasts for one batch (one `load()` call). Across batches a later row relies on Pipedrive's search to find a person created earlier in the run, and the search index has been reported to lag briefly after a create. Keep rows that share a key inside one batch, or deduplicate them in your model query.
+Match values are remembered for the whole sync (case-insensitively). A later row with the same key, even in a later batch, updates the person that was found or created earlier instead of searching again or creating a duplicate; this also covers Pipedrive's search index not yet showing a person created moments ago. If Pipedrive ever answers a create without returning the new person's id, a later row with the same key becomes a row error rather than risking a duplicate. The memory holds one small entry per distinct match value in the run and is cleared when the run ends.
 
 ## Mapping columns to Pipedrive fields
 
@@ -70,15 +70,15 @@ The memory lasts for one batch (one `load()` call). Across batches a later row r
 |-----------------------|--------------------------------------------------------------------------------------|
 | `name`                | `name` (required when a person is created)                                           |
 | `owner_id`, `org_id`, `visible_to`, `label_ids` | The Pipedrive field of the same name                       |
-| `email` / `emails`    | `emails: [{value, primary}]`. Accepts one value, a list of values, or Pipedrive objects. The first entry is marked primary if none is |
-| `phone` / `phones`    | `phones: [{value, primary}]`, same rules                                             |
+| `email` / `emails` | `emails: [{value, primary}]`, **only when a person is created**. Accepts one value, a list of values, or Pipedrive objects. The first entry is marked primary if none is |
+| `phone` / `phones` | `phones: [{value, primary}]`, **only when a person is created**, same rules |
 | **any other column**  | `custom_fields[<column name>]`                                                       |
 
 **Custom fields:** Pipedrive stores custom fields under randomly generated 40-character keys. drt does not look these up for you, so `field_mappings` must rename every custom-field column to Pipedrive's key (see the example above; the keys are listed by Pipedrive's Person fields API). An unknown key is **not dropped**: it is sent as is, Pipedrive rejects it, and the API's message becomes a row error for that record.
 
 A `NULL` in a custom-field column is sent as `null`, which Pipedrive treats as "clear this field". Filter or `COALESCE` such values in your model if you do not want existing values cleared.
 
-When a person is updated, the `match_field` column itself is left out of the update because it already matches. An update with nothing else to change is counted as `skipped`.
+When a person is updated, `email`, `emails`, `phone` and `phones` columns are never sent: Pipedrive replaces whole contact lists, so sending them would wipe the person's other addresses and numbers. These columns set the contact lists only when a person is created. The `match_field` column is also left out of an update, because it already matches. An update with nothing else to change is counted as `skipped`.
 
 ## Sync modes
 
@@ -86,7 +86,7 @@ When a person is updated, the `match_field` column itself is left out of the upd
 
 ## Errors and retries
 
-- Each failed row becomes a row error with the HTTP status and the first 500 characters of Pipedrive's response, and `sync.on_error: skip` (default) continues with the next row. With `on_error: fail`, drt stops at the first failed row and the remaining rows are not attempted.
+- Each failed row becomes a row error with the HTTP status and the first 500 characters of Pipedrive's response. With `sync.on_error: fail` (the default), drt stops at the first failed row and the remaining rows are not attempted; with `on_error: skip`, drt records the row error and continues with the next row.
 - Transient errors (HTTP 429 and 5xx) are retried with exponential backoff by drt's shared retry layer; configure it with `retry`. A 429 caused by an exhausted daily budget keeps failing until the budget resets.
 - A missing token raises an error for the whole batch. An empty batch returns immediately without contacting Pipedrive.
 

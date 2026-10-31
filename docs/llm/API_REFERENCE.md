@@ -1276,7 +1276,7 @@ No extra package is needed.
 destination:
   type: pipedrive
   api_token_env: PIPEDRIVE_API_TOKEN     # default; or api_token (prefer the env var)
-  base_url: https://api.pipedrive.com/api/v2   # optional: this is the default
+  base_url: https://api.pipedrive.com/api/v2   # optional, https only: this is the default
   object: person                         # only person is supported for now
   match_field: email                     # email | name | phone: column for the exact search
   retry:                                 # optional: overrides sync.retry as a whole
@@ -1294,7 +1294,7 @@ sync:
 Each row is looked up with an exact search on `match_field`; one match is updated
 (`PATCH`), no match is created (`POST`), and more than one match is a RowError with
 nothing written. `name`, `owner_id`, `org_id`, `visible_to` and `label_ids` pass
-through, `email`/`phone` become `emails`/`phones` lists, and every other column goes to
+through, `email`/`phone` become `emails`/`phones` lists (sent only when a person is created), and every other column goes to
 `custom_fields`, so `field_mappings` must rename it to Pipedrive's 40-character key (an
 unknown key is rejected by Pipedrive and becomes a per-row error). The token is sent in
 the `x-api-token` header. Each row costs about 25 API tokens (search 20 + write 5). See

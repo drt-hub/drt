@@ -348,9 +348,15 @@ class PipedriveDestinationConfig(DescribableConfig):
     @field_validator("base_url", mode="after")
     @classmethod
     def _check_base_url(cls, value: str | None) -> str | None:
-        if value is not None and not value.startswith(("http://", "https://")):
-            raise ValueError("base_url must start with http:// or https://.")
-        return value
+        if value is None:
+            return value
+        parsed = urlparse(value)
+        host = parsed.hostname or ""
+        if parsed.scheme == "https" and host:
+            return value
+        if parsed.scheme == "http" and host in {"localhost", "127.0.0.1", "::1"}:
+            return value  # plain http only for local test servers
+        raise ValueError("base_url must use https (plain http is only allowed for localhost).")
 
     @model_validator(mode="after")
     def _check_api_token(self) -> PipedriveDestinationConfig:

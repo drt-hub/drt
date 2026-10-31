@@ -40,3 +40,32 @@ def test_base_url_defaults_to_none_and_must_be_http() -> None:
     assert PipedriveDestinationConfig(type="pipedrive").base_url is None
     with pytest.raises(ValidationError, match="base_url"):
         PipedriveDestinationConfig(type="pipedrive", base_url="ftp://example.com")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.pipedrive.com/api/v2",
+        "https://example.com",
+        "http://localhost:8080/api/v2",
+        "http://127.0.0.1:9000",
+    ],
+)
+def test_base_url_accepts_https_and_local_http(url: str) -> None:
+    assert PipedriveDestinationConfig(type="pipedrive", base_url=url).base_url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://api.pipedrive.com/api/v2",
+        "ftp://example.com",
+        "https://",
+        "http://localhost.evil.example",
+        "http://localhost@evil.example",
+        "api.pipedrive.com",
+    ],
+)
+def test_base_url_rejects_plain_http_and_other_schemes(url: str) -> None:
+    with pytest.raises(ValidationError, match="base_url"):
+        PipedriveDestinationConfig(type="pipedrive", base_url=url)

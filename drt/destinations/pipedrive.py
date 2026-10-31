@@ -6,19 +6,27 @@ POSTed when not found. Only ``object: person`` is supported for now.
 
 Row -> payload mapping (columns arrive already renamed by ``sync.field_mappings``):
 - ``name``, ``owner_id``, ``org_id``, ``visible_to``, ``label_ids`` pass through;
-- ``email`` / ``phone`` become Pipedrive's ``emails`` / ``phones`` lists;
+- ``email`` / ``phone`` become Pipedrive's ``emails`` / ``phones`` lists, but only when a
+  person is created: Pipedrive replaces whole contact lists on update, so sending them
+  would wipe the person's other addresses and numbers;
 - every other column goes into ``custom_fields``, so ``field_mappings`` must rename it to
   Pipedrive's 40-character field key. An unknown key is rejected by Pipedrive and surfaces
   as a per-row error carrying the API's message; nothing is silently dropped.
 
+A structured match value (a list of emails, or a ``{value, primary}`` object) is reduced to
+one trimmed scalar, the primary entry or else the first, and that scalar is used for the
+search, the cache key and the create.
+
 The token is sent in the ``x-api-token`` header, never in the URL, so it cannot end up in
 request logs. Each row spends about 20 API tokens on the search plus 5 on the write.
-Repeated match values within one batch are remembered: a second row with the same key
-updates the person the first row just created instead of creating a duplicate.
+Match values are remembered for the whole sync (the destination instance keeps them until
+the engine calls ``reset_write_state``): a later row with the same key, even in a later
+batch, updates the person found or created earlier instead of creating a duplicate.
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import httpx
@@ -41,9 +49,23 @@ _PASSTHROUGH_KEYS = frozenset({"name", "owner_id", "org_id", "visible_to", "labe
 _CONTACT_KEYS = {"email": "emails", "emails": "emails", "phone": "phones", "phones": "phones"}
 
 
-def _keys_for(field: str) -> frozenset[str]:
-    """Column names that carry the same data as ``field`` (email/emails, phone/phones)."""
-    return frozenset({field, f"{field}s"}) if field in ("email", "phone") else frozenset({field})
+def _match_value(raw: Any) -> str:
+    """Reduce a match column to one trimmed scalar (empty string when there is none).
+
+    Warehouses often hold emails as structured values such as
+    ``[{"value": "a@example.com", "primary": True}]``. ``str()`` of that would never match
+    anything in Pipedrive, so every run would create a duplicate. Pick the primary entry,
+    or the first one.
+    """
+    if isinstance(raw, (list, tuple)):
+        entries = [item for item in raw if item is not None and item != ""]
+        if not entries:
+            return ""
+        primary = [item for item in entries if isinstance(item, dict) and item.get("primary")]
+        return _match_value((primary or entries)[0])
+    if isinstance(raw, dict):
+        return _match_value(raw.get("value"))
+    return "" if raw is None else str(raw).strip()
 
 
 def _contact_list(value: Any) -> list[dict[str, Any]]:
@@ -64,18 +86,20 @@ def _build_payload(
 ) -> dict[str, Any]:
     """Map one warehouse row to a Pipedrive person payload.
 
-    On update the match field itself is left out: it already matches, and sending
-    ``emails`` / ``phones`` would replace the person's other addresses and numbers.
+    On update the contact lists (``emails`` / ``phones``) are never sent: Pipedrive replaces
+    the whole list, which would wipe the person's other addresses and numbers. The match
+    field itself is also left out because it already matches.
     """
-    skip = _keys_for(skip_field) if skip_field else frozenset()
     payload: dict[str, Any] = {}
     custom_fields: dict[str, Any] = {}
     for key, value in record.items():
-        if key in skip:
+        if key == skip_field:
             continue
         if key in _PASSTHROUGH_KEYS:
             payload[key] = value
         elif key in _CONTACT_KEYS:
+            if not creating:
+                continue
             contacts = _contact_list(value)
             if contacts:
                 payload[_CONTACT_KEYS[key]] = contacts
@@ -154,6 +178,13 @@ class _PipedriveApi:
 class PipedriveDestination:
     """Create or update Pipedrive persons, matched by an exact search."""
 
+    def __init__(self) -> None:
+        # (token digest, base URL, match field) -> case-folded match value -> person id.
+        # Lives on the instance, i.e. for the whole sync: the engine calls load() once per
+        # batch, and Pipedrive's search index may not show a person created in an earlier
+        # batch yet. None means "created in this sync, but the response had no id".
+        self._known_ids: dict[tuple[str, str, str], dict[str, int | None]] = {}
+
     def load(
         self,
         records: list[dict[str, Any]],
@@ -173,9 +204,9 @@ class PipedriveDestination:
 
         result = SyncResult()
         base_url = (config.base_url or _PIPEDRIVE_API).rstrip("/")
-        # match value (case-folded) -> person id, for rows found or created in this batch.
-        # None means "created in this batch, but Pipedrive did not return the id".
-        known_ids: dict[str, int | None] = {}
+        # The token itself is never retained: only its digest scopes the cache.
+        scope = (hashlib.sha256(token.encode("utf-8")).hexdigest(), base_url, config.match_field)
+        known_ids = self._known_ids.setdefault(scope, {})
         with httpx.Client(timeout=30.0) as client:
             api = _PipedriveApi(
                 client,
@@ -206,6 +237,12 @@ class PipedriveDestination:
                         break
         return result
 
+    def reset_write_state(
+        self, config: DestinationConfig | None, sync_options: SyncOptions | None
+    ) -> None:
+        """The engine calls this after every run, including raised exits."""
+        self._known_ids.clear()
+
     @staticmethod
     def _load_one(
         api: _PipedriveApi,
@@ -215,8 +252,7 @@ class PipedriveDestination:
         known_ids: dict[str, int | None],
         result: SyncResult,
     ) -> None:
-        raw = record.get(config.match_field)
-        term = "" if raw is None else str(raw).strip()
+        term = _match_value(record.get(config.match_field))
         if not term:
             raise ValueError(
                 f"Pipedrive: record has no value for match_field {config.match_field!r}."
@@ -228,7 +264,7 @@ class PipedriveDestination:
             person_id = known_ids[cache_key]
             if person_id is None:
                 raise ValueError(
-                    "Pipedrive: an earlier row in this run created this person but the "
+                    "Pipedrive: an earlier row in this sync created this person but the "
                     "response had no id; not writing, to avoid creating a duplicate."
                 )
         else:
@@ -247,7 +283,8 @@ class PipedriveDestination:
                 result.skipped += 1
                 result.skipped_no_match += 1
                 return
-            known_ids[cache_key] = api.create(_build_payload(record, creating=True))
+            create_record = {**record, config.match_field: term}
+            known_ids[cache_key] = api.create(_build_payload(create_record, creating=True))
         else:
             if policy == "create_only":
                 result.skipped += 1
@@ -255,7 +292,7 @@ class PipedriveDestination:
                 return
             payload = _build_payload(record, creating=False, skip_field=config.match_field)
             if not payload:
-                result.skipped += 1  # nothing to change besides the match field itself
+                result.skipped += 1  # nothing to change besides the match field and contacts
                 return
             api.update(person_id, payload)
         result.success += 1

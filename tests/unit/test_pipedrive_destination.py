@@ -419,3 +419,136 @@ def test_list_valued_phones_drop_empty_entries_and_mark_the_first_primary(
         {"value": "555", "primary": True},
         {"value": "666"},
     ]
+
+
+def test_update_never_sends_contact_lists(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request(_SEARCH, method="GET").respond_with_json(_search_result(42))
+    httpserver.expect_request(f"{_PERSONS}/42", method="PATCH").respond_with_json(
+        {"success": True, "data": {"id": 42}}
+    )
+    _use_server(httpserver, monkeypatch)
+
+    record = {
+        "name": "Ada",
+        "email": "ada@example.com",
+        "phone": "555",
+        "phones": ["666"],
+        "abc123": "gold",
+    }
+    result = PipedriveDestination().load([record], _config(), _options())
+
+    assert (result.success, result.failed) == (1, 0)
+    assert _body(httpserver, 1) == {"name": "Ada", "custom_fields": {"abc123": "gold"}}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_term"),
+    [
+        ([{"value": " Ada@Example.com ", "primary": True}], "Ada@Example.com"),
+        (
+            [{"value": "first@example.com"}, {"value": "main@example.com", "primary": True}],
+            "main@example.com",
+        ),
+        (["one@example.com", "two@example.com"], "one@example.com"),
+        ({"value": "ada@example.com", "primary": True}, "ada@example.com"),
+        ("  ada@example.com  ", "ada@example.com"),
+    ],
+)
+def test_structured_match_values_are_reduced_to_one_scalar(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch, raw: Any, expected_term: str
+) -> None:
+    httpserver.expect_request(_SEARCH, method="GET").respond_with_json(_search_result())
+    httpserver.expect_request(_PERSONS, method="POST").respond_with_json(
+        {"success": True, "data": {"id": 11}}
+    )
+    _use_server(httpserver, monkeypatch)
+
+    result = PipedriveDestination().load([{"name": "Ada", "email": raw}], _config(), _options())
+
+    assert (result.success, result.failed) == (1, 0)
+    search_request, _ = httpserver.log[0]
+    assert search_request.args["term"] == expected_term
+    assert _body(httpserver, 1)["emails"] == [{"value": expected_term, "primary": True}]
+
+
+@pytest.mark.parametrize("raw", [[], [None, ""], {}, {"value": None}, "   "])
+def test_empty_structured_match_value_is_a_row_error(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch, raw: Any
+) -> None:
+    _use_server(httpserver, monkeypatch)
+
+    result = PipedriveDestination().load([{"name": "Ada", "email": raw}], _config(), _options())
+
+    assert (result.success, result.failed) == (0, 1)
+    assert httpserver.log == []
+
+
+def test_known_people_are_remembered_across_load_calls(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request(_SEARCH, method="GET").respond_with_json(_search_result())
+    httpserver.expect_request(_PERSONS, method="POST").respond_with_json(
+        {"success": True, "data": {"id": 11}}
+    )
+    httpserver.expect_request(f"{_PERSONS}/11", method="PATCH").respond_with_json(
+        {"success": True, "data": {"id": 11}}
+    )
+    _use_server(httpserver, monkeypatch)
+
+    destination = PipedriveDestination()
+    first = destination.load([_RECORD], _config(), _options())
+    second = destination.load(
+        [{"name": "Ada L.", "email": "ADA@example.com"}], _config(), _options()
+    )
+
+    assert (first.success, second.success) == (1, 1)
+    assert _calls(httpserver) == [
+        ("GET", _SEARCH),
+        ("POST", _PERSONS),
+        ("PATCH", f"{_PERSONS}/11"),
+    ]
+
+
+def test_reset_write_state_forgets_known_people(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request(_SEARCH, method="GET").respond_with_json(_search_result())
+    httpserver.expect_request(_PERSONS, method="POST").respond_with_json(
+        {"success": True, "data": {"id": 11}}
+    )
+    _use_server(httpserver, monkeypatch)
+
+    destination = PipedriveDestination()
+    destination.load([_RECORD], _config(), _options())
+    destination.reset_write_state(None, None)
+    destination.load([_RECORD], _config(), _options())
+
+    assert _calls(httpserver) == [
+        ("GET", _SEARCH),
+        ("POST", _PERSONS),
+        ("GET", _SEARCH),
+        ("POST", _PERSONS),
+    ]
+
+
+def test_known_people_are_not_shared_between_tokens(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpserver.expect_request(_SEARCH, method="GET").respond_with_json(_search_result())
+    httpserver.expect_request(_PERSONS, method="POST").respond_with_json(
+        {"success": True, "data": {"id": 11}}
+    )
+    _use_server(httpserver, monkeypatch)
+
+    destination = PipedriveDestination()
+    destination.load([_RECORD], _config(api_token="token-a"), _options())
+    destination.load([_RECORD], _config(api_token="token-b"), _options())
+
+    assert _calls(httpserver) == [
+        ("GET", _SEARCH),
+        ("POST", _PERSONS),
+        ("GET", _SEARCH),
+        ("POST", _PERSONS),
+    ]
