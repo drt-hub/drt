@@ -10,7 +10,7 @@ from pathlib import Path
 from drt import __version__
 from drt._redaction import redact_error_text as _redact_error_text
 from drt.config.duration import parse_max_age
-from drt.config.fingerprint import sync_fingerprints
+from drt.config.fingerprint import resolved_sync_fingerprint
 from drt.config.models import SyncConfig
 from drt.config.parser import load_project, load_syncs_safe
 from drt.docs.manifest import (
@@ -241,7 +241,9 @@ def _declared_columns(sync_cfg: SyncConfig) -> tuple[SyncColumn, ...]:
     )
 
 
-def collect_dbt_exposure_inputs(project_dir: Path = Path(".")) -> DbtExposureInputs:
+def collect_dbt_exposure_inputs(
+    project_dir: Path = Path("."), manifest_path: Path | None = None
+) -> DbtExposureInputs:
     """Collect deterministic, ref-only inputs for dbt exposure generation.
 
     ``Sync.model`` is intentionally absent from the public docs manifest: raw
@@ -254,7 +256,11 @@ def collect_dbt_exposure_inputs(project_dir: Path = Path(".")) -> DbtExposureInp
 
     model_refs: dict[str, str] = {}
     skipped: dict[str, str] = {}
-    result = load_syncs_safe(project_dir)
+    result = (
+        load_syncs_safe(project_dir)
+        if manifest_path is None
+        else load_syncs_safe(project_dir, manifest_path=manifest_path)
+    )
     for sync in sorted(result.syncs, key=lambda item: item.name):
         model_ref = parse_ref(sync.model)
         if model_ref is None:
@@ -275,6 +281,7 @@ def build_manifest(
     include_state: bool = False,
     full_labels: bool = False,
     history_depth: int = 10,
+    manifest_path: Path | None = None,
 ) -> Manifest:
     """Build a `Manifest` from sync YAMLs + project config under *project_dir*.
 
@@ -295,8 +302,14 @@ def build_manifest(
     repo like the rest of the catalog, so they are always emitted.
     """
     project = load_project(project_dir)
-    syncs_result = load_syncs_safe(project_dir)
-    fingerprints = sync_fingerprints(project_dir)
+    syncs_result = (
+        load_syncs_safe(project_dir)
+        if manifest_path is None
+        else load_syncs_safe(project_dir, manifest_path=manifest_path)
+    )
+    fingerprints = {
+        sync.name: resolved_sync_fingerprint(sync, project_dir) for sync in syncs_result.syncs
+    }
 
     states: dict[str, SyncState] = {}
     dlq_depths: dict[str, int] = {}

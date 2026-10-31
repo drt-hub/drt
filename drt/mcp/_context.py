@@ -49,19 +49,39 @@ class McpContext:
             return self.load_project()
         return ProjectConfig(name="drt")
 
-    def load_syncs(self, vars: dict[str, Any] | None = None) -> list[SyncConfig]:
+    def load_syncs(
+        self,
+        vars: dict[str, Any] | None = None,
+        manifest_path: str | None = None,
+    ) -> list[SyncConfig]:
         from drt.config.parser import load_syncs
 
-        return load_syncs(self.project_dir, vars=vars)
+        if manifest_path is None:
+            return load_syncs(self.project_dir, vars=vars)
+        return load_syncs(self.project_dir, vars=vars, manifest_path=Path(manifest_path))
 
-    def load_syncs_safe(self) -> SyncLoadResult:
+    def load_syncs_safe(self, manifest_path: str | None = None) -> SyncLoadResult:
         from drt.config.parser import load_syncs_safe
 
-        return load_syncs_safe(self.project_dir)
+        if manifest_path is None:
+            return load_syncs_safe(self.project_dir)
+        return load_syncs_safe(self.project_dir, manifest_path=Path(manifest_path))
 
-    def find_sync(self, sync_name: str, vars: dict[str, Any] | None = None) -> SyncConfig | None:
+    def find_sync(
+        self,
+        sync_name: str,
+        vars: dict[str, Any] | None = None,
+        manifest_path: str | None = None,
+    ) -> SyncConfig | None:
         """First sync named *sync_name* among ``load_syncs(vars=vars)``, or None."""
-        return next((s for s in self.load_syncs(vars=vars) if s.name == sync_name), None)
+        return next(
+            (
+                s
+                for s in self.load_syncs(vars=vars, manifest_path=manifest_path)
+                if s.name == sync_name
+            ),
+            None,
+        )
 
 
 def _load_ctx(project_dir: Path) -> McpContext:

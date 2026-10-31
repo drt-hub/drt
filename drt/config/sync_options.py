@@ -198,6 +198,10 @@ class ContractConfig(BaseModel):
 
     enforced: bool
     on_extra_columns: Literal["fail", "ignore", "drop"] = "fail"
+    # Omit for the existing hand-written ``columns:`` behavior. ``dbt`` is
+    # resolved by the config loader into that same columns structure before
+    # the engine sees the sync (#896).
+    source: Literal["dbt"] | None = None
 
 
 class GuardsConfig(BaseModel):
@@ -1028,7 +1032,14 @@ class SyncConfig(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "if": {
-                "properties": {"contract": {"type": "object"}},
+                "properties": {
+                    "contract": {
+                        "not": {
+                            "properties": {"source": {"const": "dbt"}},
+                            "required": ["source"],
+                        }
+                    }
+                },
                 "required": ["contract"],
             },
             "then": {
@@ -1064,9 +1075,15 @@ class SyncConfig(BaseModel):
     )
     contract: ContractConfig | None = None
 
+    # Snapshot of the dbt resolution performed by config loading. It prevents
+    # ``run``/``plan`` from re-reading a manifest that changes after the sync
+    # was loaded, while keeping derived data out of the public YAML model.
+    _dbt_relation_name: str | None = PrivateAttr(default=None)
+    _dbt_contract_resolved: bool = PrivateAttr(default=False)
+
     @model_validator(mode="after")
     def _check_column_contract(self) -> SyncConfig:
-        if self.contract is not None and self.columns is None:
+        if self.contract is not None and self.contract.source != "dbt" and self.columns is None:
             raise ValueError("contract requires a non-empty columns declaration.")
         if self.columns is not None:
             names = [column.name for column in self.columns]

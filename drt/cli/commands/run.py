@@ -806,6 +806,11 @@ def run(
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
+    manifest_path: Path | None = typer.Option(
+        None,
+        "--manifest-path",
+        help="dbt manifest for contract.source: dbt (default: target/manifest.json).",
+    ),
     log_format: LogFormat = typer.Option(
         LogFormat.TEXT,
         "--log-format",
@@ -931,7 +936,7 @@ def run(
     try:
         cli_vars = parse_cli_vars(vars_raw) if vars_raw else None
         project_vars = resolve_vars(project.vars, cli_vars)
-    except VarError as e:
+    except (VarError, ValueError) as e:
         print_error(str(e))
         raise typer.Exit(1)
 
@@ -945,8 +950,11 @@ def run(
         )
 
     try:
-        syncs = load_syncs(Path("."), vars=project_vars)
-    except VarError as e:
+        if manifest_path is None:
+            syncs = load_syncs(Path("."), vars=project_vars)
+        else:
+            syncs = load_syncs(Path("."), vars=project_vars, manifest_path=manifest_path)
+    except (VarError, ValueError) as e:
         print_error(str(e))
         raise typer.Exit(1)
 

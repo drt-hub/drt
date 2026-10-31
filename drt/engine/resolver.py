@@ -56,6 +56,8 @@ def resolve_model_ref(
     cursor_field: str | None = None,
     last_cursor_value: str | None = None,
     vars: dict[str, Any] | None = None,
+    dbt_relation_name: str | None = None,
+    dbt_manifest_resolved: bool = False,
 ) -> str:
     """Resolve a model reference to a runnable SQL query.
 
@@ -67,6 +69,10 @@ def resolve_model_ref(
         cursor_field: Column name used for incremental filtering (e.g. updated_at).
         last_cursor_value: Previous watermark; rows with cursor > this are fetched.
         vars: Resolved project vars for ``{{ var('name') }}`` (#783).
+        dbt_relation_name: Relation snapshotted while resolving a dbt-backed
+            column contract. Avoids a second manifest read during execution.
+        dbt_manifest_resolved: Whether the manifest was already resolved even
+            if that model has no ``relation_name``.
 
     Returns:
         A SQL query string ready to send to the source.
@@ -79,7 +85,15 @@ def resolve_model_ref(
         if sql_file.exists():
             base_sql = sql_file.read_text().strip()
         # 2. Check dbt manifest.json
-        elif (dbt_table := _resolve_from_dbt(table_name, project_dir)) is not None:
+        elif dbt_manifest_resolved and dbt_relation_name is not None:
+            base_sql = f"SELECT * FROM {dbt_relation_name}"
+        # A dbt-backed contract snapshots manifest resolution during config
+        # loading. If its node has no relation_name, continue to the normal
+        # profile fallback without opening the manifest again.
+        elif (
+            not dbt_manifest_resolved
+            and (dbt_table := _resolve_from_dbt(table_name, project_dir)) is not None
+        ):
             base_sql = f"SELECT * FROM {dbt_table}"
         elif isinstance(profile, BigQueryProfile):
             base_sql = f"SELECT * FROM `{profile.dataset}`.`{table_name}`"

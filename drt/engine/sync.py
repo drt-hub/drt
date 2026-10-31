@@ -785,7 +785,14 @@ def _run_sync_body(
             observer.on_watermark_resolved(sync.name, "storage_lag", effective_cursor_value)
 
     query = resolve_model_ref(
-        sync.model, project_dir, profile, cursor_field, effective_cursor_value, vars=vars
+        sync.model,
+        project_dir,
+        profile,
+        cursor_field,
+        effective_cursor_value,
+        vars=vars,
+        dbt_relation_name=sync._dbt_relation_name,
+        dbt_manifest_resolved=sync._dbt_contract_resolved,
     )
 
     # Query tagging (#768): cost attribution needs *some* way to tell one

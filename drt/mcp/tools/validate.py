@@ -16,6 +16,7 @@ def validate(
     ctx: McpContext,
     check_connection: bool = False,
     strict: bool = False,
+    manifest_path: str | None = None,
 ) -> dict[str, Any]:
     """Mirrors ``drt validate``'s secret-scan + strict + connection-test
     behaviour (#870) — the pre-#870 version only re-ran schema parsing,
@@ -30,7 +31,7 @@ def validate(
     )
     from drt.config.secrets import find_hardcoded_secrets
 
-    result = ctx.load_syncs_safe()
+    result = ctx.load_syncs_safe(manifest_path=manifest_path)
     secret_findings = find_hardcoded_secrets(ctx.project_dir)
     secret_warnings_by_sync = _group_secret_findings(secret_findings)
     idempotency_findings = _find_ineffective_native_idempotency_keys(result.syncs)
@@ -45,6 +46,7 @@ def validate(
 
     for s in result.syncs:
         sync_warnings = [f.message for f in secret_warnings_by_sync.get(s.name, [])]
+        sync_warnings.extend(result.warnings.get(s.name, []))
         if sync_warnings:
             warnings[s.name] = sync_warnings
         if s.name in idempotency_warnings_by_sync:

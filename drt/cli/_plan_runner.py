@@ -50,9 +50,9 @@ class PlanContext:
 
 def sync_fingerprint(sync: SyncConfig, project_dir: Path = Path(".")) -> str:
     """Hash of the sync file *and* the model SQL it references (#772's fingerprint)."""
-    from drt.config.fingerprint import sync_fingerprints
+    from drt.config.fingerprint import resolved_sync_fingerprint
 
-    from_files = sync_fingerprints(project_dir).get(sync.name)
+    from_files = resolved_sync_fingerprint(sync, project_dir)
     return f"sha256:{from_files}" if from_files else config_hash(sync)
 
 
@@ -134,6 +134,7 @@ def compute_plan(
     cursor_value: str | None = None,
     cli_vars: dict[str, Any] | None = None,
     profile_name: str | None = None,
+    manifest_path: Path | None = None,
     project_dir: Path = Path("."),
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
     include_values: bool = False,
@@ -165,7 +166,11 @@ def compute_plan(
 
     try:
         project_vars = resolve_vars(project.vars, cli_vars)
-        syncs = load_syncs(project_dir, vars=project_vars)
+        syncs = (
+            load_syncs(project_dir, vars=project_vars)
+            if manifest_path is None
+            else load_syncs(project_dir, vars=project_vars, manifest_path=manifest_path)
+        )
     except (VarError, ValueError) as e:
         raise PlanCliError(str(e)) from e
 
@@ -269,6 +274,7 @@ def compute_plan_from_records(
     redact_keys: bool = False,
     cli_vars: dict[str, Any] | None = None,
     profile_name: str | None = None,
+    manifest_path: Path | None = None,
     project_dir: Path = Path("."),
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
 ) -> PlanContext:
@@ -289,7 +295,11 @@ def compute_plan_from_records(
         raise PlanCliError(str(e)) from e
     try:
         project_vars = resolve_vars(project.vars, cli_vars)
-        syncs = load_syncs(project_dir, vars=project_vars)
+        syncs = (
+            load_syncs(project_dir, vars=project_vars)
+            if manifest_path is None
+            else load_syncs(project_dir, vars=project_vars, manifest_path=manifest_path)
+        )
     except (VarError, ValueError) as e:
         raise PlanCliError(str(e)) from e
 
