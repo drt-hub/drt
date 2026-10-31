@@ -21,6 +21,7 @@ from drt.docs.manifest import (
     Project,
     Source,
     Sync,
+    SyncColumn,
     SyncField,
     SyncFreshness,
     SyncMeta,
@@ -232,6 +233,14 @@ def _declared_fields(sync_cfg: SyncConfig) -> tuple[SyncField, ...]:
     return tuple(sorted(by_name.values(), key=lambda f: f.name))
 
 
+def _declared_columns(sync_cfg: SyncConfig) -> tuple[SyncColumn, ...]:
+    """Portable model-output columns in authored order (schema v6, #761)."""
+    return tuple(
+        SyncColumn(name=column.name, type=column.type, description=column.description)
+        for column in (sync_cfg.columns or [])
+    )
+
+
 def collect_dbt_exposure_inputs(project_dir: Path = Path(".")) -> DbtExposureInputs:
     """Collect deterministic, ref-only inputs for dbt exposure generation.
 
@@ -339,6 +348,7 @@ def build_manifest(
                 config_hash=fingerprints.get(sync_cfg.name),
                 meta=_sync_meta(sync_cfg, full_labels),
                 freshness=_sync_freshness(sync_cfg),
+                columns=_declared_columns(sync_cfg),
             )
         )
 

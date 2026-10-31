@@ -174,6 +174,32 @@ class MaskRule(BaseModel):
 MaskSpec = Literal["hash", "redact"] | MaskRule
 
 
+class ColumnConfig(BaseModel):
+    """One portable source column declared by a sync (#761)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, json_schema_extra={"pattern": r"\S"})
+    type: Literal["string", "number", "integer", "boolean", "timestamp", "date", "json"]
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _non_empty_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("columns[].name must be a non-empty column name.")
+        return value
+
+
+class ContractConfig(BaseModel):
+    """Run-time enforcement policy for a sync's declared columns (#761)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enforced: bool
+    on_extra_columns: Literal["fail", "ignore", "drop"] = "fail"
+
+
 class GuardsConfig(BaseModel):
     """``sync.guards`` — limits on how much one run may change (#1218).
 
@@ -999,6 +1025,19 @@ class SyncMetaConfig(BaseModel):
 
 
 class SyncConfig(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "if": {
+                "properties": {"contract": {"type": "object"}},
+                "required": ["contract"],
+            },
+            "then": {
+                "properties": {"columns": {"type": "array", "minItems": 1}},
+                "required": ["columns"],
+            },
+        }
+    )
+
     name: str
     description: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -1011,6 +1050,32 @@ class SyncConfig(BaseModel):
     unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
     meta: SyncMetaConfig | None = None  # catalog metadata (#1226); no runtime effect
+    # Portable model-output declaration (#761). Keeping this at the sync root
+    # matches dbt's schema shape and separates it from destination-facing
+    # transforms under ``sync:``. A declaration may be documentation-only;
+    # run-time checking is explicit through ``contract.enforced``.
+    columns: list[ColumnConfig] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Portable source columns. Names must be unique; JSON Schema cannot express "
+            "property-level uniqueness, so drt validate enforces it."
+        ),
+    )
+    contract: ContractConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_column_contract(self) -> SyncConfig:
+        if self.contract is not None and self.columns is None:
+            raise ValueError("contract requires a non-empty columns declaration.")
+        if self.columns is not None:
+            names = [column.name for column in self.columns]
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                raise ValueError(
+                    "columns contains duplicate name(s): " + ", ".join(repr(n) for n in duplicates)
+                )
+        return self
 
     @model_validator(mode="after")
     def _check_write_policy_destination_mode(self) -> SyncConfig:

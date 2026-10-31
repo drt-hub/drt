@@ -158,6 +158,19 @@ def _sync_yaml(sync: Sync) -> str:
         doc["description"] = sync.description
     if sync.tags:
         doc["tags"] = list(sync.tags)
+    if sync.columns:
+        doc["columns"] = [
+            {
+                key: value
+                for key, value in (
+                    ("name", column.name),
+                    ("type", column.type),
+                    ("description", column.description),
+                )
+                if value is not None
+            }
+            for column in sync.columns
+        ]
     return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False).rstrip()
 
 
@@ -373,6 +386,16 @@ _SYNC = """\
     {% if last_plan %}<div class="font-mono">last applied plan: {{ last_plan }}</div>{% endif %}
   </div>
 </div>
+
+{% if sync.columns %}
+<h2>Column contract</h2>
+<table>
+  <tr><th>Name</th><th>Type</th><th>Description</th></tr>
+  {% for column in sync.columns %}
+  <tr><td><code>{{ column.name }}</code></td><td><code>{{ column.type }}</code></td><td>{{ column.description or "—" }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
 
 <div class="tabs" role="tablist">
   <button class="tab-btn active" data-tab="yaml" role="tab" aria-selected="true">YAML</button>
