@@ -130,7 +130,7 @@ class TestPostgresWarehouseStateStore:
         assert not any("CREATE TABLE" in sql for sql in executed)
 
 
-_OPTIONAL = ("guards", "plan_id", "approved_by", "exact")
+_OPTIONAL = ("guards", "plan_id", "approved_by", "exact", "ddl")
 
 
 class TestPostgresWarehouseHistoryStore:
@@ -229,11 +229,12 @@ class TestPostgresWarehouseHistoryStore:
         )
 
         sql, params = self._insert(conn)
-        assert ", guards, plan_id, approved_by, exact)" in sql and len(params) == 16
-        assert json.loads(params[-4]) == guards
-        assert params[-3] == "sha256:abc"  # scalar columns are plain, queryable text
-        assert params[-2] == "alice"
-        assert json.loads(params[-1]) is True
+        assert ", guards, plan_id, approved_by, exact, ddl)" in sql and len(params) == 17
+        assert json.loads(params[-5]) == guards
+        assert params[-4] == "sha256:abc"  # scalar columns are plain, queryable text
+        assert params[-3] == "alice"
+        assert json.loads(params[-2]) is True
+        assert params[-1] is None
         assert not any("ALTER TABLE" in s for s, _ in conn.cursor.return_value.statements)
 
     def test_append_adds_the_missing_column_to_a_legacy_table_once(self) -> None:
@@ -243,14 +244,14 @@ class TestPostgresWarehouseHistoryStore:
 
         statements = [s for s, _ in conn.cursor.return_value.statements]
         alters = [s for s in statements if "ALTER TABLE" in s]
-        assert len(alters) == 4 and all("ADD COLUMN IF NOT EXISTS" in a for a in alters)
+        assert len(alters) == 5 and all("ADD COLUMN IF NOT EXISTS" in a for a in alters)
         for column in _OPTIONAL:
             assert any(column in a for a in alters)
         assert statements.index(alters[0]) < next(
             i for i, s in enumerate(statements) if "INSERT" in s
         )
         _sql, params = self._insert(conn)
-        assert len(params) == 16
+        assert len(params) == 17
 
     def test_append_stores_null_when_the_entry_has_no_guards(self) -> None:
         conn = self._history_conn([*self._BASE_COLUMNS, *_OPTIONAL])

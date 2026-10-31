@@ -453,6 +453,28 @@ def compute_diff(
         destinations) or a sample of the source records (non-queryable).
     """
     upsert_key: list[str] | None = getattr(config, "upsert_key", None)
+    managed_unavailable = getattr(sync_options, "_managed_table_unavailable_reason", None)
+    if managed_unavailable:
+        return DiffResult(
+            sample=list(records[:limit]),
+            total_source_rows=len(records),
+            truncated=len(records) > limit,
+            supported=False,
+            fallback_reason=str(managed_unavailable),
+        )
+    if getattr(sync_options, "_managed_table_missing", False) and getattr(
+        config, "manage_table", False
+    ):
+        # The real run creates an empty table before loading. Avoid querying a
+        # table that intentionally does not exist during a read-only plan; every
+        # incoming row is therefore a create against an empty destination.
+        return DiffResult(
+            added=list(records[:limit]),
+            total_source_rows=len(records),
+            total_destination_rows=0,
+            truncated=len(records) > limit,
+            supported=True,
+        )
     # An append-only destination never looks up a matching target row: the
     # write creates a physical row even if the incoming key already exists.
     # Mirror still requires an upsert key for its separate DELETE preview, so
@@ -544,6 +566,8 @@ def compute_diff(
     # uppercase-configured key is hinted even if the very first record
     # happened to omit it.
     field_hint = sorted({*upsert_key, *(k for record in records for k in record)})
+    planned_new_columns = set(getattr(sync_options, "_managed_new_columns", set()))
+    readable_field_hint = [column for column in field_hint if column not in planned_new_columns]
     try:
         if use_keyed_fetch:
             # This is a read-only column projection, so fetch the batch-wide
@@ -552,7 +576,7 @@ def compute_diff(
             # record's keys for partial updates, avoiding the rejected
             # union-based *comparison* that would report omitted fields as
             # ``value → None``.
-            columns = field_hint
+            columns = readable_field_hint
             try:
                 dest_rows = fetch_rows_by_keys(
                     config,

@@ -28,7 +28,13 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, MySQLDestinationConfig, SyncOptions
 from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
-from drt.destinations.sql_base import _ROW_SAVEPOINT, BaseSqlDestination
+from drt.destinations.sql_base import (
+    _ROW_SAVEPOINT,
+    BaseSqlDestination,
+    DestinationTableColumn,
+    _sql_type_family,
+)
+from drt.destinations.sql_utils import backtick_quote_ident_part
 
 _MYSQL_DUPLICATE_ENTRY = 1062
 
@@ -108,6 +114,102 @@ class MySQLDestination(BaseSqlDestination):
             return row[0] if row else 0
         finally:
             conn.close()
+
+    def _managed_describe_table(
+        self, cur: Any, config: MySQLDestinationConfig
+    ) -> list[DestinationTableColumn]:
+        if "." in config.table:
+            schema, table = config.table.rsplit(".", 1)
+            schema_predicate = "%s"
+            params: list[Any] = [table, schema]
+        else:
+            table = config.table
+            schema_predicate = "DATABASE()"
+            params = [table]
+        cur.execute(
+            "SELECT column_name, column_type, is_nullable, column_default, extra "
+            "FROM information_schema.columns WHERE table_name = %s "
+            f"AND table_schema = {schema_predicate} ORDER BY ordinal_position",
+            params,
+        )
+        rows = cur.fetchall()
+        result: list[DestinationTableColumn] = []
+        for row in rows:
+            values = list(row.values()) if isinstance(row, dict) else list(row)
+            result.append(
+                DestinationTableColumn(
+                    name=str(values[0]),
+                    data_type=str(values[1]),
+                    nullable=str(values[2]).upper() == "YES",
+                    has_default=values[3] is not None or "auto_increment" in str(values[4]).lower(),
+                )
+            )
+        return result
+
+    @staticmethod
+    def _managed_normalize_identifier(identifier: str) -> str:
+        return identifier.lower()
+
+    @staticmethod
+    def _managed_types_compatible(source_type: str, destination_type: str) -> bool:
+        if _sql_type_family(source_type) == "boolean" and destination_type.lower().startswith(
+            "tinyint(1)"
+        ):
+            return True
+        return BaseSqlDestination._managed_types_compatible(source_type, destination_type)
+
+    @staticmethod
+    def _managed_mysql_type(source_type: str | None, *, key: bool = False) -> str:
+        family = _sql_type_family(source_type or "")
+        if key and family in {"", "text"}:
+            # MySQL cannot index TEXT without a prefix length; a bounded
+            # string keeps a fallback-typed upsert key usable.
+            return "VARCHAR(255)"
+        return {
+            "integer": "BIGINT",
+            "number": "DECIMAL(65, 30)",
+            "boolean": "BOOLEAN",
+            "timestamp": "DATETIME(6)",
+            "date": "DATE",
+            "json": "JSON",
+            "binary": "LONGBLOB",
+            "array": "JSON",
+            "text": "TEXT",
+        }.get(family, "VARCHAR(255)" if key else "TEXT")
+
+    def _managed_build_create_table(
+        self,
+        config: MySQLDestinationConfig,
+        columns: list[str],
+        source_types: dict[str, str],
+        upsert_keys: list[str],
+    ) -> str:
+        keys = {column.lower() for column in upsert_keys}
+        definitions = []
+        for column in columns:
+            is_key = column.lower() in keys
+            data_type = self._managed_mysql_type(source_types.get(column), key=is_key)
+            nullability = " NOT NULL" if is_key else " NULL"
+            definitions.append(f"{backtick_quote_ident_part(column)} {data_type}{nullability}")
+        if upsert_keys:
+            primary_key = ", ".join(backtick_quote_ident_part(column) for column in upsert_keys)
+            definitions.append(f"PRIMARY KEY ({primary_key})")
+        return (
+            f"CREATE TABLE IF NOT EXISTS {self._quote_ident(config.table)} "
+            f"({', '.join(definitions)})"
+        )
+
+    def _managed_build_add_column(
+        self,
+        config: MySQLDestinationConfig,
+        column: str,
+        source_type: str | None,
+    ) -> str:
+        data_type = self._managed_mysql_type(source_type)
+        return (
+            f"ALTER TABLE {self._quote_ident(config.table)} ADD COLUMN "
+            f"{backtick_quote_ident_part(column)} {data_type} NULL"
+        )
 
     def get_table_name(self, config: DestinationConfig) -> str:
         """Implements ``QueryableDestination`` (#469)."""
@@ -427,21 +529,25 @@ class MySQLDestination(BaseSqlDestination):
         if scope_cols and scopes:
             if len(scope_cols) == 1:
                 s_placeholders = ", ".join(["%s"] * len(scopes))
-                scope_clause = f"`{scope_cols[0]}` IN ({s_placeholders}) AND "
+                scope_clause = (
+                    f"{backtick_quote_ident_part(scope_cols[0])} IN ({s_placeholders}) AND "
+                )
                 scope_params = [sc[0] for sc in scopes]
             else:
-                s_col_tuple = "(" + ", ".join(f"`{c}`" for c in scope_cols) + ")"
+                s_col_tuple = (
+                    "(" + ", ".join(backtick_quote_ident_part(c) for c in scope_cols) + ")"
+                )
                 s_row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
                 s_placeholders = ", ".join([s_row] * len(scopes))
                 scope_clause = f"{s_col_tuple} IN ({s_placeholders}) AND "
                 scope_params = [v for sc in scopes for v in sc]
         if len(upsert_cols) == 1:
             placeholders = ", ".join(["%s"] * len(keys))
-            col_q = f"`{upsert_cols[0]}`"
+            col_q = backtick_quote_ident_part(upsert_cols[0])
             stmt = f"DELETE FROM {table_q} WHERE {scope_clause}{col_q} {op} ({placeholders})"
             params: list[Any] = scope_params + [k[0] for k in keys]
         else:
-            col_tuple = "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
+            col_tuple = "(" + ", ".join(backtick_quote_ident_part(c) for c in upsert_cols) + ")"
             row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
             placeholders = ", ".join([row_placeholder] * len(keys))
             stmt = f"DELETE FROM {table_q} WHERE {scope_clause}{col_tuple} {op} ({placeholders})"
@@ -507,10 +613,12 @@ class MySQLDestination(BaseSqlDestination):
         if scope_cols and scopes:
             if len(scope_cols) == 1:
                 placeholders = ", ".join(["%s"] * len(scopes))
-                scope_predicate = f"`{scope_cols[0]}` IN ({placeholders})"
+                scope_predicate = f"{backtick_quote_ident_part(scope_cols[0])} IN ({placeholders})"
                 scope_params = [scope[0] for scope in scopes]
             else:
-                scope_tuple = "(" + ", ".join(f"`{col}`" for col in scope_cols) + ")"
+                scope_tuple = (
+                    "(" + ", ".join(backtick_quote_ident_part(col) for col in scope_cols) + ")"
+                )
                 row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
                 placeholders = ", ".join([row] * len(scopes))
                 scope_predicate = f"{scope_tuple} IN ({placeholders})"
@@ -523,10 +631,10 @@ class MySQLDestination(BaseSqlDestination):
         op = "NOT IN" if negate else "IN"
         if len(upsert_cols) == 1:
             placeholders = ", ".join(["%s"] * len(keys))
-            key_predicate = f"`{upsert_cols[0]}` {op} ({placeholders})"
+            key_predicate = f"{backtick_quote_ident_part(upsert_cols[0])} {op} ({placeholders})"
             key_params = [key[0] for key in keys]
         else:
-            key_tuple = "(" + ", ".join(f"`{col}`" for col in upsert_cols) + ")"
+            key_tuple = "(" + ", ".join(backtick_quote_ident_part(col) for col in upsert_cols) + ")"
             row = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
             placeholders = ", ".join([row] * len(keys))
             key_predicate = f"{key_tuple} {op} ({placeholders})"
@@ -542,7 +650,10 @@ class MySQLDestination(BaseSqlDestination):
 
     def _build_swap_delete_count(self, table: str, shadow: str, upsert_cols: list[str]) -> Any:
         """Count live keys absent from the shadow using MySQL's ``<=>``."""
-        equality = " AND ".join(f"l.`{col}` <=> s.`{col}`" for col in upsert_cols)
+        equality = " AND ".join(
+            f"l.{backtick_quote_ident_part(col)} <=> s.{backtick_quote_ident_part(col)}"
+            for col in upsert_cols
+        )
         return (
             f"SELECT COUNT(*) FROM {self._quote_ident(table)} AS l WHERE NOT EXISTS "
             f"(SELECT 1 FROM {self._quote_ident(shadow)} AS s WHERE {equality})"
@@ -814,7 +925,7 @@ class MySQLDestination(BaseSqlDestination):
     @staticmethod
     def _build_insert_sql(table: str, columns: list[str]) -> str:
         """Build plain INSERT SQL (no conflict handling)."""
-        cols_str = ", ".join(f"`{c}`" for c in columns)
+        cols_str = ", ".join(backtick_quote_ident_part(c) for c in columns)
         placeholders = ", ".join(["%s"] * len(columns))
         table_q = MySQLDestination._quote_ident(table)
         return f"INSERT INTO {table_q} ({cols_str}) VALUES ({placeholders})"
@@ -832,15 +943,17 @@ class MySQLDestination(BaseSqlDestination):
         is NULL, ``''`` or only spaces; the CHAR cast is for the comparison only, so it is valid for
         any column type.
         """
-        cols_str = ", ".join(f"`{c}`" for c in columns)
+        cols_str = ", ".join(backtick_quote_ident_part(c) for c in columns)
         placeholders = ", ".join(["%s"] * len(columns))
         table_q = MySQLDestination._quote_ident(table)
 
         if update_cols:
             set_clause = ", ".join(
-                f"`{c}` = IF(`{c}` IS NULL OR TRIM(CAST(`{c}` AS CHAR)) = '', VALUES(`{c}`), `{c}`)"
+                f"{backtick_quote_ident_part(c)} = IF({backtick_quote_ident_part(c)} IS NULL OR "
+                f"TRIM(CAST({backtick_quote_ident_part(c)} AS CHAR)) = '', "
+                f"VALUES({backtick_quote_ident_part(c)}), {backtick_quote_ident_part(c)})"
                 if c in fill_cols
-                else f"`{c}` = VALUES(`{c}`)"
+                else f"{backtick_quote_ident_part(c)} = VALUES({backtick_quote_ident_part(c)})"
                 for c in update_cols
             )
             return (
@@ -860,13 +973,17 @@ class MySQLDestination(BaseSqlDestination):
         """Build an UPDATE that cannot create a missing destination row."""
         table_q = MySQLDestination._quote_ident(table)
         set_clause = ", ".join(
-            f"`{column}` = IF(`{column}` IS NULL OR "
-            f"TRIM(CAST(`{column}` AS CHAR)) = '', %s, `{column}`)"
+            f"{backtick_quote_ident_part(column)} = "
+            f"IF({backtick_quote_ident_part(column)} IS NULL OR "
+            f"TRIM(CAST({backtick_quote_ident_part(column)} AS CHAR)) = '', %s, "
+            f"{backtick_quote_ident_part(column)})"
             if column in fill_cols
-            else f"`{column}` = %s"
+            else f"{backtick_quote_ident_part(column)} = %s"
             for column in update_cols
         )
-        where_clause = " AND ".join(f"`{column}` = %s" for column in upsert_key)
+        where_clause = " AND ".join(
+            f"{backtick_quote_ident_part(column)} = %s" for column in upsert_key
+        )
         return f"UPDATE {table_q} SET {set_clause} WHERE {where_clause}"
 
     @staticmethod
@@ -878,7 +995,9 @@ class MySQLDestination(BaseSqlDestination):
         update several rows even though they are not duplicates to MySQL.
         """
         table_q = MySQLDestination._quote_ident(table)
-        where_clause = " AND ".join(f"`{column}` = %s" for column in upsert_key)
+        where_clause = " AND ".join(
+            f"{backtick_quote_ident_part(column)} = %s" for column in upsert_key
+        )
         return f"SELECT 1 FROM {table_q} WHERE {where_clause} LIMIT 1"
 
     @classmethod

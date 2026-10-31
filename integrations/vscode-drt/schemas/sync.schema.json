@@ -3170,6 +3170,21 @@
           ],
           "default": null,
           "title": "Json Columns"
+        },
+        "manage_table": {
+          "default": false,
+          "title": "Manage Table",
+          "type": "boolean"
+        },
+        "on_schema_change": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "ignore",
+            "append_new_columns"
+          ],
+          "title": "On Schema Change",
+          "type": "string"
         }
       },
       "required": [
@@ -3636,6 +3651,21 @@
           ],
           "default": null,
           "title": "Json Columns"
+        },
+        "manage_table": {
+          "default": false,
+          "title": "Manage Table",
+          "type": "boolean"
+        },
+        "on_schema_change": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "ignore",
+            "append_new_columns"
+          ],
+          "title": "On Schema Change",
+          "type": "string"
         }
       },
       "required": [

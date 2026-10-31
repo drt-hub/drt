@@ -42,6 +42,7 @@ class _World:
         self.fail_writes = False
         self.deleted: list[dict[str, Any]] = []
         self.baseline: int | None = None
+        self.ddl: list[str] = []
         self.real_run_sync: Any = None
 
     def diff(self) -> DiffResult:
@@ -74,6 +75,7 @@ class _Result:
         self.failed = 1 if world.fail_writes and not dry_run else 0
         self.diff = world.diff()
         self.cursor_value_used = world.cursor
+        self.ddl = list(world.ddl)
         self._plan_payload_records = list(world.added)
 
 
@@ -691,6 +693,18 @@ def test_drift_aborts_before_any_write_and_reports_the_keys(project: Path, world
     assert result.exit_code == 1
     assert "no longer matches" in result.output
     assert '"id": 3' in result.output
+    assert _writes(world) == []
+
+
+def test_ddl_drift_aborts_before_any_write(project: Path, world: _World) -> None:
+    world.ddl = ['ALTER TABLE "orders" ADD COLUMN "region" TEXT']
+    _plan(project)
+    world.ddl = []
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "destination schema changed" in result.output
     assert _writes(world) == []
 
 

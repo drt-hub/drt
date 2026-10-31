@@ -435,14 +435,15 @@ def _fetch_rows_by_keys_mysql(
     batch_size: int,
 ) -> list[dict[str, Any]]:
     from drt.destinations.mysql import MySQLDestination
+    from drt.destinations.sql_utils import backtick_quote_ident_part
 
-    quote = MySQLDestination._quote_ident
-    col_list = ", ".join(f"`{c}`" for c in columns)
+    quote = backtick_quote_ident_part
+    col_list = ", ".join(quote(c) for c in columns)
     if len(key_cols) == 1:
-        key_expr = f"`{key_cols[0]}`"
+        key_expr = quote(key_cols[0])
     else:
-        key_expr = "(" + ", ".join(f"`{c}`" for c in key_cols) + ")"
-    table_q = quote(config.table)
+        key_expr = "(" + ", ".join(quote(c) for c in key_cols) + ")"
+    table_q = MySQLDestination._quote_ident(config.table)
 
     conn = MySQLDestination._connect(config)
     try:

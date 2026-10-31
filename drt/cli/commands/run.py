@@ -368,6 +368,9 @@ def _run_one(
         guards_outcome = getattr(result, "guards", None)
         if guards_outcome is not None:
             entry["guards"] = guards_outcome
+        result_ddl = list(getattr(result, "ddl", []))
+        if result_ddl:
+            entry["ddl"] = result_ddl
         if ctx.log_json:
             logging.info(
                 "sync_complete",
@@ -383,6 +386,10 @@ def _run_one(
         if not ctx.json_mode and not ctx.quiet:
             if ctx.dry_run:
                 print_dry_run_summary(sync, profile, result.success, dest)
+                if result_ddl:
+                    from drt.cli.output import print_ddl_preview
+
+                    print_ddl_preview(result_ddl)
             else:
                 print_sync_result(sync.name, result, elapsed)
         if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:

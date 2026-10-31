@@ -31,11 +31,17 @@ from drt.state.history import HistoryEntry
 logger = logging.getLogger(__name__)
 
 # Order matters: it is the order of the columns appended to INSERT / SELECT.
-OPTIONAL_HISTORY_COLUMNS: tuple[str, ...] = ("guards", "plan_id", "approved_by", "exact")
+OPTIONAL_HISTORY_COLUMNS: tuple[str, ...] = (
+    "guards",
+    "plan_id",
+    "approved_by",
+    "exact",
+    "ddl",
+)
 
 # Structured and typed fields are JSON text; scalar fields are stored as plain
 # text so they stay queryable (``WHERE approved_by = 'alice'``).
-_JSON_COLUMNS = frozenset({"guards", "exact"})
+_JSON_COLUMNS = frozenset({"guards", "exact", "ddl"})
 
 
 def encode_optional(entry: HistoryEntry, present: Sequence[str]) -> list[str | None]:

@@ -508,6 +508,11 @@ def apply_plan(
             "The incremental watermark moved since the plan was made, so the plan covers a "
             "different window. Re-run `drt plan`."
         )
+    if current.ddl != doc.get("ddl", []):
+        raise ApplyRefused(
+            "The destination schema changed since the plan was made, so the DDL preview no "
+            "longer matches. Re-run `drt plan`."
+        )
 
     drifted = 0
     if current.digest != doc["digest"]:

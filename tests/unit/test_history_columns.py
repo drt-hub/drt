@@ -105,7 +105,7 @@ def test_a_successful_add_is_reported_present_and_listing_failure_means_legacy(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     added: list[str] = []
-    expected = ("guards", "plan_id", "approved_by", "exact")
+    expected = ("guards", "plan_id", "approved_by", "exact", "ddl")
     assert resolve_optional_columns(lambda: ["sync_name"], added.append, table="t") == expected
     assert added == list(expected)
 
@@ -131,17 +131,25 @@ def test_scalar_columns_are_plain_text_and_structured_values_stay_json() -> None
         plan_id="sha256:abc",
         approved_by="alice",
         exact=True,
+        ddl=["ALTER TABLE t ADD COLUMN c TEXT NULL"],
     )
-    present = ("guards", "plan_id", "approved_by", "exact")
+    present = ("guards", "plan_id", "approved_by", "exact", "ddl")
 
     cells = encode_optional(entry, present)
 
-    assert cells == ['{"forced": true, "tripped": []}', "sha256:abc", "alice", "true"]
+    assert cells == [
+        '{"forced": true, "tripped": []}',
+        "sha256:abc",
+        "alice",
+        "true",
+        '["ALTER TABLE t ADD COLUMN c TEXT NULL"]',
+    ]
     assert decode_optional(present, cells) == {
         "guards": {"forced": True, "tripped": []},
         "plan_id": "sha256:abc",
         "approved_by": "alice",
         "exact": True,
+        "ddl": ["ALTER TABLE t ADD COLUMN c TEXT NULL"],
     }
     # Plain text that merely looks like JSON stays a string for a scalar column.
     assert decode_optional(("approved_by",), ["123"]) == {"approved_by": "123"}

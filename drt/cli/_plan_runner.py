@@ -185,28 +185,35 @@ def compute_plan(
         # unavailable and carries on, and MCP answers `available: false`.
         diff = DiffResult(supported=False, fallback_reason=blocker)
         cursor_value_used = None
+        planned_ddl: list[str] = []
     else:
         if preflight is not None:
             # Cheap checks that must run before the (possibly expensive) extraction.
             preflight(project, state_bundle, sync)
         try:
             sync.sync._capture_plan_payload = include_values
-            result = run_sync(
-                sync,
-                get_source(profile),
-                get_destination(sync),
-                profile,
-                project_dir,
-                True,
-                state_bundle.state,
-                watermark_storage=get_watermark_storage(sync, project_dir),
-                cursor_value_override=cursor_value if sync.sync.mode == "incremental" else None,
-                compute_diff=True,
-                # Not a sample: a plan needs every changed key.
-                diff_limit=sys.maxsize,
-                vars=project_vars,
-                query_tagging=project.query_tagging,
-            )
+            sync.sync._planning = True
+            try:
+                result = run_sync(
+                    sync,
+                    get_source(profile),
+                    get_destination(sync),
+                    profile,
+                    project_dir,
+                    True,
+                    state_bundle.state,
+                    watermark_storage=get_watermark_storage(sync, project_dir),
+                    cursor_value_override=(
+                        cursor_value if sync.sync.mode == "incremental" else None
+                    ),
+                    compute_diff=True,
+                    # Not a sample: a plan needs every changed key.
+                    diff_limit=sys.maxsize,
+                    vars=project_vars,
+                    query_tagging=project.query_tagging,
+                )
+            finally:
+                sync.sync._planning = False
         except Exception as e:
             raise PlanCliError(f"Could not compute a plan for '{sync_name}': {e}") from e
 
@@ -221,6 +228,7 @@ def compute_plan(
             )
         diff = result.diff
         cursor_value_used = result.cursor_value_used
+        planned_ddl = list(getattr(result, "ddl", []))
     payload_records = (
         getattr(result, "_plan_payload_records", None)
         if blocker is None and include_values
@@ -245,6 +253,7 @@ def compute_plan(
         exclude_columns=_engine_written_columns(sync),
         guards=sync.sync.guards,
         cursor_value=cursor_value_used,
+        ddl=planned_ddl,
     )
     return PlanContext(
         plan,
@@ -299,15 +308,34 @@ def compute_plan_from_records(
     sync = matches[0]
     state_bundle = build_state_bundle(project, project_dir)
     blocker = unsupported_reason(sync)
+    planned_ddl: list[str] = []
     if blocker is not None:
         diff = DiffResult(supported=False, fallback_reason=blocker)
     else:
         if preflight is not None:
             preflight(project, state_bundle, sync)
+        from drt.destinations.base import ManagedDestinationTableCapable
+
+        destination_impl: Any = None
         try:
+            destination_impl = get_destination(sync)
+            sync.sync._planning = True
+            if isinstance(destination_impl, ManagedDestinationTableCapable):
+                preparation = destination_impl.prepare_table(
+                    records,
+                    sync.destination,
+                    sync.sync,
+                    dry_run=True,
+                )
+                records = preparation.records
+                planned_ddl = preparation.ddl
             diff = compute_diff(records, sync.destination, sync.sync, limit=sys.maxsize)
         except Exception as e:
             raise PlanCliError(f"Could not verify exact replay for '{sync_name}': {e}") from e
+        finally:
+            if isinstance(destination_impl, ManagedDestinationTableCapable):
+                destination_impl.reset_write_state(sync.destination, sync.sync)
+            sync.sync._planning = False
 
     plan_key = load_plan_key(project_dir)
     destination = sync.destination
@@ -326,6 +354,7 @@ def compute_plan_from_records(
         redact_keys=redact_keys,
         exclude_columns=_engine_written_columns(sync),
         guards=sync.sync.guards,
+        ddl=planned_ddl,
     )
     return PlanContext(plan, sync, project, profile, state_bundle, project_vars)
 

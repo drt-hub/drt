@@ -473,6 +473,15 @@ class SyncOptions(BaseModel):
     # snapshot (including metadata_columns) in memory so it can be encrypted
     # directly into an exact-replay sidecar (#1221).
     _capture_plan_payload: bool = PrivateAttr(default=False)
+    # Managed destination table preview/execution state (#760). These are
+    # per-run signals shared with the diff/plan path without widening the
+    # frozen Destination Protocol.
+    _planning: bool = PrivateAttr(default=False)
+    _managed_table_missing: bool = PrivateAttr(default=False)
+    _managed_new_columns: set[str] = PrivateAttr(default_factory=set)
+    _managed_table_unavailable_reason: str | None = PrivateAttr(default=None)
+    _executed_ddl: list[str] = PrivateAttr(default_factory=list)
+    _source_column_types: dict[str, str] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
@@ -1011,6 +1020,33 @@ class SyncConfig(BaseModel):
     unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
     meta: SyncMetaConfig | None = None  # catalog metadata (#1226); no runtime effect
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unsupported_managed_table_keys(cls, value: Any) -> Any:
+        """Reserve #760's DDL keys for the two dialects that implement them.
+
+        Most destination models intentionally predate strict-extra validation.
+        A root validator is therefore the one place that can prevent a SaaS or
+        not-yet-supported warehouse destination from silently discarding a
+        schema policy. Third-party destinations are rejected too: support must
+        be explicit rather than inferred from a similarly named plugin field.
+        """
+        if not isinstance(value, dict):
+            return value
+        destination = value.get("destination")
+        if not isinstance(destination, dict):
+            return value
+        reserved = sorted({"manage_table", "on_schema_change"} & destination.keys())
+        destination_type = destination.get("type")
+        if reserved and destination_type not in {"postgres", "mysql"}:
+            keys = ", ".join(reserved)
+            raise ValueError(
+                f"destination key(s) {keys} are supported only for postgres and mysql "
+                "in the first managed-tables release; remove them for destination "
+                f"type {destination_type!r}."
+            )
+        return value
 
     @model_validator(mode="after")
     def _check_write_policy_destination_mode(self) -> SyncConfig:

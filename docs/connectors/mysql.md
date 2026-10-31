@@ -69,6 +69,10 @@ The MySQL connector serialises `dict` / `list` values to JSON strings via the sh
 
 **Schema-aware by default (`introspect_schema: true`).** At sync start drt reads `INFORMATION_SCHEMA.COLUMNS` for the target table once and routes each value by the column's real type — so a `dict`/`list` lands as JSON in a `JSON` column with **no configuration**. Introspection is best-effort: if `information_schema` isn't readable (locked-down grants) or the table doesn't exist yet, drt silently falls back to encoding every complex value. Set `introspect_schema: false` to disable it.
 
+MySQL is supported by [managed destination tables](../guides/managed-destination-tables.md): opt-in
+create-if-missing, pre-load drift checks, and nullable column appends. The guide lists the required
+`CREATE` / `ALTER` privileges and explains why a fallback-typed primary key uses `VARCHAR(255)`.
+
 Use `json_columns` to **override** introspection with an explicit allowlist — it always takes priority and surfaces an early error when an unlisted column carries a complex value:
 
 ```yaml

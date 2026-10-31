@@ -24,10 +24,11 @@ import json
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from drt.config.models import DestinationConfig, SyncOptions
-from drt.destinations.base import SyncResult
+from drt.destinations.base import SyncResult, TablePreparation
 from drt.destinations.row_errors import RowError
 from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
 from drt.engine.guards import GuardTripped
@@ -38,6 +39,56 @@ from drt.engine.guards import GuardTripped
 # failure; verified against a real Postgres that reuse after RELEASE
 # doesn't grow the savepoint stack across a large batch.
 _ROW_SAVEPOINT = "drt_row_sp"
+
+
+@dataclass(frozen=True)
+class DestinationTableColumn:
+    """One target-column definition needed by ADR 0016 reconciliation."""
+
+    name: str
+    data_type: str
+    nullable: bool
+    has_default: bool
+
+
+def _sql_type_family(type_name: str) -> str:
+    """Small, conservative compatibility vocabulary for cursor metadata."""
+    normalized = type_name.strip().lower().replace("_", " ")
+    if not normalized:
+        return ""
+    if "array" in normalized or normalized.endswith("[]"):
+        return "array"
+    if any(token in normalized for token in ("char", "text", "string", "uuid")):
+        return "text"
+    base_type = normalized.split("(", 1)[0].split()[0]
+    if base_type in {
+        "smallint",
+        "int2",
+        "integer",
+        "int",
+        "int4",
+        "bigint",
+        "int8",
+        "tinyint",
+        "mediumint",
+        "smallserial",
+        "serial",
+        "bigserial",
+    }:
+        return "integer"
+    if normalized.startswith(("numeric", "decimal", "real", "double", "float")):
+        return "number"
+    if "bool" in normalized or normalized == "bit":
+        return "boolean"
+    if "timestamp" in normalized or "datetime" in normalized:
+        return "timestamp"
+    if normalized == "date":
+        return "date"
+    if "json" in normalized or "variant" in normalized or "object" in normalized:
+        return "json"
+    if any(token in normalized for token in ("binary", "bytea", "blob")):
+        return "binary"
+    return normalized
 
 
 def _attach_exception_detail(error: BaseException, detail: str) -> None:
@@ -108,6 +159,267 @@ class BaseSqlDestination:
         # sync. ``None`` value = introspection ran but is unavailable; the key
         # being absent = not yet fetched.
         self._schema_cache: dict[str, dict[str, str] | None] = {}
+        # Managed destination tables (#760): checked once, on the first
+        # destination-facing batch. ``_managed_allowed_columns`` is populated
+        # only for on_schema_change=ignore and filters every later batch too.
+        self._managed_table_checked = False
+        self._managed_allowed_columns: set[str] | None = None
+
+    def prepare_table(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+        *,
+        dry_run: bool,
+    ) -> TablePreparation:
+        """Reconcile a Postgres/MySQL table before the first write (#760).
+
+        The method is also the read-only engine capability used by ``--dry-run``
+        and ``drt plan``. Other SQL destinations inherit this base but have no
+        managed-table config fields yet, so they return unchanged records and
+        never reach a dialect DDL hook.
+        """
+        configured_fields: set[str] = set(getattr(config, "model_fields_set", set()))
+        managed_keys_present = bool({"manage_table", "on_schema_change"} & set(configured_fields))
+        if not records or not hasattr(config, "manage_table") or not managed_keys_present:
+            return TablePreparation(records)
+        if self._managed_table_checked:
+            return TablePreparation(self._filter_managed_columns(records))
+
+        cfg: Any = config
+        source_columns = _union_columns(records)
+        active_upsert_keys = list(cfg.upsert_key) if sync_options.mode != "replace" else []
+        missing_keys = [column for column in active_upsert_keys if column not in source_columns]
+        if missing_keys:
+            raise ValueError(
+                f"destination.upsert_key column(s) {missing_keys} are absent from the first "
+                "source batch; refusing schema reconciliation before any DDL or write."
+            )
+
+        conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
+        cur = None
+        ddl: list[str] = []
+        warnings: list[str] = []
+        try:
+            cur = _tagged_cursor(conn.cursor(), sync_options)
+            destination_columns = self._managed_describe_table(cur, cfg)
+            if not destination_columns:
+                sync_options._managed_table_missing = True
+                if not cfg.manage_table:
+                    message = (
+                        f"Destination table {cfg.table!r} does not exist. Create it first, "
+                        "or set destination.manage_table: true to let drt create it."
+                    )
+                    if sync_options._planning:
+                        sync_options._managed_table_unavailable_reason = message
+                        self._managed_table_checked = True
+                        return TablePreparation(records)
+                    raise ValueError(message)
+                statement = self._managed_build_create_table(
+                    cfg,
+                    source_columns,
+                    sync_options._source_column_types,
+                    active_upsert_keys,
+                )
+                ddl.append(statement)
+                if not dry_run:
+                    self._execute_managed_ddl(conn, cur, statement, "CREATE", cfg.table)
+                    sync_options._executed_ddl.append(statement)
+                self._managed_table_checked = True
+                self._schema_cache.pop(cfg.table, None)
+                return TablePreparation(records, ddl=ddl)
+
+            by_name = {
+                self._managed_normalize_identifier(column.name): column
+                for column in destination_columns
+            }
+            source_by_name = {
+                self._managed_normalize_identifier(column): column for column in source_columns
+            }
+            missing_upsert_columns = [
+                column
+                for column in active_upsert_keys
+                if self._managed_normalize_identifier(column) not in by_name
+            ]
+            if missing_upsert_columns:
+                raise ValueError(
+                    f"Destination table {cfg.table!r} is missing upsert_key column(s) "
+                    f"{missing_upsert_columns}. Add the columns and the required primary/unique "
+                    "constraint manually; drt never adds constraints to an existing table."
+                )
+
+            required_but_absent = sorted(
+                column.name
+                for key, column in by_name.items()
+                if key not in source_by_name and not column.nullable and not column.has_default
+            )
+            if required_but_absent:
+                raise ValueError(
+                    f"Destination table {cfg.table!r} has required column(s) "
+                    f"{required_but_absent} missing from the source. Make them nullable, add a "
+                    "default, or include them in the model; drt will not drop or weaken columns."
+                )
+
+            new_columns = [
+                column
+                for column in source_columns
+                if self._managed_normalize_identifier(column) not in by_name
+            ]
+            sync_options._managed_new_columns = set(new_columns)
+            if new_columns and cfg.on_schema_change == "fail":
+                raise ValueError(
+                    f"Source has new column(s) {sorted(new_columns)} not present in destination "
+                    f"table {cfg.table!r}. Set destination.on_schema_change to ignore or "
+                    "append_new_columns, or migrate the table manually. drt never drops, "
+                    "renames, or retypes columns."
+                )
+
+            if cfg.on_schema_change != "ignore":
+                incompatible = self._managed_incompatible_columns(
+                    source_columns,
+                    source_by_name,
+                    by_name,
+                    sync_options._source_column_types,
+                )
+                if incompatible:
+                    raise ValueError(
+                        f"Source and destination types are incompatible for column(s) "
+                        f"{incompatible} in {cfg.table!r}. Migrate the table or cast/rename the "
+                        "model output; drt never retypes destination columns."
+                    )
+
+            if new_columns and cfg.on_schema_change == "ignore":
+                self._managed_allowed_columns = set(by_name)
+                warning = (
+                    f"Ignoring new source column(s) {sorted(new_columns)} for destination table "
+                    f"{cfg.table!r}; only columns already shared with the table will be loaded."
+                )
+                warnings.append(warning)
+            elif new_columns:
+                for column in new_columns:
+                    statement = self._managed_build_add_column(
+                        cfg,
+                        column,
+                        sync_options._source_column_types.get(column),
+                    )
+                    ddl.append(statement)
+                    if not dry_run:
+                        self._execute_managed_ddl(conn, cur, statement, "ALTER", cfg.table)
+                        sync_options._executed_ddl.append(statement)
+                self._schema_cache.pop(cfg.table, None)
+
+            self._managed_table_checked = True
+            return TablePreparation(
+                self._filter_managed_columns(records),
+                ddl=ddl,
+                warnings=warnings,
+            )
+        finally:
+            if cur is not None:
+                cur.close()
+            conn.close()
+
+    def _execute_managed_ddl(
+        self, conn: Any, cur: Any, statement: str, privilege: str, table: str
+    ) -> None:
+        """Execute and commit one DDL statement with actionable privilege context."""
+        try:
+            cur.execute(statement)
+            # Intentionally commit each compatible DDL before loading. This
+            # gives Postgres and MySQL the same documented non-atomic contract.
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 — preserve the original DDL failure
+                pass
+            raise RuntimeError(
+                f"Could not {privilege} destination table {table!r} before loading. "
+                f"Grant {privilege} on the target schema/table or pre-provision the change."
+            ) from exc
+
+    def _filter_managed_columns(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self._managed_allowed_columns is None:
+            return records
+        normalize = self._managed_normalize_identifier
+        allowed = self._managed_allowed_columns
+        return [
+            {key: value for key, value in record.items() if normalize(key) in allowed}
+            for record in records
+        ]
+
+    def _managed_incompatible_columns(
+        self,
+        source_columns: list[str],
+        source_by_name: dict[str, str],
+        destination_by_name: dict[str, DestinationTableColumn],
+        source_types: dict[str, str],
+    ) -> list[str]:
+        del source_columns
+        incompatible: list[str] = []
+        for normalized, source_name in source_by_name.items():
+            destination = destination_by_name.get(normalized)
+            source_type = source_types.get(source_name)
+            if (
+                destination is not None
+                and source_type is not None
+                and not self._managed_types_compatible(source_type, destination.data_type)
+            ):
+                incompatible.append(f"{source_name} ({source_type} -> {destination.data_type})")
+        return sorted(incompatible)
+
+    @staticmethod
+    def _managed_normalize_identifier(identifier: str) -> str:
+        """Postgres quoted identifiers are case-sensitive; dialects may override."""
+        return identifier
+
+    @staticmethod
+    def _managed_types_compatible(source_type: str, destination_type: str) -> bool:
+        source_family = _sql_type_family(source_type)
+        destination_family = _sql_type_family(destination_type)
+        # Integers are safely writable to a wider numeric destination; the
+        # reverse can truncate and is rejected.
+        return (
+            source_family == destination_family
+            or (source_family == "integer" and destination_family == "number")
+            or (
+                # Cursor metadata may describe structured arrays even though the
+                # first-release portable destination representation is JSON.
+                source_family == "array" and destination_family == "json"
+            )
+        )
+
+    def _managed_describe_table(self, cur: Any, config: Any) -> list[DestinationTableColumn]:
+        raise NotImplementedError
+
+    def _managed_build_create_table(
+        self,
+        config: Any,
+        columns: list[str],
+        source_types: dict[str, str],
+        upsert_keys: list[str],
+    ) -> str:
+        raise NotImplementedError
+
+    def _managed_build_add_column(
+        self,
+        config: Any,
+        column: str,
+        source_type: str | None,
+    ) -> str:
+        raise NotImplementedError
+
+    def reset_write_state(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """Clear per-run schema state, including after a failed first write."""
+        del config, sync_options
+        self._managed_table_checked = False
+        self._managed_allowed_columns = None
+        self._schema_cache.clear()
 
     def load(
         self,
@@ -126,6 +438,18 @@ class BaseSqlDestination:
         """
         if not records:
             return SyncResult()
+
+        preparation = self.prepare_table(
+            records,
+            config,
+            sync_options,
+            dry_run=False,
+        )
+        records = preparation.records
+        for warning in preparation.warnings:
+            logging.getLogger(__name__).warning(warning)
+        if not records:
+            return SyncResult(ddl=preparation.ddl)
 
         # ``config`` is the ``DestinationConfig`` union (the Protocol signature);
         # the fields read below (``table``) live on the concrete SQL subclass
@@ -182,6 +506,7 @@ class BaseSqlDestination:
                 cur.close()
             conn.close()
 
+        result.ddl.extend(preparation.ddl)
         return result
 
     def _contiguous_signature_runs(
