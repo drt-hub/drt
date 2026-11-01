@@ -21,6 +21,7 @@ class KafkaDestination:
         """Initialize per-run producer state without importing the SDK."""
         self._client: Any = None
         self._bootstrap_servers: str = ""
+        self._delivery_timeout_s = 30.0
 
     def load(
         self,
@@ -50,32 +51,49 @@ class KafkaDestination:
                 )
             self._bootstrap_servers = ",".join(brokers)
             self._client = self._initialize_producer(config, self._bootstrap_servers)
+            self._delivery_timeout_s = config.delivery_timeout_s
         # Reuse the client connection here
         producer = self._client
+
+    def _close(self) -> None:
+        """Close client connection."""
+        producer = self._client
+        remaining = len(producer)
+        try:
+            if remaining:
+                producer.flush(self._delivery_timeout_s)
+        finally:
+            if len(producer):
+                producer.purge()
+                producer.flush(0)
+            if len(producer):
+                raise RuntimeError("Kafka producer still has undelivered messages after cleanup.")
+            if not producer.close():
+                raise RuntimeError("Kafka producer close failed.")
+            self._client = None
+            self._bootstrap_servers = ""
+        if remaining:
+            raise RuntimeError(
+                "Kafka safety drain found unconfirmed messages after load(); "
+                "the sync must not be reported as successful."
+            )
 
     def finalize_sync(
         self,
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> None:
-        """TODO: defensively flush without recounting settled batch outcomes.
-
-        This hook is skipped when the engine's batch loop raises. Delivery
-        confirmation therefore cannot depend solely on this hook.
+        """Safety drain/close only; delivery accounting belongs to load()
         """
-        raise NotImplementedError("Kafka finalization is not implemented.")
+        self._close()
 
     def reset_write_state(
         self,
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> None:
-        """TODO: clear per-run state on clean, interrupted, and raised exits.
-
-        Use the existing unconditional reset hook without publishing messages
-        or changing outcomes previously returned from load().
-        """
-        raise NotImplementedError("Kafka write-state reset is not implemented.")
+        """Close on raised/interrupted exits too; repeated calls are safe."""
+        self._close()
 
     @staticmethod
     def _initialize_producer(
