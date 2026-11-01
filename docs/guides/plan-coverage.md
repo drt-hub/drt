@@ -41,6 +41,7 @@
 | `gcs` | Writes whole files or objects; there are no keyed target rows to diff. |
 | `github_actions` | Triggers a workflow run; Event/message sink: there is no stored target state to diff. |
 | `google_ads` | Conversion upload: Event/message sink: there is no stored target state to diff. |
+| `kafka` | Topic: Event/message sink: there is no stored target state to diff. |
 | `klaviyo` | Event/message sink: there is no stored target state to diff. |
 | `meta_conversions` | Event/message sink: there is no stored target state to diff. |
 | `mixpanel` | Event/message sink: there is no stored target state to diff. |

@@ -1139,3 +1139,65 @@ class SalesforceBulkDestinationConfig(BaseModel):
         if not self.instance_url and not self.instance_url_env:
             raise ValueError("Either instance_url or instance_url_env is required.")
         return self
+
+
+class KafkaAuthConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["none", "sasl_plain", "sasl_scram", "ssl"]
+    username_env: str | None = None
+    password_env: str | None = None
+    scram_mechanism: Literal["SCRAM-SHA-256", "SCRAM-SHA-512"] = "SCRAM-SHA-512"
+    ca_env: str | None = None
+    cert_env: str | None = None
+    key_env: str | None = None
+
+    @field_validator("username_env", "password_env", "ca_env", "cert_env", "key_env")
+    @classmethod
+    def _check_reference(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Credential and certificate references must not be blank.")
+        return value
+
+    @model_validator(mode="after")
+    def _check_auth_fields(self) -> KafkaAuthConfig:
+        for name in ("username_env", "password_env"):
+            value = getattr(self, name)
+            if self.type in {"sasl_plain", "sasl_scram"}:
+                if value is None:
+                    raise ValueError(f"{name} is required for {self.type} authentication.")
+            elif value is not None:
+                raise ValueError(f"{name} is not supported with auth.type: {self.type}.")
+
+        if (self.cert_env is None) != (self.key_env is None):
+            raise ValueError("cert_env and key_env must be supplied together.")
+        if self.type == "none":
+            for name in ("ca_env", "cert_env", "key_env"):
+                if getattr(self, name) is not None:
+                    raise ValueError(f"{name} is not supported with auth.type: none.")
+        return self
+
+
+class KafkaDestinationConfig(DescribableConfig):
+    type: Literal["kafka"]
+    bootstrap_servers_env: str = Field(min_length=1)
+    topic: str = Field(min_length=1)
+    key_field: str | None = Field(default=None, min_length=1)
+    value_format: Literal["json"] = "json"
+    headers: dict[str, str] = Field(default_factory=dict)
+    auth: KafkaAuthConfig
+    # librdkafka uses signed 32-bit milliseconds; zero means no timeout.
+    delivery_timeout_s: float = Field(default=30.0, ge=0.001, le=2_147_483.647, allow_inf_nan=False)
+    enable_idempotence: bool = True
+    retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None
+
+    @field_validator("bootstrap_servers_env", "topic", "key_field")
+    @classmethod
+    def _check_name(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Kafka field names and references must not be blank.")
+        return value
+
+    def _describe_detail(self) -> str:
+        return self.topic
