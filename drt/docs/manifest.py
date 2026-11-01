@@ -48,6 +48,13 @@ sync, omitted (never ``null``) when absent:
 - ``freshness``: the *declared* ``alerts.on_stale`` contract
   (``{max_age_seconds, never_run}``). Deliberately not a verdict: a fresh/stale
   judgement depends on the clock and would make regeneration non-deterministic (#697).
+
+Schema v6 (#761, ADR 0017) is a pure superset of v5 — one optional key on each
+sync, omitted when absent:
+
+- ``columns``: the model-output declaration as ``{name, type, description?}``.
+  This is repository configuration, not run state, so regeneration remains
+  byte-identical. Manifests from v1-v5 continue to load with no columns.
 """
 
 from __future__ import annotations
@@ -55,7 +62,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 EdgeKind = Literal["source_to_sync", "sync_to_destination", "lookup"]
 
@@ -152,6 +159,15 @@ class SyncField:
 
 
 @dataclass(frozen=True)
+class SyncColumn:
+    """A portable model-output column declaration (schema v6, #761)."""
+
+    name: str
+    type: str
+    description: str | None = None
+
+
+@dataclass(frozen=True)
 class Sync:
     name: str
     source: str  # Source.name
@@ -167,6 +183,7 @@ class Sync:
     config_hash: str | None = None
     meta: SyncMeta | None = None  # schema v5
     freshness: SyncFreshness | None = None  # schema v5
+    columns: tuple[SyncColumn, ...] = ()  # schema v6; declaration order
 
 
 @dataclass(frozen=True)
@@ -267,6 +284,19 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
             "max_age_seconds": s.freshness.max_age_seconds,
             "never_run": s.freshness.never_run,
         }
+    if s.columns:
+        d["columns"] = [
+            {
+                key: value
+                for key, value in (
+                    ("name", column.name),
+                    ("type", column.type),
+                    ("description", column.description),
+                )
+                if value is not None
+            }
+            for column in s.columns
+        ]
     return d
 
 
@@ -341,4 +371,5 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         config_hash=d.get("config_hash"),
         meta=_meta_from_dict(d.get("meta")),
         freshness=_freshness_from_dict(d.get("freshness")),
+        columns=tuple(SyncColumn(**column) for column in d.get("columns", [])),
     )

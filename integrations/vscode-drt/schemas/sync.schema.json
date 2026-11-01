@@ -781,6 +781,49 @@
       "title": "ClickHouseDestinationConfig",
       "type": "object"
     },
+    "ColumnConfig": {
+      "additionalProperties": false,
+      "description": "One portable source column declared by a sync (#761).",
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "timestamp",
+            "date",
+            "json"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "ColumnConfig",
+      "type": "object"
+    },
     "ConditionThreshold": {
       "description": "One comparison for a degraded-sync condition (#784).\n\nExactly one operator is set \u2014 ``{gt: 1}``, ``{eq: 0}``, etc. The metric it\napplies to is the key it sits under in ``on_degraded.conditions``.",
       "properties": {
@@ -846,6 +889,31 @@
         }
       },
       "title": "ConditionThreshold",
+      "type": "object"
+    },
+    "ContractConfig": {
+      "additionalProperties": false,
+      "description": "Run-time enforcement policy for a sync's declared columns (#761).",
+      "properties": {
+        "enforced": {
+          "title": "Enforced",
+          "type": "boolean"
+        },
+        "on_extra_columns": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "ignore",
+            "drop"
+          ],
+          "title": "On Extra Columns",
+          "type": "string"
+        }
+      },
+      "required": [
+        "enforced"
+      ],
+      "title": "ContractConfig",
       "type": "object"
     },
     "CursorPaginationConfig": {
@@ -5942,6 +6010,16 @@
       "type": "object"
     }
   },
+  "if": {
+    "properties": {
+      "contract": {
+        "type": "object"
+      }
+    },
+    "required": [
+      "contract"
+    ]
+  },
   "properties": {
     "name": {
       "title": "Name",
@@ -6120,6 +6198,34 @@
         }
       ],
       "default": null
+    },
+    "columns": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ColumnConfig"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Portable source columns. Names must be unique; JSON Schema cannot express property-level uniqueness, so drt validate enforces it.",
+      "title": "Columns"
+    },
+    "contract": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContractConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [
@@ -6127,6 +6233,17 @@
     "model",
     "destination"
   ],
+  "then": {
+    "properties": {
+      "columns": {
+        "minItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "columns"
+    ]
+  },
   "title": "SyncConfig",
   "type": "object",
   "$schema": "http://json-schema.org/draft-07/schema#"

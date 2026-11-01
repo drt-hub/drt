@@ -17,6 +17,7 @@ from drt.docs.manifest import (
     Project,
     Source,
     Sync,
+    SyncColumn,
     SyncStateSnapshot,
 )
 
@@ -40,6 +41,10 @@ def _manifest() -> Manifest:
                 mode="full",
                 description="VIP customers to Discord",
                 tags=("growth",),
+                columns=(
+                    SyncColumn(name="email", type="string", description="Primary identifier"),
+                    SyncColumn(name="score", type="number"),
+                ),
                 state=SyncStateSnapshot(
                     last_sync_at="2026-06-27T06:47:32Z",
                     last_cursor_value=None,
@@ -108,6 +113,10 @@ def test_sync_page_has_highlighted_yaml_and_state(site: Path) -> None:
     assert "success" in html  # state block
     assert "../source/default.html" in html  # cross-link
     assert "../destination/dest-discord-x.html" in html
+    assert "Column contract" in html
+    assert "Primary identifier" in html
+    assert "<code>score</code>" in html
+    assert "<code>number</code>" in html
 
 
 def test_dag_is_static_svg(site: Path) -> None:
