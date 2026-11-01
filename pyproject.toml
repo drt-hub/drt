@@ -126,6 +126,9 @@ dev = [
 schema-gen = [
     "pydantic==2.14.1",
 ]
+kafka = [
+    "confluent-kafka>=2.16.1",
+]
 
 [project.scripts]
 drt = "drt.cli.main:app"
