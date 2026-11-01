@@ -8,6 +8,7 @@ stale or was already applied.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from drt.mcp._untrusted import DATA_NOTICE, message
@@ -36,6 +37,7 @@ def apply(
     force_guards: bool = False,
     cursor_value: str | None = None,
     profile_name: str | None = None,
+    manifest_path: str | None = None,
     vars: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from drt.cli._apply_flow import PLAN_ID_PATTERN, ApplyRefused, apply_plan, parse_duration
@@ -79,6 +81,7 @@ def apply(
             cursor_value=cursor_value,
             cli_vars=vars,
             profile_name=profile_name,
+            manifest_path=Path(manifest_path) if manifest_path is not None else None,
             json_output=True,
             notify=notes.append,
             expect_plan_id=plan_id,

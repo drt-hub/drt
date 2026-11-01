@@ -138,6 +138,11 @@ def validate(
             "(for example, a prior `drt docs generate --format json` CI artifact)."
         ),
     ),
+    manifest_path: Path | None = typer.Option(
+        None,
+        "--manifest-path",
+        help="dbt manifest for contract.source: dbt (default: target/manifest.json).",
+    ),
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
     ),
@@ -161,7 +166,11 @@ def validate(
     from drt.config.schema import write_schemas
     from drt.config.secrets import find_hardcoded_secrets
 
-    result = load_syncs_safe(Path("."))
+    result = (
+        load_syncs_safe(Path("."))
+        if manifest_path is None
+        else load_syncs_safe(Path("."), manifest_path=manifest_path)
+    )
     secret_findings = find_hardcoded_secrets(Path("."))
     idempotency_findings = _find_ineffective_native_idempotency_keys(result.syncs)
 
@@ -208,6 +217,7 @@ def validate(
         result.syncs = selected
         result.errors = {k: v for k, v in result.errors.items() if k in error_names}
         result.deprecations = {k: v for k, v in result.deprecations.items() if k in selected_names}
+        result.warnings = {k: v for k, v in result.warnings.items() if k in selected_names}
         secret_findings = [f for f in secret_findings if f.sync_name in selected_names]
         idempotency_findings = [f for f in idempotency_findings if f.sync_name in selected_names]
         if not result.syncs and not result.errors:
@@ -238,6 +248,10 @@ def validate(
                 "deprecations": result.deprecations.get(s.name, []),
                 "warnings": [
                     finding.to_dict() for finding in secret_warnings_by_sync.get(s.name, [])
+                ]
+                + [
+                    {"type": "dbt_contract", "message": warning}
+                    for warning in result.warnings.get(s.name, [])
                 ],
                 "idempotency_warnings": [
                     finding.to_dict() for finding in idempotency_warnings_by_sync.get(s.name, [])
@@ -247,7 +261,7 @@ def validate(
                 entry["valid"] = False
                 entry["errors"] = [
                     finding.message for finding in secret_warnings_by_sync.get(s.name, [])
-                ]
+                ] + result.warnings.get(s.name, [])
             if check_connection:
                 entry["connection_test"] = _run_connection_test(s)
             results_json.append(entry)
@@ -270,7 +284,7 @@ def validate(
                 indent=2,
             )
         )
-        if result.errors or (strict and secret_findings):
+        if result.errors or (strict and (secret_findings or result.warnings)):
             raise typer.Exit(code=1)
         return
 
@@ -279,7 +293,7 @@ def validate(
         return
 
     for sync in result.syncs:
-        if strict and sync.name in secret_warnings_by_sync:
+        if strict and (sync.name in secret_warnings_by_sync or sync.name in result.warnings):
             continue
         print_validation_ok(sync.name)
         # Print deprecation warnings for this sync
@@ -295,6 +309,9 @@ def validate(
 
         for finding in secret_warnings_by_sync.get(sync.name, []):
             console.print(f"  [yellow]WARNING[/yellow] {finding.message}")
+
+        for warning in result.warnings.get(sync.name, []):
+            console.print(f"  [yellow]WARNING[/yellow] {warning}")
 
         for idempotency_finding in idempotency_warnings_by_sync.get(sync.name, []):
             console.print(f"  [yellow]WARNING[/yellow] {idempotency_finding.message}")
@@ -313,10 +330,15 @@ def validate(
         print_validation_error(name, errors)
 
     if strict:
-        for name, findings in secret_warnings_by_sync.items():
-            print_validation_error(name, [finding.message for finding in findings])
+        strict_warning_names = set(secret_warnings_by_sync) | set(result.warnings)
+        for name in sorted(strict_warning_names):
+            print_validation_error(
+                name,
+                [finding.message for finding in secret_warnings_by_sync.get(name, [])]
+                + result.warnings.get(name, []),
+            )
 
-    if result.errors or (strict and secret_findings):
+    if result.errors or (strict and (secret_findings or result.warnings)):
         raise typer.Exit(code=1)
 
     if emit_schema:

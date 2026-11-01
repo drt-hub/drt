@@ -55,6 +55,7 @@ class TestGenerateSchemas:
         assert column["properties"]["name"]["pattern"] == r"\S"
         assert contract["additionalProperties"] is False
         assert contract["properties"]["on_extra_columns"]["default"] == "fail"
+        assert contract["properties"]["source"]["anyOf"][0]["const"] == "dbt"
         assert schema["then"] == {
             "properties": {"columns": {"type": "array", "minItems": 1}},
             "required": ["columns"],

@@ -63,6 +63,11 @@ def apply(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     vars_raw: str = typer.Option(None, "--vars", help="Override project vars, as for `drt run`."),
     profile_name: str = typer.Option(None, "--profile", "-p", help="Override profile."),
+    manifest_path: Path | None = typer.Option(
+        None,
+        "--manifest-path",
+        help="dbt manifest for contract.source: dbt (default: target/manifest.json).",
+    ),
 ) -> None:
     """Apply a plan only if recomputing it gives the same change set.
 
@@ -159,6 +164,7 @@ def apply(
                 cursor_value=cursor_value,
                 cli_vars=cli_vars,
                 profile_name=profile_name,
+                manifest_path=manifest_path,
                 json_output=output == "json",
                 # stderr, so `--output json` stays one parseable document on stdout.
                 notify=lambda message: typer.echo(message, err=True),

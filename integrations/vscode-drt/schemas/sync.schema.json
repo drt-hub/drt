@@ -908,6 +908,19 @@
           ],
           "title": "On Extra Columns",
           "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "dbt",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
         }
       },
       "required": [
@@ -5924,7 +5937,16 @@
   "if": {
     "properties": {
       "contract": {
-        "type": "object"
+        "not": {
+          "properties": {
+            "source": {
+              "const": "dbt"
+            }
+          },
+          "required": [
+            "source"
+          ]
+        }
       }
     },
     "required": [
