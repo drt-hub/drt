@@ -30,6 +30,15 @@ PortableType = Literal["string", "number", "integer", "boolean", "timestamp", "d
 ExtraColumnsPolicy = Literal["fail", "ignore", "drop"]
 
 
+def declared_destination_types(
+    columns: Sequence[ColumnConfig] | None,
+    field_mappings: dict[str, str] | None,
+) -> dict[str, str]:
+    """Portable declared types keyed by the destination-facing column name."""
+    mappings = field_mappings or {}
+    return {mappings.get(column.name, column.name): column.type for column in columns or ()}
+
+
 @dataclass(frozen=True)
 class ContractViolation:
     column: str

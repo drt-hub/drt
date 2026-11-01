@@ -273,6 +273,85 @@ def test_finalize_mirror_composite_key_delete_shape() -> None:
     assert pairs == {("a", "x"), ("b", "y")}
 
 
+def test_mirror_delete_builder_quotes_hostile_single_scope_and_key_columns() -> None:
+    destination = MySQLDestination()
+    statement, params = destination._build_mirror_delete(
+        "app.users",
+        ["profile.name`; DROP TABLE audit; --"],
+        [(1,), (2,)],
+        ["tenant`id"],
+        [("acme",)],
+    )
+    assert statement == (
+        "DELETE FROM `app`.`users` WHERE `tenant``id` IN (%s) AND "
+        "`profile.name``; DROP TABLE audit; --` NOT IN (%s, %s)"
+    )
+    assert params == ["acme", 1, 2]
+
+
+def test_mirror_delete_builder_quotes_hostile_composite_scope_and_key_columns() -> None:
+    destination = MySQLDestination()
+    statement, params = destination._build_mirror_delete(
+        "app.users",
+        ["tenant`id", "user`id"],
+        [("acme", 1)],
+        ["region`code", "segment`id"],
+        [("us", "pro")],
+        negate=False,
+    )
+    assert statement == (
+        "DELETE FROM `app`.`users` WHERE (`region``code`, `segment``id`) IN ((%s, %s)) "
+        "AND (`tenant``id`, `user``id`) IN ((%s, %s))"
+    )
+    assert params == ["us", "pro", "acme", 1]
+
+
+def test_mirror_count_builder_quotes_hostile_single_and_composite_columns() -> None:
+    destination = MySQLDestination()
+    single, single_params = destination._build_mirror_count(
+        "app.users",
+        ["profile.name`; DROP TABLE audit; --"],
+        [(1,)],
+        ["tenant`id"],
+        [("acme",)],
+    )
+    assert single == (
+        "SELECT COUNT(*) FROM `app`.`users` WHERE `tenant``id` IN (%s) AND "
+        "`profile.name``; DROP TABLE audit; --` NOT IN (%s)"
+    )
+    assert single_params == ["acme", 1]
+
+    composite, composite_params = destination._build_mirror_count(
+        "app.users",
+        ["tenant`id", "user`id"],
+        [("acme", 1)],
+        ["region`code", "segment`id"],
+        [("us", "pro")],
+        negate=False,
+    )
+    assert composite == (
+        "SELECT COUNT(*) FROM `app`.`users` WHERE "
+        "(`region``code`, `segment``id`) IN ((%s, %s)) AND "
+        "(`tenant``id`, `user``id`) IN ((%s, %s))"
+    )
+    assert composite_params == ["us", "pro", "acme", 1]
+
+
+def test_swap_delete_count_builder_quotes_hostile_key_columns() -> None:
+    statement = MySQLDestination()._build_swap_delete_count(
+        "app.users",
+        "app.users__drt_swap",
+        ["tenant`id", "profile.name`; DROP TABLE audit; --"],
+    )
+    assert statement == (
+        "SELECT COUNT(*) FROM `app`.`users` AS l WHERE NOT EXISTS "
+        "(SELECT 1 FROM `app`.`users__drt_swap` AS s WHERE "
+        "l.`tenant``id` <=> s.`tenant``id` AND "
+        "l.`profile.name``; DROP TABLE audit; --` <=> "
+        "s.`profile.name``; DROP TABLE audit; --`)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Safety paths
 # ---------------------------------------------------------------------------

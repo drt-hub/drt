@@ -93,6 +93,10 @@ class SyncResult:
     # and was explicitly forced; refusal raises before a SyncResult returns.
     # Dict-shaped to keep this protocol result independent of engine types.
     guards: dict[str, Any] | None = None
+    # Destination DDL executed by this run, or (for a dry run / plan) the DDL
+    # that would execute. Additive and empty by default so existing result
+    # serialization remains unchanged unless managed tables are involved.
+    ddl: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -131,6 +135,46 @@ class Destination(Protocol):
                 than silently continuing past a failure the operator asked
                 to be fatal.
         """
+        ...
+
+
+@dataclass
+class TablePreparation:
+    """Result of a read-only or executing managed-table pre-load check."""
+
+    records: list[dict[str, Any]]
+    ddl: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+@runtime_checkable
+class ManagedDestinationTableCapable(Protocol):
+    """Additive #760 capability for schema checks before the first write.
+
+    This deliberately does not widen the frozen :class:`Destination` Protocol
+    (ADR 0007). The engine discovers it structurally, just like the existing
+    mode/write-policy capabilities.
+    """
+
+    def prepare_table(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+        *,
+        dry_run: bool,
+    ) -> TablePreparation:
+        """Check/reconcile the table and return the records safe to write."""
+
+        ...
+
+    def reset_write_state(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """Clear schema-preparation state after any real or preview run."""
+
         ...
 
 

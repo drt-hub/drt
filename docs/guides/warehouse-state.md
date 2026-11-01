@@ -80,7 +80,7 @@ Three tables, created under `managed_schema`, one per persistence surface:
 These are drt-managed tables — do not write to them directly except for read-only observability
 queries. Their exact columns are not a stable public API.
 
-### Optional history columns (`guards`, `plan_id`, `approved_by`, `exact`)
+### Optional history columns (`guards`, `plan_id`, `approved_by`, `exact`, `ddl`)
 
 `_drt_history` can carry **optional, additive columns** for fields that were added to
 `HistoryEntry` after your table was created. The first is `guards` (a `TEXT`/`STRING` column holding
@@ -88,7 +88,8 @@ JSON): a forced run-time change-guard override, recorded as `{"tripped": [...], 
 is also kept in `target/drt/run_results.json` and in local or GCS/S3 object-store history. `plan_id` and
 `approved_by` (same column type) record which reviewed plan a `drt apply` run applied and who approved it;
 `exact` is JSON text (`true`) when that apply replayed an encrypted payload. They stay empty for an
-ordinary `drt run`.
+ordinary `drt run`. `ddl` is JSON text containing the managed-destination-table statements that the
+run executed; it is absent when the run executed no DDL.
 
 How an existing table is handled — it is *your* table, and the role drt connects with may not be
 allowed to alter it:
@@ -100,7 +101,7 @@ allowed to alter it:
 - **Cannot be added** (no `ALTER` privilege): drt logs one warning and carries on without the column.
   History is best-effort, so this never fails a sync or `drt status --history`. To record it anyway,
   add a `TEXT` (`STRING` on Databricks and BigQuery) column named `guards`, `plan_id`, `approved_by`
-  or `exact` yourself.
+  `exact` or `ddl` yourself.
 - Pre-provisioned tables (the escape hatch below) need no change: the columns in the `CREATE TABLE`
   examples still work as they are, and these columns are simply optional extras.
 

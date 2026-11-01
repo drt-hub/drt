@@ -48,7 +48,12 @@ def render() -> str:
             lines += ["_None._", ""]
             continue
         if status == "available":
-            lines += [", ".join(f"`{m}`" for m in members), ""]
+            lines += ["| Destination | Coverage note |", "|---|---|"]
+            lines += [
+                f"| `{m}` | {PLAN_COVERAGE[m].reason or 'True keyed target diff.'} |"
+                for m in members
+            ]
+            lines.append("")
             continue
         lines += ["| Destination | Why |", "|---|---|"]
         lines += [f"| `{m}` | {PLAN_COVERAGE[m].reason} |" for m in members]

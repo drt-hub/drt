@@ -24,6 +24,7 @@ from drt.config.profiles import ProfileConfigLike
 from drt.config.query_tags import build_query_tags, new_run_id, render_comment_header
 from drt.destinations.base import (
     Destination,
+    ManagedDestinationTableCapable,
     MatchPolicyCapable,
     ModeCapable,
     StagedDestination,
@@ -35,7 +36,7 @@ from drt.destinations.lookup import (
     detect_ambiguous_lookup_ordering,
 )
 from drt.engine.computed_fields import apply_computed_fields
-from drt.engine.contract import check_contract, drop_extra_columns
+from drt.engine.contract import check_contract, declared_destination_types, drop_extra_columns
 from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
@@ -43,7 +44,12 @@ from drt.engine.metadata_columns import apply_metadata_columns
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
-from drt.sources.base import IncrementalSource, SnapshotDiffSource, Source
+from drt.sources.base import (
+    IncrementalSource,
+    SnapshotDiffSource,
+    Source,
+    SourceColumnMetadata,
+)
 from drt.state.audit_trail import AuditEntry, ComplianceAuditTrail, json_safe_audit_value
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryStore
@@ -438,6 +444,17 @@ def run_sync(
     sync.sync._reviewed_forced_guards = reviewed_forced_guards
     sync.sync._reviewed_guard_deletes = reviewed_guard_deletes
     sync.sync._reviewed_guard_baseline = reviewed_guard_baseline
+    sync.sync._managed_table_missing = False
+    sync.sync._managed_new_columns = set()
+    sync.sync._managed_table_unavailable_reason = None
+    sync.sync._executed_ddl = []
+    # A declared contract is stable config and therefore wins over optional,
+    # connector-specific cursor metadata. Names are mapped to the exact
+    # destination-facing shape used by managed-table reconciliation.
+    sync.sync._source_column_types = declared_destination_types(
+        sync.columns, sync.sync.field_mappings
+    )
+    sync.sync._source_column_metadata_loaded = False
     raised: BaseException | None = None
     tracer = get_tracer()
 
@@ -575,6 +592,7 @@ def run_sync(
                         plan_id=plan_id,
                         approved_by=approved_by,
                         exact=exact,
+                        ddl=sync.sync._executed_ddl or None,
                     )
                 )
                 history_manager.prune(sync.name, history_retention_days)
@@ -634,7 +652,7 @@ def run_sync(
         # instance's lifetime if reused. dry_run never calls
         # destination.load()/stage(), so there's no write-state to reset —
         # gated the same as every sibling block in this `finally`.
-        if not dry_run:
+        if not dry_run or isinstance(destination, ManagedDestinationTableCapable):
             resetter = getattr(destination, "reset_write_state", None)
             if callable(resetter):
                 try:
@@ -1122,6 +1140,37 @@ def _run_sync_body(
                 run_id=total_result.run_id,
                 sync_name=sync.name,
             )
+
+            # Managed destination tables (#760): the check runs on the first
+            # destination-facing batch, after every transform and before plan
+            # capture or the first write. A source may expose cursor metadata
+            # through an additive capability; otherwise the destination uses
+            # its documented portable TEXT fallback.
+            if not sync.sync._source_column_metadata_loaded and isinstance(
+                source, SourceColumnMetadata
+            ):
+                with _stage_ctx("source"):
+                    metadata_types = source.source_column_types()
+                # Declarations are the stable public contract and win for
+                # overlapping columns; metadata can still type undeclared
+                # computed/plugin columns.
+                sync.sync._source_column_types = {
+                    **metadata_types,
+                    **sync.sync._source_column_types,
+                }
+                sync.sync._source_column_metadata_loaded = True
+            if isinstance(destination, ManagedDestinationTableCapable):
+                with _stage_ctx("destination"):
+                    preparation = destination.prepare_table(
+                        record_batch,
+                        sync.destination,
+                        sync.sync,
+                        dry_run=dry_run,
+                    )
+                record_batch = preparation.records
+                total_result.ddl.extend(preparation.ddl)
+                for warning in preparation.warnings:
+                    observer.on_warning(sync.name, warning)
 
             if plan_payload_records is not None:
                 # Exact verification re-diffs these rows directly. Capturing

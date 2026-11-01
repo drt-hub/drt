@@ -275,12 +275,12 @@ class BigQueryWarehouseHistoryStore:
         self._optional: tuple[str, ...] | None = None
         self._alter_tried = False
 
-    def _optional_columns(self, client: Any, *, allow_alter: bool) -> tuple[str, ...]:
+    def _optional_columns(
+        self, client: Any, *, allow_alter: bool, required: tuple[str, ...] | None = None
+    ) -> tuple[str, ...]:
         """Optional history columns this table has; an append adds missing ones."""
-        complete = self._optional is not None and len(self._optional) == len(
-            OPTIONAL_HISTORY_COLUMNS
-        )
-        if self._optional is not None and (not allow_alter or self._alter_tried or complete):
+        requested = set(OPTIONAL_HISTORY_COLUMNS if required is None else required)
+        if self._optional is not None and (not allow_alter or requested.issubset(self._optional)):
             return self._optional
 
         def list_columns() -> list[str]:
@@ -298,6 +298,7 @@ class BigQueryWarehouseHistoryStore:
             list_columns,
             add_column if allow_alter else None,
             table=_table_id(self._profile, _HISTORY_TABLE),
+            required=required,
         )
         self._alter_tried = self._alter_tried or allow_alter
         return self._optional
@@ -310,7 +311,10 @@ class BigQueryWarehouseHistoryStore:
         try:
             client = _connect(self._profile)
             self._ensure_table(client)
-            present = self._optional_columns(client, allow_alter=True)
+            required = tuple(
+                name for name in OPTIONAL_HISTORY_COLUMNS if getattr(entry, name, None) is not None
+            )
+            present = self._optional_columns(client, allow_alter=True, required=required)
             _query(
                 client,
                 f"INSERT INTO {_qualified(self._profile, _HISTORY_TABLE)} "

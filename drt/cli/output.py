@@ -155,6 +155,14 @@ def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> Non
         console.print(f"  [red]  • {err}[/red]")
     if len(result.errors) > 5:
         console.print(f"  [red]  … and {len(result.errors) - 5} more errors[/red]")
+    for statement in getattr(result, "ddl", []):
+        console.print(f"  [dim]DDL executed:[/dim] {statement}", markup=False)
+
+
+def print_ddl_preview(statements: list[str]) -> None:
+    """Render managed-table DDL without Rich interpreting hostile identifiers."""
+    for statement in statements:
+        console.print(f"  DDL would run: {statement}", markup=False)
 
 
 # ---------------------------------------------------------------------------

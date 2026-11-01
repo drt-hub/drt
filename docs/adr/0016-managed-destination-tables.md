@@ -36,9 +36,10 @@ warning: silently ignoring a drift policy is how drift gets through).
 
 ### 2. The check runs before any record is loaded
 
-After the first extracted batch (the same point ADR 0017's contract check uses) drt compares the
-record keys with the table's columns from `introspect_schema()` and decides *before* the first
-write:
+For each new batch shape (at the same point ADR 0017's contract check uses) drt compares the
+destination-facing record keys with the table's columns and decides before writing that batch.
+The known column set is retained across the run, so a sparse late column triggers reconciliation
+once without making stable batches repeat the probe:
 
 | Situation | `fail` | `ignore` | `append_new_columns` |
 |---|---|---|---|
@@ -57,6 +58,10 @@ Created columns take their type from the declared contract (ADR 0017) when there
 from the source cursor metadata, otherwise a portable fallback (`TEXT` / `VARIANT` / `STRING`).
 Nothing is inferred by sampling values. Added columns are always nullable.
 
+Compatibility remains a coarse type-family check. Width, precision/scale, and timestamp timezone
+semantics are intentionally not compared; the operator and database retain responsibility for
+narrower pre-provisioned types.
+
 ### 4. Dry-run, plan and privileges
 
 - `--dry-run` and `drt plan` report the DDL they *would* run and never execute it. A plan whose
@@ -65,6 +70,9 @@ Nothing is inferred by sampling values. Added columns are always nullable.
   pre-load error naming it, extending the #695 guide.
 - Executed DDL is recorded on the run (additive history field, omit-when-absent, ADR 0013 style)
   so "who added this column, when" is answerable.
+- Exact replay can reproduce contract-declared types because they remain in config. It refuses
+  typed DDL that depended only on ephemeral source cursor metadata, which is not stored in the
+  replay payload.
 
 ### 5. Phasing
 

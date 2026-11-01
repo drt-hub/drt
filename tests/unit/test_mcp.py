@@ -1003,6 +1003,7 @@ async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
         result = SyncResult()
         result.success = 1
         result.guards = {"tripped": [{"guard": "max_deletes"}], "forced": True}
+        result.ddl = ["ALTER TABLE users ADD COLUMN score BIGINT"]
         return result
 
     monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
@@ -1017,6 +1018,7 @@ async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
     assert result["dry_run"] is True
     assert result["success"] == 1
     assert result["guards"]["forced"] is True
+    assert result["ddl"] == ["ALTER TABLE users ADD COLUMN score BIGINT"]
 
 
 # ---------------------------------------------------------------------------
