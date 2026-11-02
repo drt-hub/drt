@@ -533,7 +533,7 @@ def test_reset_write_state_forgets_known_people(
     ]
 
 
-def test_known_people_are_not_shared_between_tokens(
+def test_known_people_are_scoped_by_match_field(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     httpserver.expect_request(_SEARCH, method="GET").respond_with_json(_search_result())
@@ -543,8 +543,8 @@ def test_known_people_are_not_shared_between_tokens(
     _use_server(httpserver, monkeypatch)
 
     destination = PipedriveDestination()
-    destination.load([_RECORD], _config(api_token="token-a"), _options())
-    destination.load([_RECORD], _config(api_token="token-b"), _options())
+    destination.load([_RECORD], _config(), _options())
+    destination.load([_RECORD], _config(match_field="name"), _options())
 
     assert _calls(httpserver) == [
         ("GET", _SEARCH),

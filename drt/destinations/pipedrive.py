@@ -26,7 +26,6 @@ batch, updates the person found or created earlier instead of creating a duplica
 
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 import httpx
@@ -179,11 +178,12 @@ class PipedriveDestination:
     """Create or update Pipedrive persons, matched by an exact search."""
 
     def __init__(self) -> None:
-        # (token digest, base URL, match field) -> case-folded match value -> person id.
-        # Lives on the instance, i.e. for the whole sync: the engine calls load() once per
-        # batch, and Pipedrive's search index may not show a person created in an earlier
-        # batch yet. None means "created in this sync, but the response had no id".
-        self._known_ids: dict[tuple[str, str, str], dict[str, int | None]] = {}
+        # (base URL, match field) -> case-folded match value -> person id.
+        # Lives on the instance, i.e. for the whole sync (one instance serves one sync with one
+        # token, and reset_write_state clears it): the engine calls load() once per batch, and
+        # Pipedrive's search index may not show a person created in an earlier batch yet.
+        # None means "created in this sync, but the response had no id".
+        self._known_ids: dict[tuple[str, str], dict[str, int | None]] = {}
 
     def load(
         self,
@@ -204,9 +204,7 @@ class PipedriveDestination:
 
         result = SyncResult()
         base_url = (config.base_url or _PIPEDRIVE_API).rstrip("/")
-        # The token itself is never retained: only its digest scopes the cache.
-        scope = (hashlib.sha256(token.encode("utf-8")).hexdigest(), base_url, config.match_field)
-        known_ids = self._known_ids.setdefault(scope, {})
+        known_ids = self._known_ids.setdefault((base_url, config.match_field), {})
         with httpx.Client(timeout=30.0) as client:
             api = _PipedriveApi(
                 client,
