@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from drt.config.models import ClickHouseDestinationConfig, DestinationConfig, SyncOptions
+from drt.config.sync_options import ApiReadsConfig
 from drt.destinations._mirror_state import decode_key, diff_keys
 from drt.destinations.query import (
     fetch_all_keys,
@@ -131,6 +132,10 @@ class DiffResult:
     # How many rows the delete pass looked at: the denominator for a delete
     # percentage (#1218). ``None`` when the strategy cannot report it.
     delete_baseline: int | None = None
+    # Vendor read calls a plan spent reading the destination through
+    # ``KeyedReadDestination`` (#472, ADR 0018): ``{"calls": n, "rows": n}``.
+    # ``None`` for every destination that is read another way.
+    api_reads: dict[str, int] | None = None
     # Values a ``write_policy: fill_empty`` run keeps because the destination already holds
     # one (#1238): counted, never written, and left out of ``updated``.
     kept_values: int = 0
@@ -433,11 +438,107 @@ def _append_only_diff(
     )
 
 
+def _api_read_diff(
+    records: list[dict[str, Any]],
+    config: DestinationConfig,
+    sync_options: SyncOptions,
+    api_reads: ApiReadsConfig,
+    limit: int,
+) -> DiffResult:
+    """Plan a SaaS destination through bounded exact-key reads (#472, ADR 0018).
+
+    Every refusal is an *unsupported* result with a reason, never a partial plan: a
+    reviewer must not mistake "we could not read" for "nothing changes".
+    """
+    from drt.connectors import get_destination
+    from drt.destinations.base import KeyedReadDestination
+
+    def unavailable(reason: str) -> DiffResult:
+        return DiffResult(
+            sample=list(records[:limit]),
+            total_source_rows=len(records),
+            truncated=len(records) > limit,
+            supported=False,
+            fallback_reason=reason,
+        )
+
+    destination = get_destination(config)
+    if not isinstance(destination, KeyedReadDestination):
+        return unavailable(f"destination type '{config.type}' cannot be planned by API reads")
+    if sync_options.uses_fill_empty:
+        return unavailable("plan.api_reads does not support write_policy: fill_empty yet")
+
+    try:
+        rows = destination.plan_rows(records, config)
+    except ValueError as exc:
+        return unavailable(str(exc))
+    key_columns = destination.plan_key_columns(config)
+
+    def normalized_key(row: dict[str, Any]) -> tuple[Any, ...]:
+        return tuple(destination.normalize_for_compare(c, row.get(c)) for c in key_columns)
+
+    if any(any(value == "" for value in normalized_key(row)) for row in rows):
+        return unavailable(f"a source row has no value for the destination key {key_columns}")
+
+    unique_keys: list[tuple[Any, ...]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in rows:
+        key = normalized_key(row)
+        if key not in seen:
+            seen.add(key)
+            unique_keys.append(tuple(row.get(c) for c in key_columns))
+    batch = max(1, destination.max_read_batch(config))
+    calls = -(-len(unique_keys) // batch)
+    if calls > api_reads.max_calls:
+        return unavailable(
+            f"reading the destination needs {calls} API call(s) for {len(unique_keys)} key(s); "
+            f"plan.api_reads.max_calls is {api_reads.max_calls}"
+        )
+
+    columns = sorted({*key_columns, *(column for row in rows for column in row)})
+    try:
+        current = destination.read_current(config, unique_keys, columns, sync_options)
+    except Exception as exc:
+        # Class name only: the message can carry a request detail or a token (#778).
+        return unavailable(f"Could not read the destination ({type(exc).__name__})")
+    current_by_key = {normalized_key(row): row for row in current}
+
+    added: list[dict[str, Any]] = []
+    updated: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for row in rows:
+        existing = current_by_key.get(normalized_key(row))
+        if existing is None:
+            added.append(row)
+            continue
+        # Equal-after-normalisation values are shown as equal, so only a real difference
+        # becomes a changed column; anything the normaliser cannot equate is an update.
+        comparable = {
+            column: row[column]
+            if destination.normalize_for_compare(column, row[column])
+            == destination.normalize_for_compare(column, existing.get(column))
+            else existing.get(column)
+            for column in row
+        }
+        if DiffResult.changed_fields(comparable, row):
+            updated.append((comparable, row))
+
+    return DiffResult(
+        added=added[:limit],
+        updated=updated[:limit],
+        total_source_rows=len(records),
+        total_destination_rows=len(current),
+        truncated=len(added) > limit or len(updated) > limit,
+        supported=True,
+        api_reads={"calls": calls, "rows": len(unique_keys)},
+    )
+
+
 def compute_diff(
     records: list[dict[str, Any]],
     config: DestinationConfig,
     sync_options: SyncOptions,
     limit: int = 20,
+    api_reads: ApiReadsConfig | None = None,
 ) -> DiffResult:
     """Compute a record-level diff for the given source records and destination.
 
@@ -461,6 +562,10 @@ def compute_diff(
         sync_options.mode != "mirror" or upsert_key is not None
     ):
         return _append_only_diff(records, config, sync_options, upsert_key, limit)
+
+    # Opt-in API reads (#472): a SaaS destination planned through exact-key vendor reads.
+    if api_reads is not None and not is_queryable(config):
+        return _api_read_diff(records, config, sync_options, api_reads, limit)
 
     # Non-queryable → sample mode. This deliberately comes after the
     # append-only branch: BigQuery's streaming ``mode: insert`` does not

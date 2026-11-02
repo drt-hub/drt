@@ -405,3 +405,49 @@ class NativeIdempotencyCapable(Protocol):
         the type level.
         """
         ...
+
+
+@runtime_checkable
+class KeyedReadDestination(Protocol):
+    """Optional capability: read the current state of rows by exact key, for ``drt plan``.
+
+    A new, separate Protocol (ADR 0007: the frozen ``Destination`` is untouched) for
+    SaaS destinations whose vendor API can answer "what exists today" for a list of
+    keys (#472, ADR 0018). Only strongly consistent, exact-key reads qualify: a search
+    endpoint is eventually consistent and would plan a *create* for a row that exists.
+    Anything ambiguous or incomplete must raise, so the plan is unavailable rather than
+    guessed.
+
+    Stability: Provisional (introduced in v1.3).
+    """
+
+    def plan_key_columns(self, config: DestinationConfig) -> list[str]:
+        """Columns of a planned row that identify it at the destination."""
+        ...
+
+    def plan_rows(
+        self, records: list[dict[str, Any]], config: DestinationConfig
+    ) -> list[dict[str, Any]]:
+        """The rows as they would be written (after any destination-side mapping).
+
+        Raises ``ValueError`` when a record cannot be mapped.
+        """
+        ...
+
+    def max_read_batch(self, config: DestinationConfig) -> int:
+        """How many keys one read call covers."""
+        ...
+
+    def read_current(
+        self,
+        config: DestinationConfig,
+        keys: list[tuple[Any, ...]],
+        columns: list[str],
+        sync_options: SyncOptions,
+    ) -> list[dict[str, Any]]:
+        """Current values of ``columns`` for the keys that exist (absent keys are omitted)."""
+        ...
+
+    def normalize_for_compare(self, column: str, value: Any) -> Any:
+        """Reduce a value to the form the vendor stores, so equal data compares equal."""
+        ...

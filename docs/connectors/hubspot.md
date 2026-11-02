@@ -179,3 +179,10 @@ logical write.
 - HubSpot rate limit: ~100 requests/10s for private apps. drt caps at 9 req/s automatically
 - Upsert: POST with `idProperty` deduplicates. On 409 Conflict, drt retries as PATCH. `sync.match_policy: update_only` / `create_only` narrow this to one side (see Common Patterns above)
 - `properties_template` must produce a JSON object of HubSpot property names
+
+## Planning with `drt plan`
+
+`drt plan` / `drt apply` can plan a HubSpot sync through bounded batch reads when the sync opts
+in with `plan.api_reads`; see [Planning a SaaS destination with API
+reads](../guides/plan.md#planning-a-saas-destination-with-api-reads-hubspot). It costs
+`ceil(rows / 100)` read calls per plan (and again per apply).

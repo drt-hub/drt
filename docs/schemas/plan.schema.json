@@ -1,6 +1,28 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "api_reads": {
+      "additionalProperties": false,
+      "properties": {
+        "calls": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fidelity": {
+          "const": "conservative"
+        },
+        "rows": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "calls",
+        "rows",
+        "fidelity"
+      ],
+      "type": "object"
+    },
     "created_at": {
       "type": "string"
     },
@@ -132,10 +154,6 @@
       ],
       "type": "object"
     },
-    "plan_id": {
-      "pattern": "^plan-[0-9a-f]{16}$",
-      "type": "string"
-    },
     "payload": {
       "additionalProperties": false,
       "properties": {
@@ -158,6 +176,10 @@
         "bytes"
       ],
       "type": "object"
+    },
+    "plan_id": {
+      "pattern": "^plan-[0-9a-f]{16}$",
+      "type": "string"
     },
     "schema_version": {
       "const": 2

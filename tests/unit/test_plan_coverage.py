@@ -12,6 +12,7 @@ import drt.connectors  # noqa: F401 — registers the built-in destinations
 from drt.config.models import SyncOptions
 from drt.connectors import registry
 from drt.destinations import query
+from drt.destinations.base import KeyedReadDestination
 from drt.engine.diff import _is_append_only
 from drt.engine.plan_coverage import PLAN_COVERAGE, PLAN_STATUSES, plan_coverage
 
@@ -78,7 +79,11 @@ def test_the_declaration_agrees_with_the_code_paths(destination_type: str) -> No
     group = _derived_group(destination_type)
 
     assert declared.status in PLAN_STATUSES
-    if group == "not-planned":
+    if declared.status == "api-reads":
+        # Only a destination that really implements the keyed-read capability may say so.
+        _config_class, impl = registry._destination_registry[destination_type]
+        assert group == "not-planned" and issubclass(impl, KeyedReadDestination)
+    elif group == "not-planned":
         assert declared.status in {"needs-api-diff", "unavailable"}, (
             f"{destination_type} cannot be planned today, so it cannot be declared "
             f"{declared.status!r}"
