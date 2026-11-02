@@ -1,6 +1,6 @@
 # ADR 0018 — API-based plan reads for upsert-keyed SaaS destinations
 
-- **Status:** Proposed 2026-11-02 (design draft; owner review pending — see "Open questions").
+- **Status:** Accepted 2026-11-02 (owner confirmed all five proposals — see "Decisions").
 - **Issue:** [#472](https://github.com/drt-hub/drt/issues/472) (v1.3).
 - **Relates to:** [ADR 0007](0007-protocol-stability-policy.md) (additive capability Protocols);
   [ADR 0013](0013-plan-apply-lineage.md) (plan/apply lineage); [ADR 0014](0014-exact-replay-apply.md);
@@ -87,15 +87,12 @@ are planned; deletes are never reported for these destinations.
   cost is a decision, not a surprise.
 - Verification needs live vendor accounts (a HubSpot developer account first).
 
-## Open questions for the owner
+## Decisions
 
-1. **Opt-in surface.** Proposed: a sync-level key (reviewable in the YAML and identical for `plan`
-   and `apply`), e.g. `plan: {api_reads: {max_calls: 200}}`. Alternative: a `--api-reads` flag, which
-   keeps YAML untouched but lets `plan` and `apply` disagree.
-2. **Default budget.** Proposed 200 calls (≈ 20,000 HubSpot rows); lower for metered APIs.
-3. **Coverage status name** for "planned through bounded API reads" (proposed `api-reads`;
-   `needs-api-diff` stays for connectors that have not implemented it).
-4. **MCP.** Proposed: not exposed in the first release (an agent should not spend vendor quota
-   unprompted); revisit with an explicit per-call budget.
-5. **First connector and account.** Proposed HubSpot, which needs a developer account for the live
-   verification (the same account unblocks #1237).
+Confirmed by the maintainer on 2026-11-02, all as proposed:
+
+1. The opt-in is a sync-level key (`plan: {api_reads: {max_calls: 200}}`), identical for `plan` and `apply`.
+2. Default budget 200 calls.
+3. Coverage status name `api-reads`.
+4. Not exposed through MCP in the first release.
+5. HubSpot first; live verification needs a HubSpot developer account (shared with #1237).
