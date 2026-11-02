@@ -65,6 +65,19 @@ def store_plan(project_dir: Path, plan: Plan) -> Path:
     return path
 
 
+API_READS_REFUSAL = (
+    "plan.api_reads spends vendor API quota to read the destination, which an agent must not "
+    "do unprompted; plan and apply this sync with the CLI instead (ADR 0018)."
+)
+
+
+def _refuse_api_reads(_project: Any, _state_bundle: Any, sync: Any) -> None:
+    from drt.cli._plan_runner import PlanCliError
+
+    if sync.plan is not None and sync.plan.api_reads is not None:
+        raise PlanCliError(API_READS_REFUSAL)
+
+
 def plan(
     ctx: McpContext,
     sync_name: str,
@@ -87,6 +100,7 @@ def plan(
             cli_vars=vars,
             profile_name=profile_name,
             project_dir=ctx.project_dir,
+            preflight=_refuse_api_reads,
         ).plan
     except PlanCliError as e:
         return {

@@ -1397,7 +1397,11 @@ def _run_sync_body(
         from drt.engine.diff import compute_diff as _compute_diff
 
         total_result.diff = _compute_diff(
-            dry_run_records, sync.destination, sync.sync, limit=diff_limit
+            dry_run_records,
+            sync.destination,
+            sync.sync,
+            limit=diff_limit,
+            api_reads=sync.plan.api_reads if sync.plan is not None else None,
         )
         # Deliberately not a SyncResult field: row values must never leak into
         # normal JSON/run-results serialization. The planner reads and encrypts

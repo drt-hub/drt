@@ -21,6 +21,7 @@ DOC = Path(__file__).resolve().parent.parent / "docs" / "guides" / "plan-coverag
 _HEADINGS = {
     "available": "Planned (true create / update / delete change set)",
     "partial": "Partly planned",
+    "api-reads": "Planned through bounded vendor API reads (opt-in, #472)",
     "needs-api-diff": "Not planned yet — could be (API-based diff, #472)",
     "unavailable": "Not planned — no target state to diff",
 }
