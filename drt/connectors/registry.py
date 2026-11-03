@@ -249,6 +249,7 @@ def _register_all_connectors() -> None:
         MySQLDestinationConfig,
         NotionDestinationConfig,
         ParquetDestinationConfig,
+        PipedriveDestinationConfig,  # <-- ADDED
         PostgresDestinationConfig,
         RestApiDestinationConfig,
         S3DestinationConfig,
@@ -288,6 +289,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.notion import NotionDestination
     from drt.destinations.parquet import ParquetDestination
+    from drt.destinations.pipedrive import PipedriveDestination  # <-- ADDED
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.s3 import S3Destination
@@ -324,6 +326,7 @@ def _register_all_connectors() -> None:
     register_destination("discord", DiscordDestinationConfig, DiscordDestination)
     register_destination("github_actions", GitHubActionsDestinationConfig, GitHubActionsDestination)
     register_destination("hubspot", HubSpotDestinationConfig, HubSpotDestination)
+    register_destination("pipedrive", PipedriveDestinationConfig, PipedriveDestination)  # <-- ADDED
     register_destination("amplitude", AmplitudeDestinationConfig, AmplitudeDestination)
     register_destination("mixpanel", MixpanelDestinationConfig, MixpanelDestination)
     register_destination("zendesk", ZendeskDestinationConfig, ZendeskDestination)

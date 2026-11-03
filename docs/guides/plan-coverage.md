@@ -26,6 +26,7 @@
 | `jira` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `linear` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `notion` | Records live behind an API that could be read back by key (API-based diff, #472). |
+| `pipedrive` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `salesforce_bulk` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `zendesk` | Records live behind an API that could be read back by key (API-based diff, #472). |
 

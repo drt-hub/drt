@@ -52,6 +52,7 @@ DESTINATIONS = [
     ("mysql", "MySQL"),
     ("notion", "Notion"),
     ("parquet", "Parquet"),
+    ("pipedrive", "Pipedrive"),
     ("postgres", "PostgreSQL"),
     ("rest_api", "REST API"),
     ("s3", "Amazon S3"),
