@@ -368,21 +368,6 @@
       "title": "ApiKeyAuth",
       "type": "object"
     },
-    "ApiReadsConfig": {
-      "additionalProperties": false,
-      "description": "Opt-in to API-based plan reads for a SaaS destination (#472, ADR 0018).\n\n``drt plan`` reads the current state of the rows it would write through a bounded\nnumber of exact-key vendor API calls. Over ``max_calls`` the plan is unavailable.",
-      "properties": {
-        "max_calls": {
-          "default": 200,
-          "description": "Most physical vendor read attempts one plan may spend, including retries; over it the plan is unavailable.",
-          "minimum": 1,
-          "title": "Max Calls",
-          "type": "integer"
-        }
-      },
-      "title": "ApiReadsConfig",
-      "type": "object"
-    },
     "AzureBlobDestinationConfig": {
       "description": "Azure Blob destination \u2014 upload records as CSV / JSON / JSONL / Parquet.",
       "properties": {
@@ -3632,25 +3617,6 @@
       "title": "PipedriveDestinationConfig",
       "type": "object"
     },
-    "PlanConfig": {
-      "additionalProperties": false,
-      "description": "How ``drt plan`` / ``drt apply`` look at the destination (#472).",
-      "properties": {
-        "api_reads": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ApiReadsConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "title": "PlanConfig",
-      "type": "object"
-    },
     "PostgresDestinationConfig": {
       "properties": {
         "connection_string_env": {
@@ -6254,17 +6220,6 @@
       "anyOf": [
         {
           "$ref": "#/$defs/ContractConfig"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
-    },
-    "plan": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/PlanConfig"
         },
         {
           "type": "null"

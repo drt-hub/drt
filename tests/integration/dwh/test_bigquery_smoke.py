@@ -182,7 +182,22 @@ def test_bigquery_connection() -> None:
             "keyfile": creds["DRT_SMOKE_BIGQUERY_KEYFILE"],
         }
     )
-    BigQueryDestination().test_connection(dest)
+    # `test_connection` is `get_table` (no query job, so no `jobs.create` is needed), and a
+    # table that does not exist is a 404. The check used to rely on a hand-made table that
+    # lived in the dataset; it vanished when the dataset's default table expiration reaped it
+    # and the nightly BigQuery leg went red for days with a 404, not a regression. Own the
+    # table here, with the same uniqueness rule as every other BigQuery smoke test.
+    table = unique_table("drt_smoke_connection_check")
+    dest = dest.model_copy(update={"table": table})
+    client = bigquery.Client.from_service_account_json(
+        creds["DRT_SMOKE_BIGQUERY_KEYFILE"], project=creds["DRT_SMOKE_BIGQUERY_PROJECT"]
+    )
+    fqn = f"{creds['DRT_SMOKE_BIGQUERY_PROJECT']}.{creds['DRT_SMOKE_BIGQUERY_DATASET']}.{table}"
+    try:
+        client.query(f"CREATE TABLE {fqn} (id INT64)").result()
+        BigQueryDestination().test_connection(dest)
+    finally:
+        client.query(f"DROP TABLE IF EXISTS {fqn}").result()
 
 
 def test_bigquery_complex_type_roundtrip(tmp_path: Path) -> None:
