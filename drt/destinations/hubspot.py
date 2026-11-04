@@ -51,7 +51,7 @@ import httpx
 
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, HubSpotDestinationConfig, RetryConfig, SyncOptions
-from drt.destinations.base import SyncResult
+from drt.destinations.base import ApiReadLimitExceeded, SyncResult
 from drt.destinations.rate_limiter import RateLimiterBackend, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
@@ -639,7 +639,8 @@ class HubSpotDestination:
         keys: list[tuple[Any, ...]],
         columns: list[str],
         sync_options: SyncOptions,
-    ) -> list[dict[str, Any]]:
+        max_calls: int,
+    ) -> tuple[list[dict[str, Any]], int]:
         """Current property values of the HubSpot objects whose ``id_property`` is in ``keys``.
 
         Reuses the fail-closed batch read behind ``fill_empty`` (#1238): an uncorrelated
@@ -660,20 +661,31 @@ class HubSpotDestination:
         batch = self.max_read_batch(config)
         id_values = [key[0] for key in keys]
         found: list[dict[str, Any]] = []
+        calls = 0
         with httpx.Client(timeout=30.0) as client:
             for start in range(0, len(id_values), batch):
                 chunk = id_values[start : start + batch]
-                limiter.acquire()
 
                 def read(_chunk: list[Any] = chunk) -> dict[str, dict[str, Any]]:
+                    nonlocal calls
+
+                    if calls >= max_calls:
+                        raise ApiReadLimitExceeded
+                    limiter.acquire()
+                    calls += 1
                     return self._read_current_properties(
                         client, url, headers, config.id_property, columns, _chunk
                     )
 
                 current = with_retry(read, retry_config)
-                for properties in current.values():
-                    found.append(dict(properties))
-        return found
+                for requested_id, properties in current.items():
+                    # ``item['id']`` is a valid correlation fallback for internal-ID
+                    # reads even when HubSpot omits ``id_property`` from properties.
+                    # Preserve that correlated key in the row consumed by the diff.
+                    row = dict(properties)
+                    row[config.id_property] = requested_id
+                    found.append(row)
+        return found, calls
 
     def normalize_for_compare(self, column: str, value: Any) -> Any:
         """HubSpot stores every property as a string; ``None`` and ``""`` are both empty."""

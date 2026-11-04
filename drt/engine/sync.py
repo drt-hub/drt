@@ -155,8 +155,8 @@ def _check_match_policy_supported(
             f"sync.match_policy: {match_policy} is not supported by "
             f"{dest_name}. Supported here: "
             f"{', '.join(sorted(supported)) or 'upsert only'}. "
-            "match_policy currently ships on the Postgres, MySQL, HubSpot, and Intercom "
-            "destinations (update_only / create_only); other destinations follow (#757)."
+            "match_policy currently ships on the Postgres, MySQL, HubSpot, Intercom, and "
+            "Pipedrive destinations (update_only / create_only); other destinations follow (#757)."
         )
 
 
@@ -1127,8 +1127,8 @@ def _run_sync_body(
                 # Exact verification re-diffs these rows directly. Capturing
                 # after metadata injection preserves the original diff's row
                 # classification when a matching destination row already
-                # exists. The delivery run replaces these run-specific values
-                # through the same metadata step before writing.
+                # exists. Exact delivery keeps these captured values verbatim;
+                # reinjecting metadata would write rows verification never saw.
                 plan_payload_records.extend(dict(record) for record in record_batch)
 
             if dry_run:

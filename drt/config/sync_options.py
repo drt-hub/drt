@@ -49,6 +49,7 @@ from drt.config.destinations_saas import (
     MetaConversionsDestinationConfig,
     MixpanelDestinationConfig,
     NotionDestinationConfig,
+    PipedriveDestinationConfig,
     RestApiDestinationConfig,
     SalesforceBulkDestinationConfig,
     SendGridDestinationConfig,
@@ -952,6 +953,7 @@ DestinationConfig = Annotated[
     | Annotated[DiscordDestinationConfig, Tag("discord")]
     | Annotated[GitHubActionsDestinationConfig, Tag("github_actions")]
     | Annotated[HubSpotDestinationConfig, Tag("hubspot")]
+    | Annotated[PipedriveDestinationConfig, Tag("pipedrive")]
     | Annotated[ZendeskDestinationConfig, Tag("zendesk")]
     | Annotated[AmplitudeDestinationConfig, Tag("amplitude")]
     | Annotated[MixpanelDestinationConfig, Tag("mixpanel")]
@@ -1036,7 +1038,10 @@ class ApiReadsConfig(BaseModel):
     max_calls: int = Field(
         default=200,
         ge=1,
-        description="Most vendor read calls one plan may spend; over it the plan is unavailable.",
+        description=(
+            "Most physical vendor read attempts one plan may spend, including retries; "
+            "over it the plan is unavailable."
+        ),
     )
 
 

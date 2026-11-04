@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 import pytest
 from pydantic import ValidationError
 from pytest_httpserver import HTTPServer
@@ -116,6 +117,76 @@ def test_a_plan_classifies_create_update_and_unchanged_from_exact_key_reads(
     assert sorted(body["properties"]) == ["email", "firstname"]
 
 
+def test_internal_id_correlation_restores_the_requested_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_http_client(
+        monkeypatch,
+        [
+            httpx.Response(
+                200,
+                request=httpx.Request("POST", "https://example.test"),
+                json={
+                    "status": "COMPLETE",
+                    "results": [{"id": "123", "properties": {"firstname": "Ann"}}],
+                    "errors": [],
+                    "numErrors": 0,
+                },
+            )
+        ],
+    )
+
+    result = _diff(
+        [{"hs_object_id": "123", "firstname": "Ann"}],
+        config={"id_property": "hs_object_id"},
+    )
+
+    assert result.supported
+    assert result.added == []
+    assert result.updated == []
+
+
+def test_duplicate_keys_compare_with_the_state_left_by_the_previous_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hubspot_module.HubSpotDestination,
+        "read_current",
+        lambda *_a, **_k: ([{"email": "a@example.com", "firstname": "A"}], 1),
+    )
+
+    result = _diff(
+        [
+            {"email": "a@example.com", "firstname": "B"},
+            {"email": "a@example.com", "firstname": "A"},
+        ]
+    )
+
+    assert result.supported
+    assert result.added == []
+    assert [new["firstname"] for _old, new in result.updated] == ["B", "A"]
+
+
+def test_a_duplicate_absent_key_is_one_create_then_one_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hubspot_module.HubSpotDestination,
+        "read_current",
+        lambda *_a, **_k: ([], 1),
+    )
+
+    result = _diff(
+        [
+            {"email": "a@example.com", "firstname": "B"},
+            {"email": "a@example.com", "firstname": "A"},
+        ]
+    )
+
+    assert [row["firstname"] for row in result.added] == ["B"]
+    assert [new["firstname"] for _old, new in result.updated] == ["A"]
+
+
 def DiffChanged(result: Any) -> set[str]:
     from drt.engine.diff import DiffResult
 
@@ -128,6 +199,23 @@ def _requests(server: HTTPServer) -> list[tuple[str, dict[str, Any]]]:
         (request.path, json.loads(request.get_data(as_text=True)))
         for request, _response in server.log
     ]
+
+
+def _fake_http_client(monkeypatch: pytest.MonkeyPatch, responses: list[httpx.Response]) -> None:
+    class Client:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> Client:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            pass
+
+        def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+            return responses.pop(0)
+
+    monkeypatch.setattr(hubspot_module.httpx, "Client", Client)
 
 
 def test_values_equal_after_normalisation_are_not_updates(hubspot: HTTPServer) -> None:
@@ -146,7 +234,14 @@ def test_values_equal_after_normalisation_are_not_updates(hubspot: HTTPServer) -
     assert result.added == [] and result.updated == []
 
 
-def test_the_call_budget_makes_the_plan_unavailable_not_partial(hubspot: HTTPServer) -> None:
+def test_the_call_budget_makes_the_plan_unavailable_not_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hubspot_module.HubSpotDestination,
+        "read_current",
+        lambda *_a, **_k: pytest.fail("an over-budget plan must not read the destination"),
+    )
     records = [{"email": f"u{i}@example.com"} for i in range(250)]
 
     result = _diff(records, api_reads=ApiReadsConfig(max_calls=2))
@@ -154,7 +249,6 @@ def test_the_call_budget_makes_the_plan_unavailable_not_partial(hubspot: HTTPSer
     assert not result.supported
     assert "needs 3 API call(s) for 250 key(s)" in (result.fallback_reason or "")
     assert "max_calls is 2" in (result.fallback_reason or "")
-    assert hubspot.log == []  # nothing was read once the budget was known to be exceeded
 
 
 def test_a_failed_read_is_unavailable_and_names_only_the_error_class(
@@ -169,6 +263,97 @@ def test_a_failed_read_is_unavailable_and_names_only_the_error_class(
     assert not result.supported
     assert result.fallback_reason == "Could not read the destination (HTTPStatusError)"
     assert "test-token" not in (result.fallback_reason or "")
+
+
+def test_retried_reads_count_and_rate_limit_each_physical_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Limiter:
+        calls = 0
+
+        def acquire(self) -> None:
+            self.calls += 1
+
+    limiter = Limiter()
+    monkeypatch.setattr(hubspot_module, "resolve_rate_limiter", lambda *_a, **_k: limiter)
+    request = httpx.Request("POST", "https://example.test")
+    _fake_http_client(
+        monkeypatch,
+        [
+            httpx.Response(500, request=request, text="retry"),
+            httpx.Response(
+                207,
+                request=request,
+                json={
+                    "status": "COMPLETE",
+                    "results": [],
+                    "errors": [
+                        {
+                            "status": "error",
+                            "category": "OBJECT_NOT_FOUND",
+                            "context": {"ids": ["a@example.com"]},
+                        }
+                    ],
+                    "numErrors": 1,
+                },
+            ),
+        ],
+    )
+
+    result = _diff(
+        [{"email": "a@example.com"}],
+        api_reads=ApiReadsConfig(max_calls=2),
+        options=_options(
+            retry=RetryConfig(
+                max_attempts=2,
+                initial_backoff=0.0,
+                backoff_multiplier=1.0,
+            )
+        ),
+    )
+
+    assert result.supported
+    assert result.api_reads == {"calls": 2, "rows": 1}
+    assert limiter.calls == 2
+
+
+def test_a_retry_cannot_spend_beyond_the_physical_call_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Limiter:
+        calls = 0
+
+        def acquire(self) -> None:
+            self.calls += 1
+
+    limiter = Limiter()
+    monkeypatch.setattr(hubspot_module, "resolve_rate_limiter", lambda *_a, **_k: limiter)
+    _fake_http_client(
+        monkeypatch,
+        [
+            httpx.Response(
+                500,
+                request=httpx.Request("POST", "https://example.test"),
+                text="retry",
+            )
+        ],
+    )
+
+    result = _diff(
+        [{"email": "a@example.com"}],
+        api_reads=ApiReadsConfig(max_calls=1),
+        options=_options(
+            retry=RetryConfig(
+                max_attempts=2,
+                initial_backoff=0.0,
+                backoff_multiplier=1.0,
+            )
+        ),
+    )
+
+    assert not result.supported
+    assert "exhausted plan.api_reads.max_calls (1)" in (result.fallback_reason or "")
+    assert limiter.calls == 1
 
 
 def test_an_ambiguous_batch_read_is_unavailable(hubspot: HTTPServer) -> None:
@@ -340,6 +525,85 @@ def test_mcp_apply_refuses_a_stored_plan_that_carries_api_reads(
     refused = apply(Ctx(), "plan-" + "a" * 16, "alice")  # type: ignore[arg-type]
 
     assert refused["applied"] is False and refused["error"] == API_READS_REFUSAL
+
+
+def test_mcp_apply_refuses_an_escaped_top_level_api_reads_key(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.mcp.tools.apply import apply
+    from drt.mcp.tools.plan import API_READS_REFUSAL
+
+    class Ctx:
+        project_dir = tmp_path
+
+    monkeypatch.setattr(
+        "drt.mcp.tools.plan.load_stored_plan",
+        lambda _project, _plan_id: '{"api\\u005freads":{"calls":1}}',
+    )
+
+    refused = apply(Ctx(), "plan-" + "a" * 16, "alice")  # type: ignore[arg-type]
+
+    assert refused["error"] == API_READS_REFUSAL
+
+
+def test_mcp_apply_does_not_refuse_a_sync_named_api_reads(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli._apply_flow import ApplyOutcome
+    from drt.mcp.tools.apply import apply
+
+    class Ctx:
+        project_dir = tmp_path
+
+    monkeypatch.setattr(
+        "drt.mcp.tools.plan.load_stored_plan",
+        lambda _project, _plan_id: json.dumps({"sync": "api_reads"}),
+    )
+    monkeypatch.setattr(
+        "drt.cli._apply_flow.apply_plan",
+        lambda *_a, **_k: ApplyOutcome(
+            plan_id="plan-" + "a" * 16,
+            sync="api_reads",
+            applied=False,
+            message="ordinary plan reached apply",
+        ),
+    )
+
+    result = apply(Ctx(), "plan-" + "a" * 16, "alice")  # type: ignore[arg-type]
+
+    assert result == {
+        "applied": False,
+        "plan_id": "plan-" + "a" * 16,
+        "message": "ordinary plan reached apply",
+    }
+
+
+def test_mcp_apply_leaves_invalid_json_to_the_normal_plan_validation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli._apply_flow import ApplyOutcome
+    from drt.mcp.tools.apply import apply
+
+    class Ctx:
+        project_dir = tmp_path
+
+    monkeypatch.setattr(
+        "drt.mcp.tools.plan.load_stored_plan",
+        lambda _project, _plan_id: "not JSON",
+    )
+    monkeypatch.setattr(
+        "drt.cli._apply_flow.apply_plan",
+        lambda *_a, **_k: ApplyOutcome(
+            plan_id="plan-" + "a" * 16,
+            sync="s",
+            applied=False,
+            message="normal validation path",
+        ),
+    )
+
+    result = apply(Ctx(), "plan-" + "a" * 16, "alice")  # type: ignore[arg-type]
+
+    assert result["message"] == "normal validation path"
 
 
 # ---- small branches -------------------------------------------------------------------------

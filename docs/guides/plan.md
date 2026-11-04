@@ -77,7 +77,8 @@ reason when:
 - the destination cannot report what it currently contains (most SaaS
   destinations), or the set of rows a mirror would delete could not be read;
 - the extraction did not complete (failed rows, interruption);
-- `destination.upsert_key` is missing;
+- the destination cannot provide a row-identity key (`destination.upsert_key` for SQL
+  destinations; HubSpot `id_property` for API reads);
 - the sync uses something a plan cannot represent yet: `match_policy:
   update_only` / `create_only`, `incremental_strategy: diff` (snapshot
   extraction writes scratch tables, so it is not read-only), or an engine
@@ -108,9 +109,9 @@ plan:
   HubSpot's batch read (100 keys per call). Only exact-key reads are used, never search: a
   search index lags, and would plan a *create* for a contact that exists. An ambiguous or
   incomplete answer makes the plan unavailable, with the reason.
-- **Cost.** `ceil(rows / 100)` read calls per plan, and `drt apply` plans again before it
-  writes, so a plan plus an apply spend that twice. A plan that would exceed `max_calls` is
-  unavailable ("needs N API call(s) ..."), never partial. The calls spent are recorded in
+- **Cost.** At least `ceil(rows / 100)` read calls per plan, and `drt apply` plans again before it
+  writes. Every physical retry attempt is rate-limited and counts against `max_calls`; the plan
+  becomes unavailable before an attempt beyond that budget. Actual attempts are recorded in
   `plan.json` as `api_reads: {calls, rows, fidelity: conservative}`.
 - **Comparison is conservative.** HubSpot stores every property as a string and lower-cases
   emails, so values are compared after that normalisation. A row is *unchanged* only when the

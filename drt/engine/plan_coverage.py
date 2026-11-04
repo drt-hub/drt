@@ -7,9 +7,10 @@ declared place that says which is which, so the answer is visible in the docs an
 a new destination cannot ship without stating it.
 
 This describes the *destination's* capability to answer "what exists today". Every
-plan additionally needs ``destination.upsert_key`` and a sync that a plan can
-represent (see "When a plan is unavailable" in ``docs/guides/plan.md``); a keyless
-sync is reported unavailable whatever the destination.
+plan additionally needs a destination row-identity key (usually ``upsert_key``;
+HubSpot API reads use ``id_property``) and a sync that a plan can represent (see
+"When a plan is unavailable" in ``docs/guides/plan.md``); a keyless sync is reported
+unavailable whatever the destination.
 
 Status values:
 
@@ -89,6 +90,7 @@ PLAN_COVERAGE: dict[str, PlanCoverage] = {
     "jira": PlanCoverage("needs-api-diff", _API),
     "linear": PlanCoverage("needs-api-diff", _API),
     "notion": PlanCoverage("needs-api-diff", _API),
+    "pipedrive": PlanCoverage("needs-api-diff", _API),
     "salesforce_bulk": PlanCoverage("needs-api-diff", _API),
     "zendesk": PlanCoverage("needs-api-diff", _API),
     "amplitude": PlanCoverage("unavailable", _EVENT),

@@ -444,10 +444,15 @@ class KeyedReadDestination(Protocol):
         keys: list[tuple[Any, ...]],
         columns: list[str],
         sync_options: SyncOptions,
-    ) -> list[dict[str, Any]]:
-        """Current values of ``columns`` for the keys that exist (absent keys are omitted)."""
+        max_calls: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Existing rows and the number of physical vendor calls spent reading them."""
         ...
 
     def normalize_for_compare(self, column: str, value: Any) -> Any:
         """Reduce a value to the form the vendor stores, so equal data compares equal."""
         ...
+
+
+class ApiReadLimitExceeded(RuntimeError):
+    """A destination refused a physical read attempt beyond the configured budget."""

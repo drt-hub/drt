@@ -217,6 +217,7 @@ def _use_real_engine_with_io(
     world: _World,
     destination: Any,
 ) -> None:
+    from drt import connectors
     from drt.cli import _helpers, _plan_runner
     from drt.cli.commands import run as run_command
     from drt.engine import diff as diff_module
@@ -242,6 +243,7 @@ def _use_real_engine_with_io(
     for module in (_plan_runner, run_command):
         monkeypatch.setattr(module, "get_source", lambda *_a, **_k: source, raising=False)
         monkeypatch.setattr(module, "get_destination", lambda *_a, **_k: destination, raising=False)
+    monkeypatch.setattr(connectors, "get_destination", lambda *_a, **_k: destination)
     monkeypatch.setattr(_helpers, "get_source", lambda *_a, **_k: source)
 
 
@@ -439,9 +441,77 @@ def test_exact_verification_matches_existing_row_with_metadata_columns(
     [applied_row] = loaded_rows
     artifact = json.loads((project / "target" / "drt" / "run_results.json").read_text())
     assert planned_row["_run_id"] is None
-    assert applied_row["_run_id"] == artifact["invocation"]["run_id"]
-    assert applied_row["_synced_at"] != planned_row["_synced_at"]
+    assert applied_row["_run_id"] is None
+    assert applied_row["_synced_at"] == planned_row["_synced_at"]
     assert applied_row["_sync_name"] == "orders_to_pg"
+    assert artifact["invocation"]["run_id"]
+
+
+def test_exact_apply_does_not_reinject_metadata_used_by_properties_template(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drt.cli._apply_flow import load_exact_payload
+    from drt.config.models import DestinationConfig, SyncOptions
+    from drt.destinations.base import SyncResult
+    from drt.destinations.hubspot import HubSpotDestination
+
+    cfg = {
+        "name": "orders_to_pg",
+        "model": "SELECT 1",
+        "destination": {
+            "type": "hubspot",
+            "object_type": "contacts",
+            "id_property": "email",
+            "auth": {"type": "bearer", "token": "test-token"},
+            "properties_template": (
+                '{"email": "{{ row.email }}", "delivery_run": "{{ row._run_id }}"}'
+            ),
+        },
+        "sync": {
+            "mode": "upsert",
+            "metadata_columns": {"run_id": "_run_id"},
+        },
+        "plan": {"api_reads": {"max_calls": 10}},
+    }
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    world.added = [{"email": "a@example.com"}]
+    written_properties: list[dict[str, Any]] = []
+
+    class Destination(HubSpotDestination):
+        def read_current(
+            self,
+            _config: DestinationConfig,
+            _keys: list[tuple[Any, ...]],
+            _columns: list[str],
+            _sync_options: SyncOptions,
+            _max_calls: int,
+        ) -> tuple[list[dict[str, Any]], int]:
+            return [], 1
+
+        def load(
+            self,
+            records: list[dict[str, Any]],
+            config: DestinationConfig,
+            _sync_options: SyncOptions,
+        ) -> SyncResult:
+            written_properties.extend(self.plan_rows(records, config))
+            return SyncResult(success=len(records))
+
+    _use_real_engine_with_io(monkeypatch, world, Destination())
+    _exact_plan(project, monkeypatch)
+    planned_row = load_exact_payload(
+        (project / "plan.json").read_text(),
+        project / "plan.json.payload",
+        project_dir=project,
+    ).records[0]
+
+    result = runner.invoke(app, ["apply", "plan.json", "--exact", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    assert planned_row["_run_id"] is None
+    assert written_properties == [{"email": "a@example.com", "delivery_run": "None"}]
 
 
 def test_successful_exact_apply_updates_state_but_preserves_cursor(

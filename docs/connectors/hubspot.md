@@ -134,10 +134,10 @@ the write is skipped without a no-match error. `SyncResult.kept_values` counts
 kept properties and is summed into the run result. A result that cannot be
 correlated back to its requested `id_property` also fails closed.
 
-HubSpot is not a `QueryableDestination`, so `drt plan` and
-`drt run --dry-run --diff` remain unsupported for it; [#472](https://github.com/drt-hub/drt/issues/472)
-tracks API-backed diff support. This behavior is verified against HTTP mocks
-only, not a live HubSpot account.
+HubSpot is not a `QueryableDestination`, so `drt run --dry-run --diff` remains
+sample-only. `drt plan` / `drt apply` can opt into bounded exact-key batch reads
+with `plan.api_reads`; see [Planning with `drt plan`](#planning-with-drt-plan).
+This behavior is verified against HTTP mocks only, not a live HubSpot account.
 
 ## Rate limiting
 
@@ -158,10 +158,11 @@ destination:
 
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a portal but request different rates, the lowest wins for both.
 
-Rate limiting counts logical operations: one properties lookup, batch read, or
-row write consumes one limiter slot. Retries within that operation do not consume
-another slot, and the default-policy POST-409-to-PATCH fallback remains one
-logical write.
+Rate limiting normally counts logical operations: one properties lookup, batch read,
+or row write consumes one limiter slot. API reads made by `drt plan` are deliberately
+stricter: every physical retry attempt consumes a limiter slot and
+`plan.api_reads.max_calls` budget, and `plan.json.api_reads.calls` records those actual
+attempts. The default-policy POST-409-to-PATCH fallback remains one logical write.
 
 > **Syncing to more than one portal? Use `auth.token_env`, not an inline `auth.token`.**
 > Pacing is per portal, and drt identifies the portal by the *name* of the env var holding the token — it deliberately never derives the key from the token value itself. Two destinations that inline a literal token are therefore indistinguishable to the limiter and share one bucket, so they pace against each other even when they point at different portals. The failure mode is a slower sync, never a 429; giving each portal its own env var gives each its own bucket.
@@ -184,5 +185,5 @@ logical write.
 
 `drt plan` / `drt apply` can plan a HubSpot sync through bounded batch reads when the sync opts
 in with `plan.api_reads`; see [Planning a SaaS destination with API
-reads](../guides/plan.md#planning-a-saas-destination-with-api-reads-hubspot). It costs
-`ceil(rows / 100)` read calls per plan (and again per apply).
+reads](../guides/plan.md#planning-a-saas-destination-with-api-reads-hubspot). It needs at
+least `ceil(rows / 100)` read calls per plan (and again per apply); retry attempts also count.

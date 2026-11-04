@@ -63,7 +63,9 @@ records synced while carrying the previous cursor forward unchanged.
 
 - `sync.mask` and `metadata_columns` are applied **before** encryption; capturing metadata
   after injection keeps verification's row classification identical for existing rows. The
-  delivery run replaces run-specific metadata values through the normal metadata step.
+  delivery run disables metadata injection and keeps the captured values verbatim. This is
+  required when a destination template reads a metadata column: verification and delivery
+  must render the same value.
 - Limits: `--max-payload-rows` (default 10,000) and a byte cap; planning fails clearly
   beyond them rather than producing a huge file.
 - `--max-age` already bounds how old a plan may be; it covers the payload too.

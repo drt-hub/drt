@@ -451,7 +451,7 @@ def _api_read_diff(
     reviewer must not mistake "we could not read" for "nothing changes".
     """
     from drt.connectors import get_destination
-    from drt.destinations.base import KeyedReadDestination
+    from drt.destinations.base import ApiReadLimitExceeded, KeyedReadDestination
 
     def unavailable(reason: str) -> DiffResult:
         return DiffResult(
@@ -488,16 +488,24 @@ def _api_read_diff(
             seen.add(key)
             unique_keys.append(tuple(row.get(c) for c in key_columns))
     batch = max(1, destination.max_read_batch(config))
-    calls = -(-len(unique_keys) // batch)
-    if calls > api_reads.max_calls:
+    minimum_calls = -(-len(unique_keys) // batch)
+    if minimum_calls > api_reads.max_calls:
         return unavailable(
-            f"reading the destination needs {calls} API call(s) for {len(unique_keys)} key(s); "
+            f"reading the destination needs {minimum_calls} API call(s) for "
+            f"{len(unique_keys)} key(s); "
             f"plan.api_reads.max_calls is {api_reads.max_calls}"
         )
 
     columns = sorted({*key_columns, *(column for row in rows for column in row)})
     try:
-        current = destination.read_current(config, unique_keys, columns, sync_options)
+        current, calls = destination.read_current(
+            config, unique_keys, columns, sync_options, api_reads.max_calls
+        )
+    except ApiReadLimitExceeded:
+        return unavailable(
+            "reading the destination exhausted "
+            f"plan.api_reads.max_calls ({api_reads.max_calls}) during retries"
+        )
     except Exception as exc:
         # Class name only: the message can carry a request detail or a token (#778).
         return unavailable(f"Could not read the destination ({type(exc).__name__})")
@@ -506,9 +514,11 @@ def _api_read_diff(
     added: list[dict[str, Any]] = []
     updated: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for row in rows:
-        existing = current_by_key.get(normalized_key(row))
+        key = normalized_key(row)
+        existing = current_by_key.get(key)
         if existing is None:
             added.append(row)
+            current_by_key[key] = row
             continue
         # Equal-after-normalisation values are shown as equal, so only a real difference
         # becomes a changed column; anything the normaliser cannot equate is an update.
@@ -521,6 +531,9 @@ def _api_read_diff(
         }
         if DiffResult.changed_fields(comparable, row):
             updated.append((comparable, row))
+        # Writes are applied sequentially. A later duplicate key must compare with
+        # the state left by the earlier row, not the pre-write snapshot.
+        current_by_key[key] = row
 
     return DiffResult(
         added=added[:limit],
