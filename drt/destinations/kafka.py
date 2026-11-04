@@ -64,7 +64,59 @@ class KafkaDestination:
         )
         retry = resolve_retry(config.retry, sync_options)
         result = SyncResult()
-        pending: set[int] = set()                
+        pending: set[int] = set()
+
+        def fail(index: int, exc: Exception) -> None:
+                    pass
+        
+        def on_delivery(index: int, error: Any, message: Any) -> None:
+            """Upate pending, result counters"""
+            pass
+
+        def send(body: bytes, key:bytes | None, report: Callable[[Any, Any], None]) -> bool:
+            """Call the Kafka's producer API here."""
+            pass
+
+        try:
+            for index, record in enumerate(records):
+                producer.poll(0)
+                if result.failed and sync_options.on_error == "fail":
+                    break
+                try:
+                    # seriealize record here.
+                    pass
+                except (TypeError, ValueError) as exc:
+                    pass
+
+                limiter.acquire()
+                report = partial(on_delivery, index)
+                # TODO: create a send_record callback using send and report callbacks.
+                send_record = None
+                try:
+                    if not with_retry(
+                        send_record, retry, retry_on=lambda exc: isinstance(exc, BufferError)
+                    ):
+                        break
+                    pending.add(index)
+                except Exception as exc:
+                    fail(index, exc)
+
+            if pending:
+                producer.flush(config.delivery_timeout_s)
+            for index in sorted(pending):
+                fail(
+                    index,
+                    TimeoutError(
+                        "Kafka delivery timed out before confirmation; the message may have "
+                        "been delivered, so replay can duplicate it."
+                    ),
+                )
+        finally:
+            pending.clear()
+
+        result.skipped = len(records) - result.total
+        result.row_errors.sort(key=lambda error: error.batch_index)
+        return result
 
     def _close(self) -> None:
         """Close client connection."""
