@@ -73,6 +73,7 @@ PLAN_COVERAGE: dict[str, PlanCoverage] = {
     "jira": PlanCoverage("needs-api-diff", _API),
     "linear": PlanCoverage("needs-api-diff", _API),
     "notion": PlanCoverage("needs-api-diff", _API),
+    "pipedrive": PlanCoverage("needs-api-diff", _API),
     "salesforce_bulk": PlanCoverage("needs-api-diff", _API),
     "zendesk": PlanCoverage("needs-api-diff", _API),
     "amplitude": PlanCoverage("unavailable", _EVENT),
