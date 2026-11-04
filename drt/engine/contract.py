@@ -46,8 +46,11 @@ class ContractCheck:
         return not self.violations
 
     def message(self) -> str:
+        from drt.integrations.dbt import _safe
+
         details = "; ".join(
-            f"{v.column!r} expected {v.expected}, actual {v.actual}" for v in self.violations
+            f"{_safe(v.column)!r} expected {_safe(v.expected)}, actual {_safe(v.actual)}"
+            for v in self.violations
         )
         return f"Column contract violation: {details}."
 

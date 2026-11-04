@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
@@ -118,19 +119,19 @@ def _safe(value: object, limit: int = 80) -> str:
 
 # One parse per manifest per process: every dbt-backed sync, and ``plan --all`` reloading
 # the syncs once per name, would otherwise re-parse the whole (often tens of MB) manifest.
-_MANIFEST_CACHE: dict[tuple[str, int, int], dict[str, Any]] = {}
+_MANIFEST_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 def _read_manifest(manifest_path: Path) -> dict[str, Any]:
     if not manifest_path.exists():
         raise FileNotFoundError(f"dbt manifest not found: {manifest_path}")
     try:
-        stat = manifest_path.stat()
-        key = (str(manifest_path.resolve()), stat.st_mtime_ns, stat.st_size)
+        payload = manifest_path.read_bytes()
+        key = (str(manifest_path.resolve()), sha256(payload).hexdigest())
         cached = _MANIFEST_CACHE.get(key)
         if cached is not None:
             return cached
-        value = json.loads(manifest_path.read_text())
+        value = json.loads(payload)
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Could not read dbt manifest {manifest_path}: {exc}") from exc
     if not isinstance(value, dict):

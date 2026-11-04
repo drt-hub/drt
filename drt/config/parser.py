@@ -69,6 +69,8 @@ def _dbt_disagreement(
     model_name: str, authored: list[ColumnConfig], derived: list[ColumnConfig]
 ) -> str | None:
     """Describe a hand-written/dbt disagreement; authored columns still win."""
+    from drt.integrations.dbt import _safe
+
     authored_by_name = {column.name: column for column in authored}
     derived_by_name = {column.name: column for column in derived}
     details: list[str] = []
@@ -77,16 +79,18 @@ def _dbt_disagreement(
     if only_authored:
         details.append("only hand-written: " + ", ".join(only_authored))
     if only_dbt:
-        details.append("only in dbt: " + ", ".join(only_dbt))
+        details.append("only in dbt: " + ", ".join(_safe(name) for name in only_dbt))
     for name in sorted(authored_by_name.keys() & derived_by_name.keys()):
         authored_column = authored_by_name[name]
         dbt_column = derived_by_name[name]
+        safe_name = _safe(name)
         if authored_column.type != dbt_column.type:
             details.append(
-                f"{name} type is {authored_column.type} (hand-written) vs {dbt_column.type} (dbt)"
+                f"{safe_name} type is {authored_column.type} (hand-written) "
+                f"vs {dbt_column.type} (dbt)"
             )
         if authored_column.description != dbt_column.description:
-            details.append(f"{name} description differs")
+            details.append(f"{safe_name} description differs")
     if not details:
         return None
     return (
@@ -103,7 +107,7 @@ def _resolve_dbt_contract(
         return sync, None
 
     from drt.engine.resolver import parse_ref
-    from drt.integrations.dbt import resolve_contract_from_manifest
+    from drt.integrations.dbt import _safe, resolve_contract_from_manifest
 
     model_name = parse_ref(sync.model)
     if model_name is None:
@@ -131,7 +135,7 @@ def _resolve_dbt_contract(
     if duplicates:
         raise ValueError(
             f"dbt model {model_name!r} declares duplicate column name(s): "
-            + ", ".join(repr(name) for name in duplicates)
+            + ", ".join(repr(_safe(name)) for name in duplicates)
         )
 
     authored = sync.columns

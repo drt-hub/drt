@@ -30,6 +30,7 @@ def validate(
         _run_connection_test,
     )
     from drt.config.secrets import find_hardcoded_secrets
+    from drt.integrations.dbt import _safe
 
     result = ctx.load_syncs_safe(manifest_path=manifest_path)
     secret_findings = find_hardcoded_secrets(ctx.project_dir)
@@ -39,14 +40,19 @@ def validate(
     for f in idempotency_findings:
         idempotency_warnings_by_sync.setdefault(f.sync_name, []).append(f.message)
 
-    errors = dict(result.errors)
+    errors = {
+        name: [_safe(error, limit=1500) for error in messages]
+        for name, messages in result.errors.items()
+    }
     warnings: dict[str, list[str]] = {}
     idempotency_warnings: dict[str, list[str]] = {}
     valid: list[str] = []
 
     for s in result.syncs:
         sync_warnings = [f.message for f in secret_warnings_by_sync.get(s.name, [])]
-        sync_warnings.extend(result.warnings.get(s.name, []))
+        sync_warnings.extend(
+            _safe(warning, limit=1500) for warning in result.warnings.get(s.name, [])
+        )
         if sync_warnings:
             warnings[s.name] = sync_warnings
         if s.name in idempotency_warnings_by_sync:

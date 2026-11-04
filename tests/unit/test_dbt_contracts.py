@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -222,6 +223,44 @@ def test_validate_prints_disagreement_and_strict_promotes_it(
     assert "hand-written columns override dbt model" in strict.output
 
 
+def test_validate_sanitizes_manifest_column_names_for_cli_and_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_sync(tmp_path, columns=[{"name": "id", "type": "integer"}])
+    _write_manifest(
+        tmp_path,
+        {
+            "model.analytics.customers": _node(
+                columns={
+                    "markup": {"name": "[/]", "data_type": "bigint"},
+                    "newline": {"name": "line\nbreak", "data_type": "varchar"},
+                }
+            )
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    cli_result = runner.invoke(app, ["validate"], catch_exceptions=False)
+
+    assert cli_result.exit_code == 0
+    assert "only in dbt: ?/?, line?break" in cli_result.output
+
+    from drt.mcp.tools.validate import validate as mcp_validate
+
+    class _Context:
+        project_dir = tmp_path
+
+        @staticmethod
+        def load_syncs_safe(manifest_path: str | None = None):
+            path = Path(manifest_path) if manifest_path is not None else None
+            return load_syncs_safe(tmp_path, manifest_path=path)
+
+    response = mcp_validate(_Context())
+    warning = response["warnings"]["customers_to_api"][0]
+    assert "only in dbt: ?/?, line?break" in warning
+    assert all(character.isprintable() for character in warning)
+
+
 @pytest.mark.parametrize(
     ("model", "nodes", "message"),
     [
@@ -349,6 +388,26 @@ def test_duplicate_manifest_column_names_are_validate_error(tmp_path: Path) -> N
     assert "duplicate column name(s): 'id'" in result.errors["customers"][0]
 
 
+def test_duplicate_manifest_column_name_is_sanitized(tmp_path: Path) -> None:
+    _write_sync(tmp_path)
+    _write_manifest(
+        tmp_path,
+        {
+            "model.analytics.customers": _node(
+                columns={
+                    "first": {"name": "[/]\nbad", "data_type": "bigint"},
+                    "second": {"name": "[/]\nbad", "data_type": "bigint"},
+                }
+            )
+        },
+    )
+
+    message = load_syncs_safe(tmp_path).errors["customers"][0]
+
+    assert "duplicate column name(s): '?/??bad'" in message
+    assert all(character.isprintable() for character in message)
+
+
 def test_source_dbt_requires_exact_ref_model(tmp_path: Path) -> None:
     _write_sync(tmp_path, model="SELECT * FROM customers")
     _write_manifest(tmp_path, {"model.analytics.customers": _node()})
@@ -443,6 +502,30 @@ def test_run_and_plan_path_use_one_manifest_snapshot_even_if_file_changes(
     assert source.query is not None
     assert '"warehouse"."marts"."customers"' in source.query
     assert "mutated" not in source.query
+
+
+def test_runtime_contract_message_sanitizes_manifest_column_name(tmp_path: Path) -> None:
+    _write_sync(tmp_path)
+    _write_manifest(
+        tmp_path,
+        {
+            "model.analytics.customers": _node(
+                columns={"unsafe": {"name": "[/]\nbad", "data_type": "bigint"}}
+            )
+        },
+    )
+
+    result = run_sync(
+        load_syncs(tmp_path)[0],
+        _CapturingSource(),
+        _Destination(),
+        BigQueryProfile(type="bigquery", project="p", dataset="d"),
+        tmp_path,
+    )
+
+    assert result.failed == 1
+    assert "'?/??bad' expected integer, actual missing" in result.errors[0]
+    assert all(character.isprintable() for character in result.errors[0])
 
 
 def test_docs_manifest_reuses_v6_columns_and_resolved_fingerprint(tmp_path: Path) -> None:
@@ -549,3 +632,27 @@ def test_the_manifest_is_parsed_once_per_file_version(tmp_path: Path, monkeypatc
     assert first is second and len(calls) == 1
     path.write_text(json.dumps({"nodes": {}, "metadata": {"changed": True}}))
     assert dbt_module._read_manifest(path) is not first and len(calls) == 2
+
+
+def test_manifest_cache_detects_same_size_replacement_with_restored_mtime(tmp_path: Path) -> None:
+    import drt.integrations.dbt as dbt_module
+
+    path = _write_manifest(tmp_path, {"model.analytics.customers": _node()})
+    first_payload = path.read_bytes()
+    second_payload = first_payload.replace(b'"id"', b'"xy"')
+    assert first_payload != second_payload
+    assert len(first_payload) == len(second_payload)
+
+    first_stat = path.stat()
+    first = dbt_module._read_manifest(path)
+    path.write_bytes(second_payload)
+    os.utime(path, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns))
+
+    second_stat = path.stat()
+    second = dbt_module._read_manifest(path)
+
+    assert second_stat.st_size == first_stat.st_size
+    assert second_stat.st_mtime_ns == first_stat.st_mtime_ns
+    assert first is not second
+    assert "id" in first["nodes"]["model.analytics.customers"]["columns"]
+    assert "xy" in second["nodes"]["model.analytics.customers"]["columns"]

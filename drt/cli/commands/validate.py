@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import typer
+from rich.markup import escape
 
 if TYPE_CHECKING:
     from drt.config.models import SyncConfig
@@ -311,7 +312,7 @@ def validate(
             console.print(f"  [yellow]WARNING[/yellow] {finding.message}")
 
         for warning in result.warnings.get(sync.name, []):
-            console.print(f"  [yellow]WARNING[/yellow] {warning}")
+            console.print(f"  [yellow]WARNING[/yellow] {escape(warning)}")
 
         for idempotency_finding in idempotency_warnings_by_sync.get(sync.name, []):
             console.print(f"  [yellow]WARNING[/yellow] {idempotency_finding.message}")

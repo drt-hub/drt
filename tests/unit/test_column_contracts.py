@@ -7,6 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -150,6 +151,24 @@ class TestPureContractCheck:
         ]
         message = checked.message()
         assert all(name in message for name in ("id", "email", "missing", "extra"))
+        assert message == (
+            "Column contract violation: 'id' expected integer, actual string; "
+            "'email' expected string, actual integer; 'missing' expected date, actual missing; "
+            "'extra' expected not declared, actual boolean."
+        )
+
+    def test_cli_escapes_contract_message_markup(self) -> None:
+        from drt.cli.output import print_sync_result
+
+        with patch("drt.cli.output.console") as console:
+            print_sync_result(
+                "contracted",
+                SyncResult(rows_extracted=1, failed=1, errors=["unsafe [/] column"]),
+                elapsed=1.0,
+            )
+
+        printed = " ".join(str(call.args[0]) for call in console.print.call_args_list)
+        assert r"\[/]" in printed
 
     def test_sparse_batch_unions_keys_and_ignore_allows_extras(self) -> None:
         columns = [
