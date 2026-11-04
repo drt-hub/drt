@@ -1026,6 +1026,39 @@ class SyncMetaConfig(BaseModel):
     maturity: Literal["high", "medium", "low"] = "high"
 
 
+class ApiReadsConfig(BaseModel):
+    """Opt-in to API-based plan reads for a SaaS destination (#472, ADR 0018).
+
+    ``drt plan`` reads the current state of the rows it would write through a bounded
+    number of exact-key vendor API calls. Over ``max_calls`` the plan is unavailable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_calls: int = Field(
+        default=200,
+        ge=1,
+        description=(
+            "Most physical vendor read attempts one plan may spend, including retries; "
+            "over it the plan is unavailable."
+        ),
+    )
+
+
+class PlanConfig(BaseModel):
+    """How ``drt plan`` / ``drt apply`` look at the destination (#472)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_reads: ApiReadsConfig | None = None
+
+
+# Destinations that implement ``KeyedReadDestination`` (ADR 0018). A sync naming
+# ``plan.api_reads`` for any other destination is rejected, because silently ignoring it
+# would leave the reviewer believing a plan read the destination when it did not.
+_API_READ_DESTINATION_TYPES = frozenset({"hubspot"})
+
+
 class SyncConfig(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -1065,6 +1098,32 @@ class SyncConfig(BaseModel):
         ),
     )
     contract: ContractConfig | None = None
+    plan: PlanConfig | None = None  # how `drt plan` reads the destination (#472)
+
+    @model_validator(mode="after")
+    def _check_plan_api_reads(self) -> SyncConfig:
+        if self.plan is None or self.plan.api_reads is None:
+            return self
+        destination_type = destination_type_of(self.destination)
+        if destination_type not in _API_READ_DESTINATION_TYPES:
+            raise ValueError(
+                f"plan.api_reads is not available for destination type {destination_type!r}; "
+                f"supported: {', '.join(sorted(_API_READ_DESTINATION_TYPES))}."
+            )
+        if self.sync.mode in {"replace", "mirror"}:
+            raise ValueError(
+                "plan.api_reads cannot plan sync.mode replace or mirror: a vendor API has no "
+                "safe way to list the rows a delete would remove."
+            )
+        if self.sync.metadata_columns is not None:
+            # A destination template can render the engine-written values (run id, synced_at),
+            # which differ between a plan and the run that applies it by construction, so the
+            # plan could never match what is written.
+            raise ValueError(
+                "plan.api_reads cannot be combined with sync.metadata_columns: the "
+                "engine-written values differ between a plan and its apply."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_column_contract(self) -> SyncConfig:

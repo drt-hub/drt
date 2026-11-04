@@ -127,6 +127,22 @@ def _engine_written_columns(sync: SyncConfig) -> set[str]:
     }
 
 
+def _plan_key_columns(sync: SyncConfig) -> list[str]:
+    """The columns that identify a planned row at the destination.
+
+    ``destination.upsert_key`` for SQL destinations; a SaaS destination planned through
+    API reads (#472) names its own (HubSpot: ``id_property``).
+    """
+    destination = sync.destination
+    if sync.plan is not None and sync.plan.api_reads is not None:
+        from drt.destinations.base import KeyedReadDestination
+
+        implementation = get_destination(sync)
+        if isinstance(implementation, KeyedReadDestination):
+            return implementation.plan_key_columns(destination)
+    return list(getattr(destination, "upsert_key", None) or [])
+
+
 def compute_plan(
     sync_name: str,
     *,
@@ -243,7 +259,7 @@ def compute_plan(
         environment_fingerprint=environment_fingerprint(sync, project_vars, profile, plan_key),
         plan_key=plan_key,
         drt_version=__version__,
-        key_columns=list(getattr(destination, "upsert_key", None) or []),
+        key_columns=_plan_key_columns(sync),
         mask_columns=set(sync.sync.mask or {}),
         redact_keys=redact_keys,
         exclude_columns=_engine_written_columns(sync),
@@ -309,7 +325,13 @@ def compute_plan_from_records(
         if preflight is not None:
             preflight(project, state_bundle, sync)
         try:
-            diff = compute_diff(records, sync.destination, sync.sync, limit=sys.maxsize)
+            diff = compute_diff(
+                records,
+                sync.destination,
+                sync.sync,
+                limit=sys.maxsize,
+                api_reads=sync.plan.api_reads if sync.plan is not None else None,
+            )
         except Exception as e:
             raise PlanCliError(f"Could not verify exact replay for '{sync_name}': {e}") from e
 
@@ -325,7 +347,7 @@ def compute_plan_from_records(
         environment_fingerprint=environment_fingerprint(sync, project_vars, profile, plan_key),
         plan_key=plan_key,
         drt_version=__version__,
-        key_columns=list(getattr(destination, "upsert_key", None) or []),
+        key_columns=_plan_key_columns(sync),
         mask_columns=set(sync.sync.mask or {}),
         redact_keys=redact_keys,
         exclude_columns=_engine_written_columns(sync),

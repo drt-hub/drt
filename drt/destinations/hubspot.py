@@ -51,7 +51,7 @@ import httpx
 
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, HubSpotDestinationConfig, RetryConfig, SyncOptions
-from drt.destinations.base import SyncResult
+from drt.destinations.base import ApiReadLimitExceeded, SyncResult
 from drt.destinations.rate_limiter import RateLimiterBackend, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
@@ -599,3 +599,99 @@ class HubSpotDestination:
     def supported_write_policies(self) -> frozenset[str]:
         """HubSpot honours ``fill_empty`` through a fail-closed batch read (#1238)."""
         return frozenset({"overwrite", "fill_empty"})
+
+    # ------------------------------------------------------------------
+    # KeyedReadDestination (#472, ADR 0018): plan by exact-key batch reads.
+    # ------------------------------------------------------------------
+
+    def plan_key_columns(self, config: DestinationConfig) -> list[str]:
+        assert isinstance(config, HubSpotDestinationConfig)
+        return [config.id_property]
+
+    def plan_rows(
+        self, records: list[dict[str, Any]], config: DestinationConfig
+    ) -> list[dict[str, Any]]:
+        """The HubSpot properties each record would be written as."""
+        assert isinstance(config, HubSpotDestinationConfig)
+        if not config.properties_template:
+            return [dict(record) for record in records]
+        rows: list[dict[str, Any]] = []
+        for index, record in enumerate(records):
+            try:
+                properties = json.loads(render_template(config.properties_template, record))
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"properties_template error on source row {index}: {type(exc).__name__}"
+                ) from exc
+            if not isinstance(properties, dict):
+                raise ValueError(
+                    f"properties_template must render a JSON object (source row {index})"
+                )
+            rows.append(properties)
+        return rows
+
+    def max_read_batch(self, config: DestinationConfig) -> int:
+        return 100  # HubSpot's batch read limit
+
+    def read_current(
+        self,
+        config: DestinationConfig,
+        keys: list[tuple[Any, ...]],
+        columns: list[str],
+        sync_options: SyncOptions,
+        max_calls: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Current property values of the HubSpot objects whose ``id_property`` is in ``keys``.
+
+        Reuses the fail-closed batch read behind ``fill_empty`` (#1238): an uncorrelated
+        result, an incomplete batch or a 207 with an unexplained error raises, so the
+        plan is unavailable rather than guessed.
+        """
+        assert isinstance(config, HubSpotDestinationConfig)
+        token = resolve_env(config.auth.token, config.auth.token_env)
+        if not token:
+            raise ValueError(
+                "HubSpot destination: set HUBSPOT_TOKEN env var "
+                "or provide auth.token_env in the sync config."
+            )
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        url = f"{_HUBSPOT_API}/{config.object_type}/batch/read"
+        limiter = resolve_rate_limiter(config, sync_options, max_requests_per_second=9)
+        retry_config = resolve_retry(config.retry, sync_options)
+        batch = self.max_read_batch(config)
+        id_values = [key[0] for key in keys]
+        found: list[dict[str, Any]] = []
+        calls = 0
+        with httpx.Client(timeout=30.0) as client:
+            for start in range(0, len(id_values), batch):
+                chunk = id_values[start : start + batch]
+
+                def read(_chunk: list[Any] = chunk) -> dict[str, dict[str, Any]]:
+                    nonlocal calls
+
+                    if calls >= max_calls:
+                        raise ApiReadLimitExceeded
+                    limiter.acquire()
+                    calls += 1
+                    return self._read_current_properties(
+                        client, url, headers, config.id_property, columns, _chunk
+                    )
+
+                current = with_retry(read, retry_config)
+                for requested_id, properties in current.items():
+                    # ``item['id']`` is a valid correlation fallback for internal-ID
+                    # reads even when HubSpot omits ``id_property`` from properties.
+                    # Preserve that correlated key in the row consumed by the diff.
+                    row = dict(properties)
+                    row[config.id_property] = requested_id
+                    found.append(row)
+        return found, calls
+
+    def normalize_for_compare(self, column: str, value: Any) -> Any:
+        """HubSpot stores every property as a string; ``None`` and ``""`` are both empty."""
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        text = str(value)
+        return text.casefold() if column in {"email", "domain"} else text

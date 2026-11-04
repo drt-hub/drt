@@ -7,9 +7,10 @@ declared place that says which is which, so the answer is visible in the docs an
 a new destination cannot ship without stating it.
 
 This describes the *destination's* capability to answer "what exists today". Every
-plan additionally needs ``destination.upsert_key`` and a sync that a plan can
-represent (see "When a plan is unavailable" in ``docs/guides/plan.md``); a keyless
-sync is reported unavailable whatever the destination.
+plan additionally needs a destination row-identity key (usually ``upsert_key``;
+HubSpot API reads use ``id_property``) and a sync that a plan can represent (see
+"When a plan is unavailable" in ``docs/guides/plan.md``); a keyless sync is reported
+unavailable whatever the destination.
 
 Status values:
 
@@ -19,6 +20,10 @@ Status values:
 ``partial``
     Only some write shapes can be planned (an append-only ``mode: insert``, whose
     write is known exactly without reading the target).
+``api-reads``
+    Planned through bounded exact-key vendor API reads (#472, ADR 0018): opt-in with
+    ``plan.api_reads`` in the sync, create/update only, a call budget, comparison is
+    conservative. The destination implements ``KeyedReadDestination``.
 ``needs-api-diff``
     The destination has an API that could answer "what exists today"; planning it
     is the API-based diff work of #472. Not planned today.
@@ -38,9 +43,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-PlanStatus = Literal["available", "partial", "needs-api-diff", "unavailable"]
+PlanStatus = Literal["available", "partial", "api-reads", "needs-api-diff", "unavailable"]
 
-PLAN_STATUSES: tuple[PlanStatus, ...] = ("available", "partial", "needs-api-diff", "unavailable")
+PLAN_STATUSES: tuple[PlanStatus, ...] = (
+    "available",
+    "partial",
+    "api-reads",
+    "needs-api-diff",
+    "unavailable",
+)
 
 
 @dataclass(frozen=True)
@@ -68,7 +79,13 @@ PLAN_COVERAGE: dict[str, PlanCoverage] = {
     "airtable": PlanCoverage("needs-api-diff", _API),
     "elasticsearch": PlanCoverage("needs-api-diff", _API),
     "google_sheets": PlanCoverage("needs-api-diff", _API),
-    "hubspot": PlanCoverage("needs-api-diff", _API),
+    "hubspot": PlanCoverage(
+        "api-reads",
+        "Opt in with `plan.api_reads` in the sync: the plan reads the rows it would write "
+        "through HubSpot's batch read (100 per call, within a call budget). Create/update "
+        "only (no mirror/replace), `write_policy: fill_empty` not yet, and an update can be "
+        "a formatting difference. Not exposed through MCP.",
+    ),
     "intercom": PlanCoverage("needs-api-diff", _API),
     "jira": PlanCoverage("needs-api-diff", _API),
     "linear": PlanCoverage("needs-api-diff", _API),

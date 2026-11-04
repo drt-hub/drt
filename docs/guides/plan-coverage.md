@@ -14,6 +14,12 @@
 |---|---|
 | `bigquery` | Only `mode: insert` (append-only) can be planned. `merge`, mirror and replace need a target read that BigQuery does not implement yet. |
 
+## Planned through bounded vendor API reads (opt-in, #472)
+
+| Destination | Why |
+|---|---|
+| `hubspot` | Opt in with `plan.api_reads` in the sync: the plan reads the rows it would write through HubSpot's batch read (100 per call, within a call budget). Create/update only (no mirror/replace), `write_policy: fill_empty` not yet, and an update can be a formatting difference. Not exposed through MCP. |
+
 ## Not planned yet — could be (API-based diff, #472)
 
 | Destination | Why |
@@ -21,7 +27,6 @@
 | `airtable` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `elasticsearch` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `google_sheets` | Records live behind an API that could be read back by key (API-based diff, #472). |
-| `hubspot` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `intercom` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `jira` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `linear` | Records live behind an API that could be read back by key (API-based diff, #472). |
@@ -55,4 +60,4 @@
 | `teams` | Event/message sink: there is no stored target state to diff. |
 | `twilio` | Event/message sink: there is no stored target state to diff. |
 
-Every plan also needs `destination.upsert_key` and a sync a plan can represent; see [When a plan is unavailable](plan.md#when-a-plan-is-unavailable). A third-party (plugin) destination needs no entry and is not listed here; whether it can be planned depends on what it implements.
+Every plan also needs a destination row-identity key (`upsert_key` for SQL; HubSpot `id_property` for API reads) and a sync a plan can represent; see [When a plan is unavailable](plan.md#when-a-plan-is-unavailable). A third-party (plugin) destination needs no entry and is not listed here; whether it can be planned depends on what it implements.

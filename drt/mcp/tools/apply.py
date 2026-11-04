@@ -8,6 +8,7 @@ stale or was already applied.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from drt.mcp._untrusted import DATA_NOTICE, message
@@ -40,7 +41,7 @@ def apply(
 ) -> dict[str, Any]:
     from drt.cli._apply_flow import PLAN_ID_PATTERN, ApplyRefused, apply_plan, parse_duration
     from drt.cli._plan_runner import load_plan_key
-    from drt.mcp.tools.plan import load_stored_plan
+    from drt.mcp.tools.plan import API_READS_REFUSAL, load_stored_plan
 
     who = (approved_by or "").strip()
     if not who or len(who) > _MAX_APPROVER:
@@ -63,6 +64,15 @@ def apply(
                 f"No plan {plan_id} was fetched with drt_plan on this project. Call drt_plan first."
             ),
         }
+
+    try:
+        stored_document = json.loads(text)
+    except json.JSONDecodeError:
+        stored_document = None
+    if isinstance(stored_document, dict) and "api_reads" in stored_document:
+        # A plan that read the destination through vendor API calls is re-verified by
+        # reading again; that spends quota, so it is a CLI-only workflow (ADR 0018).
+        return {"applied": False, "plan_id": plan_id, "error": API_READS_REFUSAL}
 
     notes: list[str] = []
     try:

@@ -21,6 +21,7 @@ DOC = Path(__file__).resolve().parent.parent / "docs" / "guides" / "plan-coverag
 _HEADINGS = {
     "available": "Planned (true create / update / delete change set)",
     "partial": "Partly planned",
+    "api-reads": "Planned through bounded vendor API reads (opt-in, #472)",
     "needs-api-diff": "Not planned yet — could be (API-based diff, #472)",
     "unavailable": "Not planned — no target state to diff",
 }
@@ -54,7 +55,8 @@ def render() -> str:
         lines += [f"| `{m}` | {PLAN_COVERAGE[m].reason} |" for m in members]
         lines.append("")
     lines += [
-        "Every plan also needs `destination.upsert_key` and a sync a plan can represent; see "
+        "Every plan also needs a destination row-identity key (`upsert_key` for SQL; "
+        "HubSpot `id_property` for API reads) and a sync a plan can represent; see "
         "[When a plan is unavailable](plan.md#when-a-plan-is-unavailable). A third-party "
         "(plugin) destination needs no entry and is not listed here; whether it can be planned "
         "depends on what it implements.",

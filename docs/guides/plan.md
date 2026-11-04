@@ -77,7 +77,8 @@ reason when:
 - the destination cannot report what it currently contains (most SaaS
   destinations), or the set of rows a mirror would delete could not be read;
 - the extraction did not complete (failed rows, interruption);
-- `destination.upsert_key` is missing;
+- the destination cannot provide a row-identity key (`destination.upsert_key` for SQL
+  destinations; HubSpot `id_property` for API reads);
 - the sync uses something a plan cannot represent yet: `match_policy:
   update_only` / `create_only`, `incremental_strategy: diff` (snapshot
   extraction writes scratch tables, so it is not read-only), or an engine
@@ -87,6 +88,45 @@ reason when:
 
 See [plan coverage by destination](plan-coverage.md) for which destinations can be
 planned today.
+
+## Planning a SaaS destination with API reads (HubSpot)
+
+A SaaS destination cannot be read back like a table, so by default `drt plan` reports it
+as unavailable. HubSpot can answer "what exists today" for a list of keys, so a sync can opt
+in to a plan made from bounded vendor reads ([ADR 0018](../adr/0018-api-based-plan-reads.md),
+[#472](https://github.com/drt-hub/drt/issues/472)):
+
+```yaml
+destination:
+  type: hubspot
+  id_property: email
+plan:
+  api_reads:
+    max_calls: 200   # default; the plan is unavailable beyond it
+```
+
+- **What is read.** The properties the sync writes, for exactly the keys in the source, through
+  HubSpot's batch read (100 keys per call). Only exact-key reads are used, never search: a
+  search index lags, and would plan a *create* for a contact that exists. An ambiguous or
+  incomplete answer makes the plan unavailable, with the reason.
+- **Cost.** At least `ceil(rows / 100)` read calls per plan, and `drt apply` plans again before it
+  writes. Every physical retry attempt is rate-limited and counts against `max_calls`; the plan
+  becomes unavailable before an attempt beyond that budget. Actual attempts are recorded in
+  `plan.json` as `api_reads: {calls, rows, fidelity: conservative}`.
+- **Comparison is conservative.** HubSpot stores every property as a string and lower-cases
+  emails, so values are compared after that normalisation. A row is *unchanged* only when the
+  normalised values are equal; anything else is an *update*, which can occasionally be a
+  formatting difference. An update is never hidden.
+- **No `metadata_columns`.** A properties template can render the engine-written values (run id, `synced_at`), which differ between a plan and its apply by construction, so `plan.api_reads` is rejected together with `sync.metadata_columns`.
+- **Creates and updates only.** `sync.mode: mirror` and `replace` are rejected with
+  `plan.api_reads` (a vendor API has no safe way to list the rows a delete would remove), and
+  `write_policy: fill_empty` is not planned yet.
+- **Not over MCP.** `drt_plan` refuses a sync with `plan.api_reads` and `drt_apply` refuses a
+  plan that carries `api_reads`: an agent should not spend vendor quota unprompted. Plan and
+  apply it with the CLI.
+
+`plan.api_reads` is rejected at validation for destinations that do not implement it, so it
+cannot be silently ignored.
 
 ## Review loop in CI (GitHub Actions)
 

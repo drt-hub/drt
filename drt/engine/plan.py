@@ -78,6 +78,8 @@ class Plan:
     total_destination_rows: int | None = None
     delete_baseline: int | None = None
     kept_values: int = 0
+    # Vendor read calls this plan spent (#472): ``{"calls", "rows"}``; absent otherwise.
+    api_reads: dict[str, int] | None = None
     guards_configured: dict[str, Any] | None = None
     guard_trips: list[GuardTrip] = field(default_factory=list)
     entries: list[PlanEntry] = field(default_factory=list)
@@ -155,6 +157,10 @@ class Plan:
         }
         if self.payload is not None:
             body["payload"] = self.payload
+        if self.api_reads is not None:
+            # Additive and sealed. Comparison is conservative by design (ADR 0018): a vendor
+            # normalises values, so an "update" can be a formatting difference.
+            body["api_reads"] = {**self.api_reads, "fidelity": "conservative"}
         return body
 
     def to_json(self) -> str:
@@ -295,6 +301,7 @@ def build_plan(
         total_destination_rows=diff.total_destination_rows,
         delete_baseline=diff.delete_baseline,
         kept_values=diff.kept_values,
+        api_reads=diff.api_reads,
     )
 
     if not diff.supported:
@@ -615,6 +622,16 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
             },
             "additionalProperties": False,
         },
+        "api_reads": {
+            "type": "object",
+            "required": ["calls", "rows", "fidelity"],
+            "properties": {
+                "calls": {"type": "integer", "minimum": 0},
+                "rows": {"type": "integer", "minimum": 0},
+                "fidelity": {"const": "conservative"},
+            },
+            "additionalProperties": False,
+        },
         "entries": {
             "type": "array",
             "items": {
@@ -705,6 +722,11 @@ def render_text(plan: Plan) -> str:
     lines.append(f"  Source rows: {plan.total_source_rows}")
     if plan.total_destination_rows is not None:
         lines.append(f"  Destination rows read: {plan.total_destination_rows}")
+    if plan.api_reads is not None:
+        lines.append(
+            f"  Vendor API read calls: {plan.api_reads['calls']} "
+            "(an update may be a formatting difference; comparison is conservative)"
+        )
     for trip in plan.guard_trips:
         lines.append(f"  GUARD TRIPPED: {trip.message}")
     lines.append(f"  plan_id: {plan.plan_id}")
