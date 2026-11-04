@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -66,12 +67,25 @@ def _prepare(
     options: SyncOptions | None = None,
 ) -> tuple[Any, MagicMock, MagicMock]:
     connection, cursor = _connection(rows)
+    appended_rows = list(rows)
+    if not dry_run and rows and config.on_schema_change == "append_new_columns":
+        existing = {str(row[0]).lower() for row in rows}
+        for column in {key for record in records for key in record}:
+            if column.lower() not in existing:
+                if isinstance(destination, MySQLDestination):
+                    appended_rows.append((column, "text", "YES", None, ""))
+                else:
+                    appended_rows.append((column, "text", "YES", None, "NO"))
     if isinstance(destination, MySQLDestination) and rows:
         key_rows = [
-            ("PRIMARY", column, position)
+            ("PRIMARY", column, position, None)
             for position, column in enumerate(config.upsert_key, start=1)
         ]
         cursor.fetchall.side_effect = [rows, key_rows]
+        if appended_rows != rows:
+            cursor.fetchall.side_effect.append(appended_rows)
+    elif appended_rows != rows:
+        cursor.fetchall.side_effect = [rows, appended_rows]
     elif not dry_run and not rows:
         described = []
         for column in {key for record in records for key in record}:
@@ -81,7 +95,7 @@ def _prepare(
                 described.append((column, "text", "NO", None, "NO"))
         if isinstance(destination, MySQLDestination):
             key_rows = [
-                ("PRIMARY", column, position)
+                ("PRIMARY", column, position, None)
                 for position, column in enumerate(config.upsert_key, start=1)
             ]
             cursor.fetchall.side_effect = [[], described, key_rows]
@@ -232,12 +246,9 @@ def test_declared_portable_types_drive_create_and_append_ddl() -> None:
     ]
 
 
-def test_engine_maps_declared_types_to_destination_names_and_supplements_metadata(
-    tmp_path: Path,
-) -> None:
+def test_engine_maps_source_metadata_to_destination_name_before_ddl(tmp_path: Path) -> None:
     from collections.abc import Iterator
 
-    from drt.destinations.base import SyncResult, TablePreparation
     from drt.engine.sync import run_sync
 
     class TypedSource:
@@ -245,17 +256,70 @@ def test_engine_maps_declared_types_to_destination_names_and_supplements_metadat
             self, query: str, config: Any, *, query_tags: dict[str, str] | None = None
         ) -> Iterator[dict[str, Any]]:
             del query, config, query_tags
-            yield {"raw_id": 1, "extra": {"ok": True}}
+            yield {"id": 1, "raw_score": 10}
 
         def source_column_types(self) -> dict[str, str]:
-            return {"raw_id": "TEXT", "extra": "JSON"}
+            return {"id": "INTEGER", "raw_score": "NUMBER"}
 
         def test_connection(self, config: Any) -> bool:
             return True
 
-    class CapturingDestination:
-        seen_types: dict[str, str] = {}
+    class MetadataDestination(PostgresDestination):
+        def _dialect_connect(self, config: Any, query_tags: Any = None) -> MagicMock:
+            del config, query_tags
+            return MagicMock()
 
+        def _managed_describe_table(self, cur: Any, config: Any) -> list[DestinationTableColumn]:
+            del cur, config
+            return [DestinationTableColumn("id", "bigint", False, False)]
+
+    sync = SyncConfig.model_validate(
+        {
+            "name": "typed",
+            "model": "ref('rows')",
+            "destination": {
+                "type": "postgres",
+                "host": "localhost",
+                "dbname": "app",
+                "table": "users",
+                "upsert_key": ["id"],
+                "manage_table": False,
+                "on_schema_change": "append_new_columns",
+            },
+            "columns": [{"name": "id", "type": "integer"}],
+            "sync": {"field_mappings": {"raw_score": "score"}},
+        }
+    )
+    result = run_sync(
+        sync,
+        TypedSource(),
+        MetadataDestination(),
+        BigQueryProfile(type="bigquery", project="p", dataset="d"),
+        tmp_path,
+        dry_run=True,
+    )
+    assert result.ddl == ['ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "score" NUMERIC NULL']
+
+
+def test_engine_does_not_request_source_metadata_without_managed_table_keys(
+    tmp_path: Path,
+) -> None:
+    from collections.abc import Iterator
+
+    from drt.destinations.base import SyncResult, TablePreparation
+    from drt.engine.sync import run_sync
+
+    class MetadataUnavailableSource:
+        def extract(
+            self, query: str, config: Any, *, query_tags: dict[str, str] | None = None
+        ) -> Iterator[dict[str, Any]]:
+            del query, config, query_tags
+            yield {"id": 1}
+
+        def source_column_types(self) -> dict[str, str]:
+            raise AssertionError("metadata must stay opt-in")
+
+    class ExistingDestination:
         def prepare_table(
             self,
             records: list[dict[str, Any]],
@@ -264,8 +328,7 @@ def test_engine_maps_declared_types_to_destination_names_and_supplements_metadat
             *,
             dry_run: bool,
         ) -> TablePreparation:
-            del config, dry_run
-            self.seen_types = dict(sync_options._source_column_types)
+            del config, sync_options, dry_run
             return TablePreparation(records)
 
         def reset_write_state(self, config: Any, sync_options: SyncOptions) -> None:
@@ -279,22 +342,25 @@ def test_engine_maps_declared_types_to_destination_names_and_supplements_metadat
 
     sync = SyncConfig.model_validate(
         {
-            "name": "typed",
+            "name": "existing",
             "model": "ref('rows')",
-            "destination": {"type": "rest_api", "url": "https://example.test"},
-            "columns": [{"name": "raw_id", "type": "integer"}],
-            "sync": {"field_mappings": {"raw_id": "id"}},
+            "destination": {
+                "type": "postgres",
+                "host": "localhost",
+                "dbname": "app",
+                "table": "users",
+                "upsert_key": ["id"],
+            },
         }
     )
-    destination = CapturingDestination()
-    run_sync(
+    result = run_sync(
         sync,
-        TypedSource(),
-        destination,
+        MetadataUnavailableSource(),
+        ExistingDestination(),
         BigQueryProfile(type="bigquery", project="p", dataset="d"),
         tmp_path,
     )
-    assert destination.seen_types == {"raw_id": "TEXT", "extra": "JSON", "id": "integer"}
+    assert result.success == 1
 
 
 def test_replace_create_does_not_require_or_constrain_an_upsert_key() -> None:
@@ -326,6 +392,19 @@ def test_unqualified_tables_use_the_current_database_schema() -> None:
         [{"id": "1"}],
     )
     assert "table_schema = DATABASE()" in mysql_cursor.execute.call_args.args[0]
+
+
+def test_postgres_managed_ddl_uses_the_normal_schema_relation_split() -> None:
+    result, _, cursor = _prepare(
+        PostgresDestination(),
+        _postgres_config(table="public.user.events"),
+        [],
+        [{"id": 1}],
+    )
+    assert cursor.execute.call_args.args[1] == ["user.events", "public"]
+    assert result.ddl == [
+        'CREATE TABLE IF NOT EXISTS "public"."user.events" ("id" TEXT NOT NULL, PRIMARY KEY ("id"))'
+    ]
 
 
 def test_create_executes_and_records_only_after_commit() -> None:
@@ -386,7 +465,7 @@ def test_new_columns_fail_ignore_or_append_before_write() -> None:
     assert appended.ddl == [
         'ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "new_field" TEXT NULL'
     ]
-    assert cursor.execute.call_args_list[-1].args[0] == appended.ddl[0]
+    assert any(call.args[0] == appended.ddl[0] for call in cursor.execute.call_args_list)
     connection.commit.assert_called_once_with()
 
 
@@ -607,6 +686,26 @@ def test_mysql_existing_table_requires_unique_upsert_key_before_write() -> None:
         )
 
 
+def test_mysql_prefix_unique_index_is_not_a_valid_upsert_key() -> None:
+    connection, cursor = _connection([])
+    cursor.fetchall.side_effect = [
+        [("email", "varchar(255)", "NO", None, "")],
+        [("uq_email", "email", 1, 10)],
+    ]
+    destination = MySQLDestination()
+    with (
+        patch.object(destination, "_dialect_connect", return_value=connection),
+        pytest.raises(ValueError, match="full-column.*Prefix indexes"),
+    ):
+        destination.prepare_table(
+            [{"email": "same-prefix-a@example.test"}],
+            _mysql_config(manage_table=False, upsert_key=["email"]),
+            SyncOptions(),
+            dry_run=False,
+        )
+    assert "sub_part" in cursor.execute.call_args_list[1].args[0]
+
+
 def test_mysql_rejects_case_insensitive_source_column_collision_before_connect() -> None:
     destination = MySQLDestination()
     with (
@@ -627,7 +726,7 @@ def test_mysql_duplicate_column_race_reintrospects_and_continues() -> None:
     columns = [("id", "bigint", "NO", None, "")]
     cursor.fetchall.side_effect = [
         columns,
-        [("PRIMARY", "id", 1)],
+        [("PRIMARY", "id", 1, None)],
         columns + [("email", "text", "YES", None, "")],
     ]
     cursor.execute.side_effect = [
@@ -649,6 +748,57 @@ def test_mysql_duplicate_column_race_reintrospects_and_continues() -> None:
     assert options._executed_ddl == []
 
 
+@pytest.mark.parametrize("destination_type", ["postgres", "mysql"])
+def test_concurrent_add_column_revalidates_the_winning_type(destination_type: str) -> None:
+    connection, cursor = _connection([])
+    columns = [("id", "bigint", "NO", None, "")]
+    winning_columns = columns + [("score", "text", "YES", None, "")]
+    if destination_type == "postgres":
+        destination: Any = PostgresDestination()
+        config: Any = _postgres_config(manage_table=False, on_schema_change="append_new_columns")
+        cursor.fetchall.side_effect = [columns, winning_columns]
+        cursor.execute.side_effect = [None, None, None]
+    else:
+        destination = MySQLDestination()
+        config = _mysql_config(manage_table=False, on_schema_change="append_new_columns")
+        cursor.fetchall.side_effect = [
+            columns,
+            [("PRIMARY", "id", 1, None)],
+            winning_columns,
+        ]
+        cursor.execute.side_effect = [
+            None,
+            None,
+            RuntimeError(1060, "Duplicate column name 'score'"),
+            None,
+        ]
+    options = SyncOptions()
+    options._source_column_types = {"id": "integer", "score": "integer"}
+    with (
+        patch.object(destination, "_dialect_connect", return_value=connection),
+        pytest.raises(ValueError, match="score.*integer -> text"),
+    ):
+        destination.prepare_table([{"id": 1, "score": 10}], config, options, dry_run=False)
+
+
+def test_add_column_that_remains_missing_fails_clearly() -> None:
+    connection, cursor = _connection([])
+    columns = [("id", "bigint", "NO", None, "")]
+    cursor.fetchall.side_effect = [columns, columns]
+    cursor.execute.side_effect = [None, None, None]
+    destination = PostgresDestination()
+    with (
+        patch.object(destination, "_dialect_connect", return_value=connection),
+        pytest.raises(RuntimeError, match=r"still missing column\(s\).*score.*after ALTER"),
+    ):
+        destination.prepare_table(
+            [{"id": 1, "score": 10}],
+            _postgres_config(manage_table=False, on_schema_change="append_new_columns"),
+            SyncOptions(),
+            dry_run=False,
+        )
+
+
 def test_non_permission_ddl_failure_keeps_redacted_database_error() -> None:
     connection, cursor = _connection([])
     cursor.execute.side_effect = [
@@ -663,6 +813,13 @@ def test_non_permission_ddl_failure_keeps_redacted_database_error() -> None:
         destination.prepare_table([{"id": 1}], _postgres_config(), SyncOptions(), dry_run=False)
     assert "postgres://" not in str(caught.value)
     assert "Grant CREATE" not in str(caught.value)
+    chained_traceback = "".join(
+        traceback.format_exception(type(caught.value), caught.value, caught.value.__traceback__)
+    )
+    assert "postgres://" not in chained_traceback
+    assert "secret" not in chained_traceback
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_required_destination_column_missing_from_source_errors() -> None:
@@ -676,6 +833,32 @@ def test_required_destination_column_missing_from_source_errors() -> None:
             _mysql_config(manage_table=False, on_schema_change="ignore"),
             columns,
             [{"id": 1}],
+        )
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_required_columns_are_checked_per_record_and_on_later_batches(dry_run: bool) -> None:
+    columns = [
+        ("id", "bigint", "NO", None, ""),
+        ("tenant", "text", "NO", None, ""),
+    ]
+    destination = MySQLDestination()
+    config = _mysql_config(manage_table=False, on_schema_change="ignore")
+    options = SyncOptions()
+    _prepare(
+        destination,
+        config,
+        columns,
+        [{"id": 1, "tenant": "a"}],
+        dry_run=dry_run,
+        options=options,
+    )
+    with pytest.raises(ValueError, match=r"required column\(s\).*tenant.*every record"):
+        destination.prepare_table(
+            [{"id": 2}, {"id": 3, "tenant": "b"}],
+            config,
+            options,
+            dry_run=dry_run,
         )
 
 
@@ -731,7 +914,7 @@ def test_ddl_failure_names_required_privilege_and_records_nothing() -> None:
     connection.rollback.assert_called_once_with()
 
 
-def test_ddl_failure_preserves_original_error_when_rollback_also_fails() -> None:
+def test_ddl_failure_ignores_rollback_error_without_chaining_raw_driver_error() -> None:
     connection, cursor = _connection([])
     cursor.execute.side_effect = [None, PermissionError("denied")]
     connection.rollback.side_effect = RuntimeError("rollback failed")
@@ -741,19 +924,22 @@ def test_ddl_failure_preserves_original_error_when_rollback_also_fails() -> None
         pytest.raises(RuntimeError, match="Grant CREATE") as caught,
     ):
         destination.prepare_table([{"id": 1}], _postgres_config(), SyncOptions(), dry_run=False)
-    assert isinstance(caught.value.__cause__, PermissionError)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_reset_clears_cached_managed_table_state() -> None:
     destination = MySQLDestination()
     destination._managed_table_checked = True
     destination._managed_known_columns = {"id": "id"}
+    destination._managed_required_columns = {"id": "id"}
     destination._managed_allowed_columns = {"id"}
     destination._managed_dry_run_created = True
     destination._schema_cache["users"] = {"id": "scalar"}
     destination.reset_write_state(_mysql_config(), SyncOptions())
     assert destination._managed_table_checked is False
     assert destination._managed_known_columns == {}
+    assert destination._managed_required_columns == {}
     assert destination._managed_allowed_columns is None
     assert destination._managed_dry_run_created is False
     assert destination._schema_cache == {}

@@ -1146,11 +1146,21 @@ def _run_sync_body(
             # capture or the first write. A source may expose cursor metadata
             # through an additive capability; otherwise the destination uses
             # its documented portable TEXT fallback.
-            if not sync.sync._source_column_metadata_loaded and isinstance(
-                source, SourceColumnMetadata
+            managed_fields = set(getattr(sync.destination, "model_fields_set", set()))
+            managed_table_configured = bool({"manage_table", "on_schema_change"} & managed_fields)
+            if (
+                managed_table_configured
+                and isinstance(destination, ManagedDestinationTableCapable)
+                and not sync.sync._source_column_metadata_loaded
+                and isinstance(source, SourceColumnMetadata)
             ):
                 with _stage_ctx("source"):
                     metadata_types = source.source_column_types()
+                mappings = sync.sync.field_mappings or {}
+                metadata_types = {
+                    mappings.get(column, column): data_type
+                    for column, data_type in metadata_types.items()
+                }
                 # Declarations are the stable public contract and win for
                 # overlapping columns; metadata can still type undeclared
                 # computed/plugin columns.

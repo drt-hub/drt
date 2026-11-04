@@ -263,7 +263,6 @@ class TestEngineHistoryIntegration:
         from drt.engine.sync import run_sync
 
         source, _dest, sync, profile = self._setup_sync()
-        setattr(type(source), "source_column_types", lambda self: {"id": "BIGINT"})
 
         class ManagedFakeDestination:
             def prepare_table(
@@ -274,7 +273,7 @@ class TestEngineHistoryIntegration:
                 *,
                 dry_run: bool,
             ) -> TablePreparation:
-                assert sync_options._source_column_types == {"id": "BIGINT"}
+                assert sync_options._source_column_types == {}
                 statement = "ALTER TABLE users ADD COLUMN score TEXT NULL"
                 if not dry_run and not sync_options._executed_ddl:
                     sync_options._executed_ddl.append(statement)

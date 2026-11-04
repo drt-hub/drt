@@ -101,6 +101,28 @@ def test_postgres_create_append_and_hostile_identifier_are_live_valid() -> None:
                     )
                 )
                 assert cur.fetchall() == [(1, "Ada Lovelace", 10)]
+                cur.execute(
+                    "CREATE TABLE sparse_users (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL)"
+                )
+            conn.commit()
+
+            sparse_destination = PostgresDestination()
+            sparse_config = PostgresDestinationConfig(
+                **{**common, "table": "sparse_users"},
+                manage_table=False,
+                on_schema_change="ignore",
+            )
+            assert (
+                sparse_destination.load(
+                    [{"id": 1, "tenant": "a"}], sparse_config, SyncOptions()
+                ).success
+                == 1
+            )
+            with pytest.raises(ValueError, match=r"required column\(s\).*tenant"):
+                sparse_destination.load([{"id": 2}], sparse_config, SyncOptions())
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, tenant FROM sparse_users ORDER BY id")
+                assert cur.fetchall() == [(1, "a")]
         finally:
             conn.close()
 
@@ -175,5 +197,46 @@ def test_mysql_create_append_and_hostile_identifier_are_live_valid() -> None:
                 escaped = hostile.replace("`", "``")
                 cur.execute(f"SELECT id, `{escaped}`, score FROM managed_users")  # noqa: S608
                 assert cur.fetchall() == ((1, "Ada Lovelace", 10),)
+                cur.execute(
+                    "CREATE TABLE sparse_users "
+                    "(id BIGINT PRIMARY KEY, tenant VARCHAR(255) NOT NULL)"
+                )
+                cur.execute(
+                    "CREATE TABLE prefix_users "
+                    "(email VARCHAR(255) NOT NULL, UNIQUE KEY uq_email (email(10)))"
+                )
+            conn.commit()
+
+            sparse_destination = MySQLDestination()
+            sparse_config = MySQLDestinationConfig(
+                **{**common, "table": "sparse_users"},
+                manage_table=False,
+                on_schema_change="ignore",
+            )
+            assert (
+                sparse_destination.load(
+                    [{"id": 1, "tenant": "a"}], sparse_config, SyncOptions()
+                ).success
+                == 1
+            )
+            with pytest.raises(ValueError, match=r"required column\(s\).*tenant"):
+                sparse_destination.load([{"id": 2}], sparse_config, SyncOptions())
+
+            prefix_config = MySQLDestinationConfig(
+                **{**common, "table": "prefix_users", "upsert_key": ["email"]},
+                manage_table=False,
+            )
+            with pytest.raises(ValueError, match="full-column.*Prefix indexes"):
+                MySQLDestination().load(
+                    [{"email": "same-prefix-a@example.test"}],
+                    prefix_config,
+                    SyncOptions(),
+                )
+
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, tenant FROM sparse_users ORDER BY id")
+                assert cur.fetchall() == ((1, "a"),)
+                cur.execute("SELECT COUNT(*) FROM prefix_users")
+                assert cur.fetchone() == (0,)
         finally:
             conn.close()

@@ -162,23 +162,31 @@ class MySQLDestination(BaseSqlDestination):
             schema_predicate = "DATABASE()"
             params = [table]
         cur.execute(
-            "SELECT index_name, column_name, seq_in_index "
+            "SELECT index_name, column_name, seq_in_index, sub_part "
             "FROM information_schema.statistics WHERE table_name = %s "
             f"AND table_schema = {schema_predicate} AND non_unique = 0 "
             "ORDER BY index_name, seq_in_index",
             params,
         )
-        indexes: dict[str, list[tuple[int, str]]] = {}
+        indexes: dict[str, list[tuple[int, str, int | None]]] = {}
         for row in cur.fetchall():
             values = list(row.values()) if isinstance(row, dict) else list(row)
-            indexes.setdefault(str(values[0]), []).append((int(values[2]), str(values[1]).lower()))
+            sub_part = None if values[3] is None else int(values[3])
+            indexes.setdefault(str(values[0]), []).append(
+                (int(values[2]), str(values[1]).lower(), sub_part)
+            )
         expected = sorted(column.lower() for column in upsert_keys)
-        if any(sorted(column for _, column in columns) == expected for columns in indexes.values()):
+        if any(
+            sorted(column for _, column, _ in columns) == expected
+            and all(sub_part is None for _, _, sub_part in columns)
+            for columns in indexes.values()
+        ):
             return
         raise ValueError(
-            f"Destination table {config.table!r} must have a PRIMARY or UNIQUE index exactly "
-            f"covering destination.upsert_key {upsert_keys} before MySQL can upsert. "
-            "Add the index manually; drt never changes constraints on an existing table."
+            f"Destination table {config.table!r} must have a full-column PRIMARY or UNIQUE "
+            f"index exactly covering destination.upsert_key {upsert_keys} before MySQL can "
+            "upsert. Prefix indexes are not valid upsert keys. Add the index manually; drt "
+            "never changes constraints on an existing table."
         )
 
     @staticmethod

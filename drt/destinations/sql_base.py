@@ -165,6 +165,7 @@ class BaseSqlDestination:
         # before that batch is written; stable batches stay on the fast path.
         self._managed_table_checked = False
         self._managed_known_columns: dict[str, str] = {}
+        self._managed_required_columns: dict[str, str] = {}
         self._managed_allowed_columns: set[str] | None = None
         self._managed_dry_run_created = False
 
@@ -206,8 +207,12 @@ class BaseSqlDestination:
             )
 
         unseen = set(normalized_batch) - self._managed_known_columns.keys()
-        if self._managed_table_checked and not unseen:
-            return TablePreparation(self._filter_managed_columns(records))
+        if self._managed_table_checked:
+            self._managed_validate_required_columns(
+                records, self._managed_required_columns, cfg.table
+            )
+            if not unseen:
+                return TablePreparation(self._filter_managed_columns(records))
 
         source_by_name = dict(self._managed_known_columns)
         source_by_name.update(normalized_batch)
@@ -285,6 +290,13 @@ class BaseSqlDestination:
                 ddl.append(statement)
                 if dry_run:
                     self._managed_dry_run_created = True
+                    self._managed_required_columns = {
+                        self._managed_normalize_identifier(column): column
+                        for column in active_upsert_keys
+                    }
+                    self._managed_validate_required_columns(
+                        records, self._managed_required_columns, cfg.table
+                    )
                     self._managed_known_columns.update(normalized_batch)
                     self._managed_table_checked = True
                     return TablePreparation(records, ddl=ddl)
@@ -305,6 +317,11 @@ class BaseSqlDestination:
                 self._managed_normalize_identifier(column.name): column
                 for column in destination_columns
             }
+            self._managed_required_columns = {
+                key: column.name
+                for key, column in by_name.items()
+                if not column.nullable and not column.has_default
+            }
             missing_upsert_columns = [
                 column
                 for column in active_upsert_keys
@@ -317,18 +334,9 @@ class BaseSqlDestination:
                     "constraint manually; drt never adds constraints to an existing table."
                 )
             self._managed_validate_upsert_constraint(cur, cfg, active_upsert_keys)
-
-            required_but_absent = sorted(
-                column.name
-                for key, column in by_name.items()
-                if key not in source_by_name and not column.nullable and not column.has_default
+            self._managed_validate_required_columns(
+                records, self._managed_required_columns, cfg.table
             )
-            if required_but_absent:
-                raise ValueError(
-                    f"Destination table {cfg.table!r} has required column(s) "
-                    f"{required_but_absent} missing from the source. Make them nullable, add a "
-                    "default, or include them in the model; drt will not drop or weaken columns."
-                )
 
             new_columns = [
                 column
@@ -379,6 +387,42 @@ class BaseSqlDestination:
                     ):
                         ddl.append(statement)
                         sync_options._executed_ddl.append(statement)
+                if not dry_run:
+                    destination_columns = self._managed_describe_table(cur, cfg)
+                    by_name = {
+                        self._managed_normalize_identifier(existing.name): existing
+                        for existing in destination_columns
+                    }
+                    self._managed_required_columns = {
+                        key: existing.name
+                        for key, existing in by_name.items()
+                        if not existing.nullable and not existing.has_default
+                    }
+                    self._managed_validate_required_columns(
+                        records, self._managed_required_columns, cfg.table
+                    )
+                    missing_after_add = sorted(
+                        column
+                        for column in new_columns
+                        if self._managed_normalize_identifier(column) not in by_name
+                    )
+                    if missing_after_add:
+                        raise RuntimeError(
+                            f"Destination table {cfg.table!r} is still missing column(s) "
+                            f"{missing_after_add} after ALTER."
+                        )
+                    incompatible = self._managed_incompatible_columns(
+                        source_columns,
+                        source_by_name,
+                        by_name,
+                        sync_options._source_column_types,
+                    )
+                    if incompatible:
+                        raise ValueError(
+                            f"Source and destination types are incompatible for column(s) "
+                            f"{incompatible} in {cfg.table!r}. Migrate the table or cast/rename "
+                            "the model output; drt never retypes destination columns."
+                        )
                 self._schema_cache.pop(cfg.table, None)
 
             self._managed_known_columns.update(normalized_batch)
@@ -405,6 +449,7 @@ class BaseSqlDestination:
         config: Any = None,
     ) -> bool:
         """Execute and commit one DDL statement with actionable privilege context."""
+        message: str
         try:
             cur.execute(statement)
             # Intentionally commit each compatible DDL before loading. This
@@ -417,13 +462,7 @@ class BaseSqlDestination:
             except Exception:  # noqa: BLE001 — preserve the original DDL failure
                 pass
             if column is not None and self._managed_is_duplicate_column_error(exc):
-                destination_columns = self._managed_describe_table(cur, config)
-                normalized = self._managed_normalize_identifier(column)
-                if any(
-                    self._managed_normalize_identifier(existing.name) == normalized
-                    for existing in destination_columns
-                ):
-                    return False
+                return False
             if self._managed_is_permission_error(exc):
                 message = (
                     f"Could not {privilege} destination table {table!r} before loading. "
@@ -434,7 +473,28 @@ class BaseSqlDestination:
                 message = (
                     f"Could not {privilege} destination table {table!r} before loading: {detail}"
                 )
-            raise RuntimeError(message) from exc
+        raise RuntimeError(message) from None
+
+    def _managed_validate_required_columns(
+        self,
+        records: list[dict[str, Any]],
+        required_columns: dict[str, str],
+        table: str,
+    ) -> None:
+        missing = sorted(
+            {
+                name
+                for record in records
+                for normalized, name in required_columns.items()
+                if normalized not in {self._managed_normalize_identifier(key) for key in record}
+            }
+        )
+        if missing:
+            raise ValueError(
+                f"Destination table {table!r} has required column(s) {missing} missing from one "
+                "or more source records. Make them nullable, add a default, or include them in "
+                "every record; drt will not drop or weaken columns."
+            )
 
     def _filter_managed_columns(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self._managed_allowed_columns is None:
@@ -534,6 +594,7 @@ class BaseSqlDestination:
         del config, sync_options
         self._managed_table_checked = False
         self._managed_known_columns = {}
+        self._managed_required_columns = {}
         self._managed_allowed_columns = None
         self._managed_dry_run_created = False
         self._schema_cache.clear()

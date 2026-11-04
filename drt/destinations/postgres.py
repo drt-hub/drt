@@ -39,7 +39,7 @@ from drt.destinations.sql_base import (
     DestinationTableColumn,
     _sql_type_family,
 )
-from drt.destinations.sql_utils import double_quote_ident, double_quote_ident_part
+from drt.destinations.sql_utils import double_quote_ident_part
 
 try:
     from psycopg2.extras import Json as _Psycopg2Json
@@ -123,6 +123,15 @@ def _qualified_ident(table: str) -> Any:
     if schema is None:
         return _pgsql.Identifier(relation)
     return _pgsql.Identifier(schema, relation)
+
+
+def _quote_qualified(table: str) -> str:
+    """Quote a relation using the same schema split as introspection and writes."""
+    schema, relation = _split_qualified(table)
+    quoted_relation = double_quote_ident_part(relation)
+    if schema is None:
+        return quoted_relation
+    return f"{double_quote_ident_part(schema)}.{quoted_relation}"
 
 
 def _relation_name(table: str) -> str:
@@ -224,7 +233,7 @@ class PostgresDestination(BaseSqlDestination):
             primary_key = ", ".join(double_quote_ident_part(column) for column in upsert_keys)
             definitions.append(f"PRIMARY KEY ({primary_key})")
         return (
-            f"CREATE TABLE IF NOT EXISTS {double_quote_ident(config.table)} "
+            f"CREATE TABLE IF NOT EXISTS {_quote_qualified(config.table)} "
             f"({', '.join(definitions)})"
         )
 
@@ -236,7 +245,7 @@ class PostgresDestination(BaseSqlDestination):
     ) -> str:
         data_type = self._managed_postgres_type(source_type)
         return (
-            f"ALTER TABLE {double_quote_ident(config.table)} ADD COLUMN IF NOT EXISTS "
+            f"ALTER TABLE {_quote_qualified(config.table)} ADD COLUMN IF NOT EXISTS "
             f"{double_quote_ident_part(column)} {data_type} NULL"
         )
 
