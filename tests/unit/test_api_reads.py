@@ -671,3 +671,14 @@ def test_values_are_normalised_the_way_hubspot_stores_them() -> None:
     assert destination.normalize_for_compare("amount", 12.5) == "12.5"
     assert destination.normalize_for_compare("email", "A@B.com") == "a@b.com"
     assert destination.normalize_for_compare("firstname", "Ann") == "Ann"
+
+
+def test_api_reads_cannot_be_combined_with_metadata_columns() -> None:
+    with pytest.raises(ValidationError, match="cannot be combined with sync.metadata_columns"):
+        SyncConfig.model_validate(
+            _sync(
+                _HUBSPOT,
+                plan={"api_reads": {}},
+                sync={"metadata_columns": {"synced_at": "synced_at"}},
+            )
+        )

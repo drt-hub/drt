@@ -1115,6 +1115,14 @@ class SyncConfig(BaseModel):
                 "plan.api_reads cannot plan sync.mode replace or mirror: a vendor API has no "
                 "safe way to list the rows a delete would remove."
             )
+        if self.sync.metadata_columns is not None:
+            # A destination template can render the engine-written values (run id, synced_at),
+            # which differ between a plan and the run that applies it by construction, so the
+            # plan could never match what is written.
+            raise ValueError(
+                "plan.api_reads cannot be combined with sync.metadata_columns: the "
+                "engine-written values differ between a plan and its apply."
+            )
         return self
 
     @model_validator(mode="after")

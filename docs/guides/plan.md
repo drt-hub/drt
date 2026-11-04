@@ -117,6 +117,7 @@ plan:
   emails, so values are compared after that normalisation. A row is *unchanged* only when the
   normalised values are equal; anything else is an *update*, which can occasionally be a
   formatting difference. An update is never hidden.
+- **No `metadata_columns`.** A properties template can render the engine-written values (run id, `synced_at`), which differ between a plan and its apply by construction, so `plan.api_reads` is rejected together with `sync.metadata_columns`.
 - **Creates and updates only.** `sync.mode: mirror` and `replace` are rejected with
   `plan.api_reads` (a vendor API has no safe way to list the rows a delete would remove), and
   `write_policy: fill_empty` is not planned yet.
