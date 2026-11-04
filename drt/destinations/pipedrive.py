@@ -43,6 +43,11 @@ from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import record_preview, record_row_error
 
 _PIPEDRIVE_API = "https://api.pipedrive.com/api/v2"
+# Pipedrive's search endpoints have their own, tighter limit than the rest of the API
+# (reported as 10 requests per 2 seconds; taken from third-party documentation, not yet
+# confirmed against a live account, #1306). Searches get their own bucket below that
+# ceiling, so a run of misses (`update_only`) or hits (`create_only`) cannot exceed it.
+_SEARCH_REQUESTS_PER_SECOND = 4.0
 
 _PASSTHROUGH_KEYS = frozenset({"name", "owner_id", "org_id", "visible_to", "label_ids"})
 _CONTACT_KEYS = {"email": "emails", "emails": "emails", "phone": "phones", "phones": "phones"}
@@ -121,17 +126,23 @@ class _PipedriveApi:
         headers: dict[str, str],
         limiter: RateLimiterBackend,
         retry_config: RetryConfig,
+        search_limiter: RateLimiterBackend | None = None,
     ) -> None:
         self._client = client
         self._base_url = base_url
         self._headers = headers
         self._limiter = limiter
+        self._search_limiter = search_limiter or limiter
         self._retry = retry_config
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        self._limiter.acquire()
+    def _request(
+        self, method: str, path: str, *, limiter: RateLimiterBackend | None = None, **kwargs: Any
+    ) -> httpx.Response:
+        bucket = limiter or self._limiter
 
         def send() -> httpx.Response:
+            # Every attempt spends a slot: a retry is a real request against the quota.
+            bucket.acquire()
             response = self._client.request(
                 method, f"{self._base_url}{path}", headers=self._headers, **kwargs
             )
@@ -145,6 +156,7 @@ class _PipedriveApi:
         response = self._request(
             "GET",
             "/persons/search",
+            limiter=self._search_limiter,
             params={"term": term, "fields": field, "exact_match": "true", "limit": 2},
         )
         body = response.json()
@@ -212,6 +224,12 @@ class PipedriveDestination:
                 {"x-api-token": token, "Accept": "application/json"},
                 resolve_rate_limiter(config, sync_options),
                 resolve_retry(config.retry, sync_options),
+                search_limiter=resolve_rate_limiter(
+                    config,
+                    sync_options,
+                    max_requests_per_second=_SEARCH_REQUESTS_PER_SECOND,
+                    key_override=f"{config.rate_limit_key()}:search",
+                ),
             )
             for index, record in enumerate(records):
                 try:

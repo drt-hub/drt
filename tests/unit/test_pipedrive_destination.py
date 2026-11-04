@@ -552,3 +552,71 @@ def test_known_people_are_scoped_by_match_field(
         ("GET", _SEARCH),
         ("POST", _PERSONS),
     ]
+
+
+class _CountingLimiter:
+    def __init__(self) -> None:
+        self.acquired = 0
+
+    def acquire(self) -> None:
+        self.acquired += 1
+
+
+def _spy_limiters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace the shared-limiter lookup so each bucket (and its ceiling) can be observed."""
+    import drt.destinations.pipedrive as pipedrive_module
+
+    seen: dict[str, Any] = {"write": _CountingLimiter(), "search": _CountingLimiter(), "calls": []}
+
+    def fake(config: Any, sync_options: Any, **kwargs: Any) -> _CountingLimiter:
+        seen["calls"].append(kwargs)
+        return seen["search"] if kwargs.get("key_override") else seen["write"]
+
+    monkeypatch.setattr(pipedrive_module, "resolve_rate_limiter", fake)
+    return seen
+
+
+def test_searches_have_their_own_bucket_below_the_search_ceiling(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_server(httpserver, monkeypatch)
+    seen = _spy_limiters(monkeypatch)
+    httpserver.expect_request(_SEARCH).respond_with_json(_search_result())
+    httpserver.expect_request(_PERSONS, method="POST").respond_with_json({"data": {"id": 9}})
+
+    result = PipedriveDestination().load([_RECORD], _config(), _options())
+
+    assert result.success == 1
+    search_kwargs = [k for k in seen["calls"] if k.get("key_override")]
+    assert len(search_kwargs) == 1
+    assert search_kwargs[0]["max_requests_per_second"] <= 5  # 10 requests / 2 s
+    assert search_kwargs[0]["key_override"].endswith(":search")
+    assert (seen["search"].acquired, seen["write"].acquired) == (1, 1)
+
+
+def test_every_retry_attempt_spends_a_limiter_slot(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_server(httpserver, monkeypatch)
+    seen = _spy_limiters(monkeypatch)
+    from werkzeug.wrappers import Response
+
+    attempts = {"n": 0}
+
+    def search(_request: Any) -> Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return Response("busy", status=503)
+        return Response(json.dumps(_search_result(7)), mimetype="application/json")
+
+    httpserver.expect_request(_SEARCH).respond_with_handler(search)
+    httpserver.expect_request(f"{_PERSONS}/7", method="PATCH").respond_with_json({"data": {}})
+    options = _options(
+        retry=RetryConfig(max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0)
+    )
+
+    result = PipedriveDestination().load([{**_RECORD, "name": "Ada"}], _config(), options)
+
+    assert result.success == 1
+    assert attempts["n"] == 2
+    assert seen["search"].acquired == 2  # the failed attempt and the retry
