@@ -278,15 +278,15 @@ Released as **v1.2.0** on 2026-10-21. See [CHANGELOG.md](CHANGELOG.md#120---2026
 
 | Area | Issue | Scope |
 |---|---|---|
-| plan/apply | [#1221](https://github.com/drt-hub/drt/issues/1221) | Exact-replay apply — age-encrypted payloads, opt-in (`--include-values` / `--exact`) |
-| plan/apply | [#1222](https://github.com/drt-hub/drt/issues/1222) | Lineage — `plan_id` / approver in history, `run_results.json` and the compliance audit trail |
-| plan/apply | [#1223](https://github.com/drt-hub/drt/issues/1223) | **Continuous improvement**: plan-coverage matrix generated from the connector registry (new destinations must declare plan status) + nightly plan-vs-apply fidelity check in dwh-smoke; re-ranked every release |
-| schema | [#760](https://github.com/drt-hub/drt/issues/760) | `manage_table` / `on_schema_change` (not implemented anywhere yet) |
-| orchestration | [#1225](https://github.com/drt-hub/drt/issues/1225) | Scheduler scaffolds — `drt deploy cloud-run-job`, `drt deploy k8s-cronjob`, plus a scheduling decision guide (replaces #428) |
-| ecosystem | [#1226](https://github.com/drt-hub/drt/issues/1226) | Exposures carry owner/freshness; docs site shows last-applied plan and staleness |
+| plan/apply ✅ | [#1221](https://github.com/drt-hub/drt/issues/1221) | Exact-replay apply — age-encrypted payloads, opt-in (`--include-values` / `--exact`) |
+| plan/apply ✅ | [#1222](https://github.com/drt-hub/drt/issues/1222) | Lineage — `plan_id` / approver in history, `run_results.json` and the compliance audit trail |
+| plan/apply ✅ | [#1223](https://github.com/drt-hub/drt/issues/1223) | **Continuous improvement**: plan-coverage matrix generated from the connector registry (new destinations must declare plan status) + nightly plan-vs-apply fidelity check in dwh-smoke; re-ranked every release |
+| schema | [#760](https://github.com/drt-hub/drt/issues/760) | `manage_table` / `on_schema_change` — [ADR 0016](docs/adr/0016-managed-destination-tables.md); first release Postgres + MySQL (in review), warehouses follow |
+| orchestration ✅ | [#1225](https://github.com/drt-hub/drt/issues/1225) | Scheduler scaffolds — `drt deploy cloud-run-job`, `drt deploy k8s-cronjob`, plus a scheduling decision guide (replaces #428) |
+| ecosystem ✅ | [#1226](https://github.com/drt-hub/drt/issues/1226) | Exposures carry owner/freshness; docs site shows last-applied plan and staleness |
 | plan/apply | [#472](https://github.com/drt-hub/drt/issues/472), [#471](https://github.com/drt-hub/drt/issues/471) | Parked from v1.2: API-based diff for SaaS destinations (widens plan coverage), `--diff-fields` |
-| schema | [#761](https://github.com/drt-hub/drt/issues/761), [#896](https://github.com/drt-hub/drt/issues/896) | Parked from v1.2: column contracts (detect/report first; `on_schema_change` itself stays with #760) |
-| alerts | [#1224](https://github.com/drt-hub/drt/issues/1224) | Parked from v1.2: sync-level freshness — `alerts.on_stale` + `drt status --check` |
+| schema | [#761](https://github.com/drt-hub/drt/issues/761) ✅, [#896](https://github.com/drt-hub/drt/issues/896) | Parked from v1.2: column contracts ([ADR 0017](docs/adr/0017-column-contracts.md)); #761 shipped, `contract.source: dbt` (#896) in review; `on_schema_change` itself stays with #760 |
+| alerts ✅ | [#1224](https://github.com/drt-hub/drt/issues/1224) | Parked from v1.2: sync-level freshness — `alerts.on_stale` + `drt status --check` |
 | destinations | [#1237](https://github.com/drt-hub/drt/issues/1237) | Parked from v1.2: HubSpot — preserve human edits (`propertiesWithHistory`), builds on the `fill_empty` batch read |
 | backlog | [#758](https://github.com/drt-hub/drt/issues/758), [#764](https://github.com/drt-hub/drt/issues/764), [#425](https://github.com/drt-hub/drt/issues/425), [#426](https://github.com/drt-hub/drt/issues/426) | Windowed backfill, pre/post-sync SQL hooks, multi-destination fan-out, sync dependency graph — scoped when picked up |
 

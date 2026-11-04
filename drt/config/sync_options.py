@@ -49,6 +49,7 @@ from drt.config.destinations_saas import (
     MetaConversionsDestinationConfig,
     MixpanelDestinationConfig,
     NotionDestinationConfig,
+    PipedriveDestinationConfig,
     RestApiDestinationConfig,
     SalesforceBulkDestinationConfig,
     SendGridDestinationConfig,
@@ -962,6 +963,7 @@ DestinationConfig = Annotated[
     | Annotated[DiscordDestinationConfig, Tag("discord")]
     | Annotated[GitHubActionsDestinationConfig, Tag("github_actions")]
     | Annotated[HubSpotDestinationConfig, Tag("hubspot")]
+    | Annotated[PipedriveDestinationConfig, Tag("pipedrive")]
     | Annotated[ZendeskDestinationConfig, Tag("zendesk")]
     | Annotated[AmplitudeDestinationConfig, Tag("amplitude")]
     | Annotated[MixpanelDestinationConfig, Tag("mixpanel")]

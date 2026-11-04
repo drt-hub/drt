@@ -380,7 +380,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 ### Destinations
 
 <details>
-<summary><b>36 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
+<summary><b>37 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
 
 | Connector               | Status    | Install                            | Auth                              |
 | ----------------------- | --------- | ---------------------------------- | --------------------------------- |
@@ -389,6 +389,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Discord Webhook         | ✅ v0.4.2 | (core)                             | Webhook URL                       |
 | GitHub Actions          | ✅ v0.1   | (core)                             | Token (env var)                   |
 | HubSpot                 | ✅ v0.1   | (core)                             | Token (env var)                   |
+| [Pipedrive](docs/connectors/pipedrive.md) | ✅ next | (core) | API token (env var) |
 | Zendesk                 | ✅ v0.7   | (core)                             | Basic (email + API token)         |
 | Amplitude               | ✅ v0.7   | (core)                             | Project API key (env var)         |
 | Klaviyo                 | ✅ v0.8   | (core)                             | Private API key (env var)         |
