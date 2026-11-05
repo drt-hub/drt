@@ -424,6 +424,7 @@ def apply_plan(
     cursor_value: str | None = None,
     cli_vars: dict[str, Any] | None = None,
     profile_name: str | None = None,
+    manifest_path: Path | None = None,
     json_output: bool = False,
     notify: Callable[[str], None] | None = None,
     expect_plan_id: str | None = None,
@@ -480,6 +481,7 @@ def apply_plan(
                 redact_keys=bool(doc["options"]["redact_keys"]),
                 cli_vars=cli_vars,
                 profile_name=profile_name,
+                manifest_path=manifest_path,
                 project_dir=project_dir,
                 preflight=preflight,
             )
@@ -490,6 +492,7 @@ def apply_plan(
                 cursor_value=cursor_value,
                 cli_vars=cli_vars,
                 profile_name=profile_name,
+                manifest_path=manifest_path,
                 project_dir=project_dir,
                 preflight=preflight,
             )

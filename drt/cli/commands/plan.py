@@ -93,6 +93,11 @@ def plan(
     ),
     vars_raw: str = typer.Option(None, "--vars", help="Override project vars, as for `drt run`."),
     profile_name: str = typer.Option(None, "--profile", "-p", help="Override profile."),
+    manifest_path: Path | None = typer.Option(
+        None,
+        "--manifest-path",
+        help="dbt manifest for contract.source: dbt (default: target/manifest.json).",
+    ),
 ) -> None:
     """Compute what a sync *would* change, as a reviewable artifact.
 
@@ -139,6 +144,7 @@ def plan(
             cursor_value,
             vars_raw,
             profile_name,
+            manifest_path,
             include_values,
             recipients,
             max_payload_rows,
@@ -152,6 +158,7 @@ def plan(
             cursor_value=cursor_value,
             cli_vars=parse_vars_option(vars_raw),
             profile_name=profile_name,
+            manifest_path=manifest_path,
             include_values=include_values,
         )
         plan_obj = plan_ctx.plan
@@ -307,6 +314,7 @@ def _plan_all(
     cursor_value: str | None,
     vars_raw: str | None,
     profile_name: str | None,
+    manifest_path: Path | None,
     include_values: bool,
     recipients: list[str],
     max_payload_rows: int,
@@ -330,7 +338,13 @@ def _plan_all(
     try:
         cli_vars = parse_vars_option(vars_raw)
         project = load_project(Path("."))
-        names = [s.name for s in load_syncs(Path("."), vars=resolve_vars(project.vars, cli_vars))]
+        resolved_vars = resolve_vars(project.vars, cli_vars)
+        loaded = (
+            load_syncs(Path("."), vars=resolved_vars)
+            if manifest_path is None
+            else load_syncs(Path("."), vars=resolved_vars, manifest_path=manifest_path)
+        )
+        names = [s.name for s in loaded]
     except (PlanCliError, FileNotFoundError, ValueError, VarError) as e:
         print_error(str(e))
         raise typer.Exit(1)
@@ -356,6 +370,7 @@ def _plan_all(
                 cursor_value=cursor_value,
                 cli_vars=cli_vars,
                 profile_name=profile_name,
+                manifest_path=manifest_path,
                 include_values=include_values,
             )
             one = context.plan

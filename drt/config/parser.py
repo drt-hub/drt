@@ -7,13 +7,16 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import ValidationError
 
-from drt.config.models import ProjectConfig, SyncConfig
+from drt.config.models import ColumnConfig, ProjectConfig, SyncConfig
 from drt.config.vars import expand_vars, has_var_template, render_vars, resolve_vars
+
+if TYPE_CHECKING:
+    from drt.integrations.dbt import ManifestCache
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -51,11 +54,105 @@ def expand_env_vars(data: Any) -> Any:
 
 @dataclass
 class SyncLoadResult:
-    """Result of loading sync YAML files — valid syncs + per-file errors + deprecations."""
+    """Result of loading sync YAML files — valid syncs, errors, and warnings."""
 
     syncs: list[SyncConfig] = field(default_factory=list)
     errors: dict[str, list[str]] = field(default_factory=dict)
     deprecations: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    warnings: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _manifest_path(project_dir: Path, manifest_path: Path | None) -> Path:
+    if manifest_path is None:
+        return project_dir / "target" / "manifest.json"
+    return manifest_path if manifest_path.is_absolute() else project_dir / manifest_path
+
+
+def _dbt_disagreement(
+    model_name: str, authored: list[ColumnConfig], derived: list[ColumnConfig]
+) -> str | None:
+    """Describe a hand-written/dbt disagreement; authored columns still win."""
+    from drt.integrations.dbt import _safe
+
+    authored_by_name = {column.name: column for column in authored}
+    derived_by_name = {column.name: column for column in derived}
+    details: list[str] = []
+    only_authored = sorted(authored_by_name.keys() - derived_by_name.keys())
+    only_dbt = sorted(derived_by_name.keys() - authored_by_name.keys())
+    if only_authored:
+        details.append("only hand-written: " + ", ".join(only_authored))
+    if only_dbt:
+        details.append("only in dbt: " + ", ".join(_safe(name) for name in only_dbt))
+    for name in sorted(authored_by_name.keys() & derived_by_name.keys()):
+        authored_column = authored_by_name[name]
+        dbt_column = derived_by_name[name]
+        if authored_column.type != dbt_column.type:
+            details.append(
+                f"{name} type is {authored_column.type} (hand-written) vs {dbt_column.type} (dbt)"
+            )
+        if authored_column.description != dbt_column.description:
+            details.append(f"{name} description differs")
+    if not details:
+        return None
+    return (
+        f"hand-written columns override dbt model {model_name!r}, but disagree with its "
+        f"manifest declaration ({'; '.join(details)})"
+    )
+
+
+def _resolve_dbt_contract(
+    sync: SyncConfig,
+    project_dir: Path,
+    manifest_path: Path | None,
+    manifest_cache: ManifestCache,
+) -> tuple[SyncConfig, str | None]:
+    """Resolve ``contract.source: dbt`` once into ordinary ``columns``."""
+    if sync.contract is None or sync.contract.source != "dbt":
+        return sync, None
+
+    from drt.engine.resolver import parse_ref
+    from drt.integrations.dbt import _safe, resolve_contract_from_manifest
+
+    model_name = parse_ref(sync.model)
+    if model_name is None:
+        raise ValueError(
+            f"contract.source: dbt requires model: ref('model_name'); got {sync.model!r}."
+        )
+    if (project_dir / "syncs" / "models" / f"{model_name}.sql").is_file():
+        raise ValueError(
+            f"contract.source: dbt cannot be used with ref({model_name!r}): the local SQL "
+            f"override syncs/models/{model_name}.sql runs instead of the dbt model, so the "
+            "dbt contract would describe a different query. Write columns: by hand."
+        )
+    path = _manifest_path(project_dir, manifest_path)
+    try:
+        dbt_model = resolve_contract_from_manifest(model_name, path, manifest_cache)
+    except FileNotFoundError as exc:
+        raise ValueError(str(exc)) from exc
+
+    derived = []
+    for column in dbt_model.columns:
+        derived_column = ColumnConfig(
+            name=column.name, type=column.type, description=column.description
+        )
+        # Matching must use the exact manifest name. Only its diagnostic form is
+        # sanitized, preserving hand-written ColumnConfig names verbatim.
+        derived_column._diagnostic_name = _safe(column.name)
+        derived.append(derived_column)
+    names = [column.name for column in derived]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(
+            f"dbt model {model_name!r} declares duplicate column name(s): "
+            + ", ".join(repr(_safe(name)) for name in duplicates)
+        )
+
+    authored = sync.columns
+    warning = _dbt_disagreement(model_name, authored, derived) if authored is not None else None
+    resolved = sync.model_copy(update={"columns": authored or derived})
+    resolved._dbt_relation_name = dbt_model.relation_name
+    resolved._dbt_contract_resolved = True
+    return resolved, warning
 
 
 def _format_validation_errors(exc: ValidationError) -> list[str]:
@@ -178,7 +275,9 @@ def project_vars(
 
 
 def load_syncs(
-    project_dir: Path = Path("."), vars: dict[str, Any] | None = None
+    project_dir: Path = Path("."),
+    vars: dict[str, Any] | None = None,
+    manifest_path: Path | None = None,
 ) -> list[SyncConfig]:
     """Load and validate all sync YAML files from syncs/.
 
@@ -191,12 +290,15 @@ def load_syncs(
         return []
     resolved = vars if vars is not None else project_vars(project_dir)
     syncs = []
+    manifest_cache: ManifestCache = {}
     for path in sorted(syncs_dir.glob("*.yml")):
         with path.open() as f:
             data = yaml.safe_load(f)
         data = expand_env_vars(data)
         data = expand_sync_vars(data, resolved)
-        syncs.append(SyncConfig.model_validate(data))
+        sync = SyncConfig.model_validate(data)
+        sync, _warning = _resolve_dbt_contract(sync, project_dir, manifest_path, manifest_cache)
+        syncs.append(sync)
 
     # Enterprise audit extension point (#299, ADR 0008) — fires once per
     # successful load, not per file. project_vars(project_dir)'s own
@@ -208,7 +310,9 @@ def load_syncs(
 
 
 def load_syncs_safe(
-    project_dir: Path = Path("."), vars: dict[str, Any] | None = None
+    project_dir: Path = Path("."),
+    vars: dict[str, Any] | None = None,
+    manifest_path: Path | None = None,
 ) -> SyncLoadResult:
     """Load sync YAML files, collecting errors instead of raising.
 
@@ -220,6 +324,7 @@ def load_syncs_safe(
         return SyncLoadResult()
     resolved = vars if vars is not None else project_vars(project_dir)
     result = SyncLoadResult()
+    manifest_cache: ManifestCache = {}
     for path in sorted(syncs_dir.glob("*.yml")):
         with path.open() as f:
             data = yaml.safe_load(f)
@@ -229,6 +334,9 @@ def load_syncs_safe(
             # Check for deprecated keys before validation
             deprecations = _check_deprecated_keys(data)
             sync = SyncConfig.model_validate(data)
+            sync, dbt_warning = _resolve_dbt_contract(
+                sync, project_dir, manifest_path, manifest_cache
+            )
             # `model:` is rendered by the resolver at run time (it owns
             # cursor_value too), so trial-render it here purely to surface an
             # undefined var now rather than mid-run — the output is discarded.
@@ -237,6 +345,8 @@ def load_syncs_safe(
             if deprecations:
                 # Store deprecations using the actual sync name, not the file name
                 result.deprecations[sync.name] = deprecations
+            if dbt_warning is not None:
+                result.warnings.setdefault(sync.name, []).append(dbt_warning)
             result.syncs.append(sync)
         except (ValidationError, ValueError) as e:
             if isinstance(e, ValidationError):

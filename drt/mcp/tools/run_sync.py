@@ -24,6 +24,7 @@ def run_sync(
     diff_limit: int = 20,
     cursor_value: str | None = None,
     profile_name: str | None = None,
+    manifest_path: str | None = None,
     full_refresh: bool = False,
     limit: int | None = None,
     vars: dict[str, Any] | None = None,
@@ -68,7 +69,7 @@ def run_sync(
     # precedence `drt run --vars` resolves, minus the string-parsing step
     # (an MCP caller passes an already-structured dict, not `'k: v, k2: v2'`).
     resolved_vars = resolve_project_vars(ctx.project_dir, cli_vars=vars)
-    sync = ctx.find_sync(sync_name, vars=resolved_vars)
+    sync = ctx.find_sync(sync_name, vars=resolved_vars, manifest_path=manifest_path)
     if sync is None:
         return {"error": f"No sync named '{sync_name}' found."}
 

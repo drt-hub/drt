@@ -108,6 +108,7 @@ def create_server(project_dir: Path | None = None) -> Any:
         diff_limit: int = 20,
         cursor_value: str | None = None,
         profile_name: str | None = None,
+        manifest_path: str | None = None,
         full_refresh: bool = False,
         limit: int | None = None,
         vars: dict[str, Any] | None = None,
@@ -134,6 +135,8 @@ def create_server(project_dir: Path | None = None) -> Any:
                 for non-incremental syncs.
             profile_name: Override the profile resolved from drt_project.yml /
                 ``DRT_PROFILE`` (mirrors ``drt run --profile``).
+            manifest_path: dbt manifest used by ``contract.source: dbt``;
+                defaults to ``target/manifest.json`` in the project.
             full_refresh: Clear the stored watermark first, so this run
                 re-reads everything and then persists a fresh watermark
                 (mirrors ``drt run --full-refresh``, #776). Mutually exclusive
@@ -169,6 +172,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             diff_limit=diff_limit,
             cursor_value=cursor_value,
             profile_name=profile_name,
+            manifest_path=manifest_path,
             full_refresh=full_refresh,
             limit=limit,
             vars=vars,
@@ -182,6 +186,7 @@ def create_server(project_dir: Path | None = None) -> Any:
         redact_keys: bool = False,
         cursor_value: str | None = None,
         profile_name: str | None = None,
+        manifest_path: str | None = None,
         vars: dict[str, Any] | None = None,
         max_entries: int = 100,
     ) -> dict[str, Any]:
@@ -204,6 +209,8 @@ def create_server(project_dir: Path | None = None) -> Any:
             cursor_value: Override the incremental watermark, as for
                 ``drt_run_sync``; pass the same value to ``drt_apply``.
             profile_name: Override the profile (mirrors ``drt plan --profile``).
+            manifest_path: dbt manifest used by ``contract.source: dbt``;
+                defaults to ``target/manifest.json`` in the project.
             vars: Override project vars, already parsed (mirrors ``--vars``).
             max_entries: How many changed keys to return (0-1000, default 100);
                 ``entries_total`` and ``entries_truncated`` say what was cut.
@@ -221,6 +228,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             redact_keys=redact_keys,
             cursor_value=cursor_value,
             profile_name=profile_name,
+            manifest_path=manifest_path,
             vars=vars,
             max_entries=max_entries,
         )
@@ -234,6 +242,7 @@ def create_server(project_dir: Path | None = None) -> Any:
         force_guards: bool = False,
         cursor_value: str | None = None,
         profile_name: str | None = None,
+        manifest_path: str | None = None,
         vars: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Apply a plan from ``drt_plan``, only if the world still matches.
@@ -258,6 +267,8 @@ def create_server(project_dir: Path | None = None) -> Any:
                 explicitly accepted the tripped guard.
             cursor_value: The cursor override the plan was made with, if any.
             profile_name: Override the profile (mirrors ``drt apply --profile``).
+            manifest_path: dbt manifest used by ``contract.source: dbt``;
+                must match the path used to create the plan.
             vars: Override project vars, already parsed (mirrors ``--vars``).
 
         Returns:
@@ -273,6 +284,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             force_guards=force_guards,
             cursor_value=cursor_value,
             profile_name=profile_name,
+            manifest_path=manifest_path,
             vars=vars,
         )
 
@@ -463,6 +475,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     def drt_validate(
         check_connection: bool = False,
         strict: bool = False,
+        manifest_path: str | None = None,
     ) -> dict[str, Any]:
         """Validate all sync YAML configs in the current project.
 
@@ -475,6 +488,8 @@ def create_server(project_dir: Path | None = None) -> Any:
             strict: Treat hardcoded-secret warnings as validation errors —
                 a sync with a warning moves from 'valid' into 'errors' and
                 its messages appear there instead of in 'warnings'.
+            manifest_path: dbt manifest used by ``contract.source: dbt``;
+                defaults to ``target/manifest.json`` in the project.
 
         Returns:
             Dict with 'valid' list of sync names, 'errors' dict of
@@ -489,7 +504,12 @@ def create_server(project_dir: Path | None = None) -> Any:
             'connection_tests' keyed by sync name, each a dict with
             success/error/skipped.
         """
-        return _validate(ctx, check_connection=check_connection, strict=strict)
+        return _validate(
+            ctx,
+            check_connection=check_connection,
+            strict=strict,
+            manifest_path=manifest_path,
+        )
 
     # -----------------------------------------------------------------------
     # drt_get_schema
@@ -590,7 +610,10 @@ def create_server(project_dir: Path | None = None) -> Any:
 
     @mcp.tool()
     def drt_get_manifest(
-        include_state: bool = False, full_labels: bool = False, history_depth: int = 10
+        include_state: bool = False,
+        full_labels: bool = False,
+        history_depth: int = 10,
+        manifest_path: str | None = None,
     ) -> dict[str, Any]:
         """Return the drt docs manifest — the machine-readable sync catalog and
         lineage graph (the ``--format json`` artifact of ``drt docs generate``).
@@ -610,6 +633,8 @@ def create_server(project_dir: Path | None = None) -> Any:
                 mirroring ``drt docs generate --full-labels``.
             history_depth: Recent runs per sync to embed when *include_state*
                 (newest first; 0 disables). Mirrors ``--history-depth``.
+            manifest_path: dbt manifest used by ``contract.source: dbt``;
+                defaults to ``target/manifest.json`` in the project.
 
         Returns:
             The manifest as a JSON-serializable dict (schema-versioned).
@@ -619,6 +644,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             include_state=include_state,
             full_labels=full_labels,
             history_depth=history_depth,
+            manifest_path=manifest_path,
         )
 
     # -----------------------------------------------------------------------

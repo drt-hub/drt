@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -152,7 +153,7 @@ def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> Non
         + f"  [dim]({elapsed:.1f}s)[/dim]"
     )
     for err in result.errors[:5]:
-        console.print(f"  [red]  • {err}[/red]")
+        console.print(f"  [red]  • {escape(err)}[/red]")
     if len(result.errors) > 5:
         console.print(f"  [red]  … and {len(result.errors) - 5} more errors[/red]")
     for statement in getattr(result, "ddl", []):
@@ -211,7 +212,7 @@ def print_validation_ok(sync_name: str) -> None:
 def print_validation_error(sync_name: str, errors: list[str]) -> None:
     console.print(f"[red]✗[/red] {sync_name}")
     for err in errors:
-        console.print(f"  [red]• {err}[/red]")
+        console.print(f"  [red]• {escape(err)}[/red]")
 
 
 def print_connection_test_result(
@@ -348,8 +349,6 @@ def print_error(message: str) -> None:
     # Escape Rich markup in the user-supplied message so square-bracket
     # fragments like ``drt-core[mcp]`` or ``[INFO]`` aren't consumed as
     # style tags and silently dropped from the rendered output.
-    from rich.markup import escape
-
     console.print(f"[bold red]Error:[/bold red] {escape(message)}")
 
 

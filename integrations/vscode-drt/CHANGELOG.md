@@ -124,6 +124,8 @@ match drt-core 1.1.0.
 
 ## [0.1.12] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: column contracts accept
+  `contract.source: dbt` without a hand-written `columns` block (drt-hub/drt#896).
 - Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` now validates a
   `sync.computed_fields` block (`{field_name: jinja_template}`) for declarative
   derived columns (drt-hub/drt#763).

@@ -6,6 +6,7 @@ Public docstring lives on the ``@mcp.tool()`` wrapper in
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -17,6 +18,7 @@ def get_manifest(
     include_state: bool = False,
     full_labels: bool = False,
     history_depth: int = 10,
+    manifest_path: str | None = None,
 ) -> dict[str, Any]:
     from drt.docs.builder import build_manifest
 
@@ -25,4 +27,5 @@ def get_manifest(
         include_state=include_state,
         full_labels=full_labels,
         history_depth=history_depth,
+        manifest_path=Path(manifest_path) if manifest_path is not None else None,
     ).to_dict()

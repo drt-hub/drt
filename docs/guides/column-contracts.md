@@ -28,8 +28,73 @@ destination:
 
 `columns` without `contract` is a documentation-only declaration. To check it
 during `drt run`, `drt plan`, and `drt apply`, set `contract.enforced: true`.
-Declaring `contract` without a non-empty `columns` list is a validation error,
-as are duplicate names, unsupported types, and unknown keys in either block.
+Declaring `contract` without a non-empty `columns` list is a validation error
+unless `contract.source: dbt` derives that list from a manifest. Duplicate
+names, unsupported types, and unknown keys in either block are errors.
+
+## Derive the declaration from dbt
+
+For an exact `model: ref(...)`, dbt can own the declaration:
+
+```yaml
+model: ref('customers')
+contract:
+  enforced: true
+  source: dbt
+```
+
+drt reads the matching model node from project-relative
+`target/manifest.json`. Use `--manifest-path path/to/manifest.json` with
+`drt validate`, `run`, `plan`, `apply`, or `docs generate` when the artifact
+lives elsewhere. drt never invokes dbt; build the manifest before running drt.
+
+Resolution happens once while the sync config is loaded. The normalized result
+is stored in the same internal `columns` list as a hand-written declaration,
+so the engine and docs paths are identical and a manifest changed during a run
+cannot change that run's contract. The resolved columns also participate in the
+sync/plan `config_hash`; changing them makes an older plan stale.
+
+A hand-written `columns:` block always wins when both are present. `drt
+validate` warns if its names, types, or descriptions disagree with dbt (and
+`--strict` promotes the warning to an error). The manifest must still be valid:
+a missing manifest, a non-`ref()` model, a missing or ambiguous model, a model
+without an **enforced dbt contract** (`config.contract.enforced: true`; plain
+documented columns are not a contract), a model without declared columns, a
+column without `data_type`, or an unmappable type is a validation error.
+Messages quote manifest text with control characters and square brackets
+replaced and a length limit, because a manifest is an artifact that can come
+from elsewhere.
+
+Limits, stated plainly:
+
+- Only an unqualified `ref('name')` resolves. A model that exists in more than
+  one package, or in several dbt model versions, is rejected as ambiguous (drt
+  does not choose); package-qualified and versioned refs are not supported, so
+  write the `columns:` block by hand for those.
+- A local override `syncs/models/<name>.sql` takes precedence over the dbt model
+  at run time, so combining it with `contract.source: dbt` is a validation
+  error (the contract would describe a query that never runs).
+- `--manifest-path` is available on `validate`, `run`, `plan`, `apply` and `docs
+  generate`; `drt build` and `drt test` read the default `target/manifest.json`.
+- There is no `catalog.json` fallback.
+
+### dbt type normalization
+
+Matching is case-insensitive, and precision/length suffixes such as
+`numeric(10,2)` and `varchar(255)` are removed first.
+
+| dbt `data_type` | Portable type |
+|---|---|
+| `varchar`, `char`, `character varying`, `text`, `string` | `string` |
+| `int`, `integer`, `int64`, `bigint`, `smallint`, `tinyint` | `integer` |
+| `numeric`, `number`, `decimal`, `bignumeric`, `float`, `float64`, `double`, `real` | `number` |
+| `bool`, `boolean` | `boolean` |
+| `timestamp*`, `datetime` | `timestamp` |
+| `date` | `date` |
+| `json`, `jsonb`, `variant`, `object`, `array`, `struct`, `record`, `map` | `json` |
+
+BigQuery's composite spelling `ARRAY<STRING>` / `STRUCT<a INT64>` is reduced to
+its base type before matching. `NUMBER(38,0)` maps to `number`.
 
 ## When the check runs
 
@@ -85,8 +150,8 @@ destination. Use a representative first batch and a stable model schema.
 
 `drt plan` uses the same engine path, so a contract violation makes the plan
 unavailable with the contract error and does not produce a partial change set.
-Because `columns` and `contract` live in the sync file, changing either also
-changes the plan `config_hash`; `drt apply` refuses an older plan.
+Changing hand-written columns, contract policy, or dbt-resolved columns changes
+the plan `config_hash`; `drt apply` refuses an older plan.
 
 `drt docs generate` publishes declared names, portable types, and descriptions
 on the sync page and in manifest schema v6 under `syncs[].columns`. The block is

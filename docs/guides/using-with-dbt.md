@@ -71,7 +71,9 @@ recommendation.
 
 ## Setup
 
-No extra installation needed. Just run `dbt run` before `drt run` so that `target/manifest.json` exists.
+No extra installation is needed. Run `dbt run` (or at least `dbt compile`)
+before drt so that `target/manifest.json` exists. drt only reads the artifact;
+it never invokes dbt.
 
 ## How it works
 
@@ -90,6 +92,42 @@ dbt run
 # 2. Run drt to activate data
 drt run
 ```
+
+If CI stores the artifact somewhere else, pass the same project-relative or
+absolute path to commands that load the contract:
+
+```bash
+drt validate --manifest-path artifacts/dbt/manifest.json
+drt plan customers_to_crm --manifest-path artifacts/dbt/manifest.json
+drt run --manifest-path artifacts/dbt/manifest.json
+```
+
+Use the same path for `drt apply` that was used for `drt plan`.
+
+## Use dbt columns as a drt contract
+
+`contract.source: dbt` derives the expected source columns from the manifest
+node selected by an exact `model: ref(...)`:
+
+```yaml
+name: customers_to_crm
+model: ref('customers')
+contract:
+  enforced: true
+  source: dbt
+destination:
+  type: hubspot
+  object_type: contacts
+  id_property: email
+```
+
+Every dbt column must declare `data_type`. drt normalizes common warehouse
+spellings to its portable contract types; see [Column
+contracts](column-contracts.md#dbt-type-normalization) for the mapping and
+validation rules. A hand-written `columns:` block wins, while `drt validate`
+warns if it differs from the manifest. The resolved columns appear in `drt
+docs generate` and are snapshotted when config loads, so drt does not reread a
+changing manifest midway through a run or plan.
 
 ## Pipeline automation
 

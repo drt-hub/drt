@@ -114,13 +114,15 @@ def check_contract(
     for every non-null value in the batch, while duplicate actual type names are
     collapsed into one deterministic diagnostic.
     """
-    declared = {column.name: column.type for column in columns}
+    declared = {
+        column.name: (column.type, column._diagnostic_name or column.name) for column in columns
+    }
     actual_names = {name for record in records for name in record}
     violations: list[ContractViolation] = []
 
-    for name, expected in declared.items():
+    for name, (expected, diagnostic_name) in declared.items():
         if name not in actual_names:
-            violations.append(ContractViolation(name, expected, "missing"))
+            violations.append(ContractViolation(diagnostic_name, expected, "missing"))
             continue
         incompatible = sorted(
             {
@@ -132,7 +134,9 @@ def check_contract(
             }
         )
         if incompatible:
-            violations.append(ContractViolation(name, expected, " | ".join(incompatible)))
+            violations.append(
+                ContractViolation(diagnostic_name, expected, " | ".join(incompatible))
+            )
 
     if on_extra_columns == "fail":
         for name in sorted(actual_names - declared.keys()):
