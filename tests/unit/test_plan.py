@@ -294,8 +294,22 @@ def test_markdown_for_an_empty_plan() -> None:
     assert "No changes." in render_markdown(plan)
 
 
+def test_plan_reports_managed_table_ddl_and_counts_it_as_a_change() -> None:
+    statement = 'ALTER TABLE "public"."users" ADD COLUMN "score" TEXT NULL'
+    plan = build_plan(
+        DiffResult(total_source_rows=1, total_destination_rows=1),
+        ddl=[statement],
+        **_BASE,
+    )
+
+    assert plan.has_changes is True
+    assert plan.to_dict()["ddl"] == [statement]
+    assert f"DDL: {statement}" in render_text(plan)
+    assert "DDL that would run" in render_markdown(plan)
+
+
 def test_plan_document_round_trips_and_detects_tampering() -> None:
-    from drt.engine.plan import PlanDocumentError, load_plan_document
+    from drt.engine.plan import PlanDocumentError, load_plan_document, seal_of
 
     plan = build_plan(_diff(), **_BASE)
     doc = load_plan_document(plan.to_json(), _KEY)
@@ -328,6 +342,12 @@ def test_plan_document_round_trips_and_detects_tampering() -> None:
     unavailable = build_plan(DiffResult(supported=False, fallback_reason="x"), **_BASE)
     with pytest.raises(PlanDocumentError, match="unavailable"):
         load_plan_document(unavailable.to_json(), _KEY)
+
+    malformed_ddl = plan.to_dict()
+    malformed_ddl["ddl"] = [123]
+    malformed_ddl["seal"] = seal_of(malformed_ddl, _KEY)
+    with pytest.raises(PlanDocumentError, match="plan ddl"):
+        load_plan_document(json.dumps(malformed_ddl), _KEY)
 
 
 def test_plan_id_is_unique_per_artifact_but_the_digest_is_deterministic() -> None:

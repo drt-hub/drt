@@ -293,12 +293,12 @@ class SnowflakeWarehouseHistoryStore:
         self._optional: tuple[str, ...] | None = None
         self._alter_tried = False
 
-    def _optional_columns(self, conn: Any, *, allow_alter: bool) -> tuple[str, ...]:
+    def _optional_columns(
+        self, conn: Any, *, allow_alter: bool, required: tuple[str, ...] | None = None
+    ) -> tuple[str, ...]:
         """Optional history columns this table has; an append adds missing ones."""
-        complete = self._optional is not None and len(self._optional) == len(
-            OPTIONAL_HISTORY_COLUMNS
-        )
-        if self._optional is not None and (not allow_alter or self._alter_tried or complete):
+        requested = set(OPTIONAL_HISTORY_COLUMNS if required is None else required)
+        if self._optional is not None and (not allow_alter or requested.issubset(self._optional)):
             return self._optional
 
         def list_columns() -> list[str]:
@@ -321,6 +321,7 @@ class SnowflakeWarehouseHistoryStore:
             list_columns,
             add_column if allow_alter else None,
             table=f"{self._profile.managed_schema}.{_HISTORY_TABLE}",
+            required=required,
         )
         self._alter_tried = self._alter_tried or allow_alter
         return self._optional
@@ -350,7 +351,12 @@ class SnowflakeWarehouseHistoryStore:
             conn = _connect(self._profile)
             try:
                 self._ensure_table(conn)
-                present = self._optional_columns(conn, allow_alter=True)
+                required = tuple(
+                    name
+                    for name in OPTIONAL_HISTORY_COLUMNS
+                    if getattr(entry, name, None) is not None
+                )
+                present = self._optional_columns(conn, allow_alter=True, required=required)
                 cur = conn.cursor()
                 t = _qualified(self._profile, _HISTORY_TABLE)
                 # SELECT form, not VALUES: Snowflake disallows a function

@@ -33,7 +33,13 @@ from drt.config.models import (
 )
 from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
-from drt.destinations.sql_base import _ROW_SAVEPOINT, BaseSqlDestination
+from drt.destinations.sql_base import (
+    _ROW_SAVEPOINT,
+    BaseSqlDestination,
+    DestinationTableColumn,
+    _sql_type_family,
+)
+from drt.destinations.sql_utils import double_quote_ident_part
 
 try:
     from psycopg2.extras import Json as _Psycopg2Json
@@ -119,6 +125,15 @@ def _qualified_ident(table: str) -> Any:
     return _pgsql.Identifier(schema, relation)
 
 
+def _quote_qualified(table: str) -> str:
+    """Quote a relation using the same schema split as introspection and writes."""
+    schema, relation = _split_qualified(table)
+    quoted_relation = double_quote_ident_part(relation)
+    if schema is None:
+        return quoted_relation
+    return f"{double_quote_ident_part(schema)}.{quoted_relation}"
+
+
 def _relation_name(table: str) -> str:
     return _split_qualified(table)[1]
 
@@ -159,6 +174,86 @@ class PostgresDestination(BaseSqlDestination):
             return row[0] if row else 0
         finally:
             conn.close()
+
+    def _managed_describe_table(
+        self, cur: Any, config: PostgresDestinationConfig
+    ) -> list[DestinationTableColumn]:
+        schema, table = _split_qualified(config.table)
+        query = (
+            "SELECT column_name, data_type, is_nullable, column_default, is_identity, "
+            "is_generated, identity_generation "
+            "FROM information_schema.columns WHERE table_name = %s"
+        )
+        params: list[Any] = [table]
+        if schema is None:
+            query += " AND table_schema = current_schema()"
+        else:
+            query += " AND table_schema = %s"
+            params.append(schema)
+        query += " ORDER BY ordinal_position"
+        cur.execute(query, params)
+        return [
+            DestinationTableColumn(
+                name=str(row[0]),
+                data_type=str(row[1]),
+                nullable=str(row[2]).upper() == "YES",
+                has_default=(
+                    row[3] is not None
+                    or str(row[4]).upper() == "YES"
+                    or (len(row) > 5 and str(row[5]).upper() == "ALWAYS")
+                    or (len(row) > 6 and str(row[6]).upper() == "ALWAYS")
+                ),
+            )
+            for row in cur.fetchall()
+        ]
+
+    @staticmethod
+    def _managed_postgres_type(source_type: str | None) -> str:
+        family = _sql_type_family(source_type or "")
+        return {
+            "integer": "BIGINT",
+            "number": "NUMERIC",
+            "boolean": "BOOLEAN",
+            "timestamp": "TIMESTAMPTZ",
+            "date": "DATE",
+            "json": "JSONB",
+            "binary": "BYTEA",
+            "array": "JSONB",
+            "text": "TEXT",
+        }.get(family, "TEXT")
+
+    def _managed_build_create_table(
+        self,
+        config: PostgresDestinationConfig,
+        columns: list[str],
+        source_types: dict[str, str],
+        upsert_keys: list[str],
+    ) -> str:
+        keys = set(upsert_keys)
+        definitions = []
+        for column in columns:
+            data_type = self._managed_postgres_type(source_types.get(column))
+            nullability = " NOT NULL" if column in keys else ""
+            definitions.append(f"{double_quote_ident_part(column)} {data_type}{nullability}")
+        if upsert_keys:
+            primary_key = ", ".join(double_quote_ident_part(column) for column in upsert_keys)
+            definitions.append(f"PRIMARY KEY ({primary_key})")
+        return (
+            f"CREATE TABLE IF NOT EXISTS {_quote_qualified(config.table)} "
+            f"({', '.join(definitions)})"
+        )
+
+    def _managed_build_add_column(
+        self,
+        config: PostgresDestinationConfig,
+        column: str,
+        source_type: str | None,
+    ) -> str:
+        data_type = self._managed_postgres_type(source_type)
+        return (
+            f"ALTER TABLE {_quote_qualified(config.table)} ADD COLUMN IF NOT EXISTS "
+            f"{double_quote_ident_part(column)} {data_type} NULL"
+        )
 
     def get_table_name(self, config: DestinationConfig) -> str:
         """Implements ``QueryableDestination`` (#469)."""

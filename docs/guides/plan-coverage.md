@@ -6,7 +6,13 @@
 
 ## Planned (true create / update / delete change set)
 
-`clickhouse`, `databricks`, `mysql`, `postgres`, `snowflake`
+| Destination | Coverage note |
+|---|---|
+| `clickhouse` | True keyed target diff. |
+| `databricks` | True keyed target diff. |
+| `mysql` | Managed-table CREATE/ALTER statements are previewed without execution. |
+| `postgres` | Managed-table CREATE/ALTER statements are previewed without execution. |
+| `snowflake` | True keyed target diff. |
 
 ## Partly planned
 

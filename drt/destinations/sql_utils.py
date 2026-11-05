@@ -21,9 +21,25 @@ def backtick_quote_ident(table: str) -> str:
     Shared by the MySQL and ClickHouse destinations, whose quoting rules are
     identical.
     """
-    if "." in table:
-        return "`" + "`.`".join(table.split(".")) + "`"
-    return f"`{table}`"
+    # MySQL escapes a literal backtick inside an identifier by doubling it.
+    # Do this per qualified-name component; never quote the whole ``db.table``
+    # as one identifier.
+    return ".".join(f"`{part.replace('`', '``')}`" for part in table.split("."))
+
+
+def backtick_quote_ident_part(name: str) -> str:
+    """MySQL/ClickHouse-quote one identifier component, including literal dots."""
+    return f"`{name.replace('`', '``')}`"
+
+
+def double_quote_ident(name: str) -> str:
+    """ANSI/PostgreSQL-quote a possibly qualified identifier safely."""
+    return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in name.split("."))
+
+
+def double_quote_ident_part(name: str) -> str:
+    """ANSI/PostgreSQL-quote one identifier component, including literal dots."""
+    return f'"{name.replace(chr(34), chr(34) * 2)}"'
 
 
 @runtime_checkable

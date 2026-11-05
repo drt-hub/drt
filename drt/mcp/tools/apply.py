@@ -24,6 +24,7 @@ _RESULT_KEYS = (
     "error",
     "run_id",
     "guards",
+    "ddl",
 )
 
 

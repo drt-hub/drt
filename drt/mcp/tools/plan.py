@@ -123,6 +123,7 @@ def plan(
         "has_changes": planned.has_changes,
         "summary": document["summary"],
         "guards": document["guards"],
+        "ddl": document.get("ddl", []),
         "destination": shorten(planned.destination, plan_key),
         "created_at": planned.created_at,
         "digest": planned.digest,

@@ -65,6 +65,22 @@ class Source(Protocol):
 
 
 @runtime_checkable
+class SourceColumnMetadata(Protocol):
+    """Optional post-extraction column-type metadata for managed tables.
+
+    Implementations return database-neutral or SQL type names after the first
+    row has been yielded. Sources without this additive capability use the
+    portable destination fallback type; the frozen :class:`Source` Protocol is
+    unchanged.
+    """
+
+    def source_column_types(self) -> dict[str, str]:
+        """Return source column names mapped to type names for this query."""
+
+        ...
+
+
+@runtime_checkable
 class IncrementalSource(Protocol):
     """Optional source capability — receive the resolved watermark directly (#767).
 

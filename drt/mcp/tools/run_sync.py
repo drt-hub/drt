@@ -146,6 +146,8 @@ def run_sync(
         "failed": result.failed,
         "errors": result.errors[:10],  # cap at 10 to avoid huge payloads
     }
+    if result.ddl:
+        response["ddl"] = result.ddl
     if getattr(result, "limit_applied", None) is not None:
         response["limit_applied"] = result.limit_applied
     guards_outcome = getattr(result, "guards", None)
