@@ -142,7 +142,11 @@ class MySQLDestination(BaseSqlDestination):
                     name=str(values[0]),
                     data_type=str(values[1]),
                     nullable=str(values[2]).upper() == "YES",
-                    has_default=values[3] is not None or "auto_increment" in str(values[4]).lower(),
+                    has_default=(
+                        values[3] is not None
+                        or "auto_increment" in str(values[4]).lower()
+                        or "generated" in str(values[4]).lower()
+                    ),
                 )
             )
         return result

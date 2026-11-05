@@ -301,6 +301,141 @@ def test_engine_maps_source_metadata_to_destination_name_before_ddl(tmp_path: Pa
     assert result.ddl == ['ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "score" NUMERIC NULL']
 
 
+def test_engine_uses_string_type_for_mapped_masked_column_and_loads(tmp_path: Path) -> None:
+    from collections.abc import Iterator
+
+    from drt.destinations.base import SyncResult
+    from drt.engine.sync import run_sync
+
+    class IntegerSource:
+        def extract(
+            self, query: str, config: Any, *, query_tags: dict[str, str] | None = None
+        ) -> Iterator[dict[str, Any]]:
+            del query, config, query_tags
+            yield {"id": 1, "raw_score": 10}
+
+    class ExistingTextDestination(PostgresDestination):
+        def __init__(self) -> None:
+            super().__init__()
+            self.loaded: list[dict[str, Any]] = []
+            self.source_types: dict[str, str] = {}
+
+        def _dialect_connect(self, config: Any, query_tags: Any = None) -> MagicMock:
+            del config, query_tags
+            return MagicMock()
+
+        def _managed_describe_table(self, cur: Any, config: Any) -> list[DestinationTableColumn]:
+            del cur, config
+            return [
+                DestinationTableColumn("id", "bigint", False, False),
+                DestinationTableColumn("score_hash", "text", True, False),
+            ]
+
+        def load(
+            self, records: list[dict[str, Any]], config: Any, sync_options: SyncOptions
+        ) -> SyncResult:
+            del config
+            self.loaded.extend(records)
+            self.source_types = dict(sync_options._source_column_types)
+            return SyncResult(success=len(records))
+
+    sync = SyncConfig.model_validate(
+        {
+            "name": "masked_score",
+            "model": "ref('rows')",
+            "destination": {
+                "type": "postgres",
+                "host": "localhost",
+                "dbname": "app",
+                "table": "users",
+                "upsert_key": ["id"],
+                "manage_table": False,
+            },
+            "columns": [
+                {"name": "id", "type": "integer"},
+                {"name": "raw_score", "type": "integer"},
+            ],
+            "sync": {
+                "field_mappings": {"raw_score": "score_hash"},
+                "mask": {"score_hash": "hash"},
+            },
+        }
+    )
+    destination = ExistingTextDestination()
+    result = run_sync(
+        sync,
+        IntegerSource(),
+        destination,
+        BigQueryProfile(type="bigquery", project="p", dataset="d"),
+        tmp_path,
+    )
+
+    assert result.success == 1
+    assert destination.source_types == {"id": "integer", "score_hash": "string"}
+    assert destination.loaded == [
+        {
+            "id": 1,
+            "score_hash": "4a44dc15364204a80fe80e9039455cc1608281820fe2b24f1e5233ade6af1dd5",
+        }
+    ]
+
+
+def test_engine_uses_string_type_for_masked_source_metadata(tmp_path: Path) -> None:
+    from collections.abc import Iterator
+
+    from drt.engine.sync import run_sync
+
+    class TypedSource:
+        def extract(
+            self, query: str, config: Any, *, query_tags: dict[str, str] | None = None
+        ) -> Iterator[dict[str, Any]]:
+            del query, config, query_tags
+            yield {"id": 1, "raw_score": 10}
+
+        def source_column_types(self) -> dict[str, str]:
+            return {"id": "INTEGER", "raw_score": "INTEGER"}
+
+    class MetadataDestination(PostgresDestination):
+        def _dialect_connect(self, config: Any, query_tags: Any = None) -> MagicMock:
+            del config, query_tags
+            return MagicMock()
+
+        def _managed_describe_table(self, cur: Any, config: Any) -> list[DestinationTableColumn]:
+            del cur, config
+            return [DestinationTableColumn("id", "bigint", False, False)]
+
+    sync = SyncConfig.model_validate(
+        {
+            "name": "typed_masked",
+            "model": "ref('rows')",
+            "destination": {
+                "type": "postgres",
+                "host": "localhost",
+                "dbname": "app",
+                "table": "users",
+                "upsert_key": ["id"],
+                "manage_table": False,
+                "on_schema_change": "append_new_columns",
+            },
+            "columns": [{"name": "id", "type": "integer"}],
+            "sync": {
+                "field_mappings": {"raw_score": "score_hash"},
+                "mask": {"score_hash": "hash"},
+            },
+        }
+    )
+    result = run_sync(
+        sync,
+        TypedSource(),
+        MetadataDestination(),
+        BigQueryProfile(type="bigquery", project="p", dataset="d"),
+        tmp_path,
+        dry_run=True,
+    )
+
+    assert result.ddl == ['ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "score_hash" TEXT NULL']
+
+
 def test_engine_does_not_request_source_metadata_without_managed_table_keys(
     tmp_path: Path,
 ) -> None:
@@ -877,6 +1012,38 @@ def test_nullable_or_defaulted_destination_columns_may_be_omitted() -> None:
     assert result.records == [{"id": 1}]
 
 
+def test_postgres_generated_and_identity_always_columns_may_be_omitted() -> None:
+    columns = [
+        ("id", "bigint", "NO", None, "NO", "NEVER", None),
+        ("doubled", "bigint", "NO", None, "NO", "ALWAYS", None),
+        ("generated_id", "bigint", "NO", None, "YES", "NEVER", "ALWAYS"),
+    ]
+    result, _, cursor = _prepare(
+        PostgresDestination(),
+        _postgres_config(manage_table=False),
+        columns,
+        [{"id": 1}],
+    )
+    assert result.records == [{"id": 1}]
+    introspection = cursor.execute.call_args_list[0].args[0]
+    assert "is_generated" in introspection
+    assert "identity_generation" in introspection
+
+
+def test_mysql_generated_column_may_be_omitted() -> None:
+    columns = [
+        ("id", "bigint", "NO", None, ""),
+        ("doubled", "bigint", "NO", None, "STORED GENERATED"),
+    ]
+    result, _, _ = _prepare(
+        MySQLDestination(),
+        _mysql_config(manage_table=False),
+        columns,
+        [{"id": 1}],
+    )
+    assert result.records == [{"id": 1}]
+
+
 def test_metadata_type_mismatch_fails_except_under_ignore() -> None:
     columns = [("id", "bigint", "NO", None, "")]
     options = SyncOptions()
@@ -987,6 +1154,19 @@ def test_plan_diff_does_not_query_columns_that_only_would_be_added() -> None:
         )
     assert fetch.call_args.kwargs["columns"] == ["id"]
     assert diff.updated == [({"id": 1}, {"id": 1, "new_field": "x"})]
+
+
+def test_postgres_replace_plan_quotes_dotted_relation_like_writes() -> None:
+    with patch("drt.engine.diff.fetch_rows", return_value=[]) as fetch:
+        diff = compute_diff(
+            [{"id": 1}],
+            _postgres_config(table="public.user.events"),
+            SyncOptions(mode="replace"),
+            limit=20,
+        )
+
+    assert diff.supported is True
+    assert fetch.call_args.args[1] == 'SELECT * FROM "public"."user.events"'
 
 
 def test_mysql_keyed_plan_read_quotes_hostile_columns() -> None:

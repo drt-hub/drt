@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
 import pytest
 
+from drt.config.credentials import BigQueryProfile
 from drt.config.models import (
     MySQLDestinationConfig,
     PostgresDestinationConfig,
@@ -13,6 +18,7 @@ from drt.config.models import (
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
 from drt.engine.contract import declared_destination_types
+from drt.engine.sync import run_sync
 
 from .conftest import require_docker
 
@@ -24,7 +30,7 @@ testcontainers_postgres = pytest.importorskip("testcontainers.postgres")
 testcontainers_mysql = pytest.importorskip("testcontainers.mysql")
 
 
-def test_postgres_create_append_and_hostile_identifier_are_live_valid() -> None:
+def test_postgres_create_append_and_hostile_identifier_are_live_valid(tmp_path: Path) -> None:
     require_docker()
     hostile = 'profile.name"; DROP TABLE audit; --'
     with testcontainers_postgres.PostgresContainer(
@@ -88,6 +94,49 @@ def test_postgres_create_append_and_hostile_identifier_are_live_valid() -> None:
             'ALTER TABLE "managed_users" ADD COLUMN IF NOT EXISTS "score" NUMERIC NULL'
         ]
 
+        class IntegerSource:
+            def extract(
+                self,
+                query: str,
+                config: Any,
+                *,
+                query_tags: dict[str, str] | None = None,
+            ) -> Iterator[dict[str, Any]]:
+                del query, config, query_tags
+                yield {"id": 1, "raw_score": 10}
+
+        masked_sync = SyncConfig.model_validate(
+            {
+                "name": "masked_score",
+                "model": "select 1",
+                "destination": {
+                    **common,
+                    "table": "masked_users",
+                    "manage_table": True,
+                },
+                "columns": [
+                    {"name": "id", "type": "integer"},
+                    {"name": "raw_score", "type": "integer"},
+                ],
+                "sync": {
+                    "field_mappings": {"raw_score": "score_hash"},
+                    "mask": {"score_hash": "hash"},
+                },
+            }
+        )
+        masked = run_sync(
+            masked_sync,
+            IntegerSource(),
+            PostgresDestination(),
+            BigQueryProfile(type="bigquery", project="p", dataset="d"),
+            tmp_path,
+        )
+        assert masked.success == 1
+        assert masked.ddl == [
+            'CREATE TABLE IF NOT EXISTS "masked_users" '
+            '("id" BIGINT NOT NULL, "score_hash" TEXT, PRIMARY KEY ("id"))'
+        ]
+
         conn = psycopg2.connect(
             host=host, port=port, dbname="testdb", user="admin", password="adminpass"
         )
@@ -103,6 +152,12 @@ def test_postgres_create_append_and_hostile_identifier_are_live_valid() -> None:
                 assert cur.fetchall() == [(1, "Ada Lovelace", 10)]
                 cur.execute(
                     "CREATE TABLE sparse_users (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL)"
+                )
+                cur.execute(
+                    "CREATE TABLE generated_users ("
+                    "id BIGINT PRIMARY KEY, "
+                    "generated_id BIGINT GENERATED ALWAYS AS IDENTITY, "
+                    "doubled BIGINT GENERATED ALWAYS AS (id * 2) STORED)"
                 )
             conn.commit()
 
@@ -120,9 +175,32 @@ def test_postgres_create_append_and_hostile_identifier_are_live_valid() -> None:
             )
             with pytest.raises(ValueError, match=r"required column\(s\).*tenant"):
                 sparse_destination.load([{"id": 2}], sparse_config, SyncOptions())
+
+            generated_config = PostgresDestinationConfig(
+                **{**common, "table": "generated_users"},
+                manage_table=False,
+            )
+            assert (
+                PostgresDestination().load([{"id": 7}], generated_config, SyncOptions()).success
+                == 1
+            )
             with conn.cursor() as cur:
                 cur.execute("SELECT id, tenant FROM sparse_users ORDER BY id")
                 assert cur.fetchall() == [(1, "a")]
+                cur.execute("SELECT id, generated_id, doubled FROM generated_users")
+                assert cur.fetchall() == [(7, 1, 14)]
+                cur.execute(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_name = 'masked_users' AND column_name = 'score_hash'"
+                )
+                assert cur.fetchone() == ("text",)
+                cur.execute("SELECT id, score_hash FROM masked_users")
+                assert cur.fetchall() == [
+                    (
+                        1,
+                        "4a44dc15364204a80fe80e9039455cc1608281820fe2b24f1e5233ade6af1dd5",
+                    )
+                ]
         finally:
             conn.close()
 
@@ -205,6 +283,11 @@ def test_mysql_create_append_and_hostile_identifier_are_live_valid() -> None:
                     "CREATE TABLE prefix_users "
                     "(email VARCHAR(255) NOT NULL, UNIQUE KEY uq_email (email(10)))"
                 )
+                cur.execute(
+                    "CREATE TABLE generated_users ("
+                    "id BIGINT PRIMARY KEY, "
+                    "doubled BIGINT GENERATED ALWAYS AS (id * 2) STORED)"
+                )
             conn.commit()
 
             sparse_destination = MySQLDestination()
@@ -233,10 +316,19 @@ def test_mysql_create_append_and_hostile_identifier_are_live_valid() -> None:
                     SyncOptions(),
                 )
 
+            generated_config = MySQLDestinationConfig(
+                **{**common, "table": "generated_users"},
+                manage_table=False,
+            )
+            generated = MySQLDestination().load([{"id": 7}], generated_config, SyncOptions())
+            assert generated.success == 1
+
             with conn.cursor() as cur:
                 cur.execute("SELECT id, tenant FROM sparse_users ORDER BY id")
                 assert cur.fetchall() == ((1, "a"),)
                 cur.execute("SELECT COUNT(*) FROM prefix_users")
                 assert cur.fetchone() == (0,)
+                cur.execute("SELECT id, doubled FROM generated_users")
+                assert cur.fetchall() == ((7, 14),)
         finally:
             conn.close()

@@ -36,7 +36,12 @@ from drt.destinations.lookup import (
     detect_ambiguous_lookup_ordering,
 )
 from drt.engine.computed_fields import apply_computed_fields
-from drt.engine.contract import check_contract, declared_destination_types, drop_extra_columns
+from drt.engine.contract import (
+    check_contract,
+    declared_destination_types,
+    destination_column_types,
+    drop_extra_columns,
+)
 from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
@@ -452,7 +457,7 @@ def run_sync(
     # connector-specific cursor metadata. Names are mapped to the exact
     # destination-facing shape used by managed-table reconciliation.
     sync.sync._source_column_types = declared_destination_types(
-        sync.columns, sync.sync.field_mappings
+        sync.columns, sync.sync.field_mappings, sync.sync.mask
     )
     sync.sync._source_column_metadata_loaded = False
     raised: BaseException | None = None
@@ -1156,11 +1161,9 @@ def _run_sync_body(
             ):
                 with _stage_ctx("source"):
                     metadata_types = source.source_column_types()
-                mappings = sync.sync.field_mappings or {}
-                metadata_types = {
-                    mappings.get(column, column): data_type
-                    for column, data_type in metadata_types.items()
-                }
+                metadata_types = destination_column_types(
+                    metadata_types, sync.sync.field_mappings, sync.sync.mask
+                )
                 # Declarations are the stable public contract and win for
                 # overlapping columns; metadata can still type undeclared
                 # computed/plugin columns.

@@ -313,7 +313,7 @@ def compute_plan_from_records(
     from drt.engine.contract import declared_destination_types
 
     sync.sync._source_column_types = declared_destination_types(
-        sync.columns, sync.sync.field_mappings
+        sync.columns, sync.sync.field_mappings, sync.sync.mask
     )
     state_bundle = build_state_bundle(project, project_dir)
     blocker = unsupported_reason(sync)

@@ -111,7 +111,7 @@ def replay_dead_letters(
     retry_t0 = time.perf_counter()
     sync.sync._executed_ddl = []
     sync.sync._source_column_types = declared_destination_types(
-        sync.columns, sync.sync.field_mappings
+        sync.columns, sync.sync.field_mappings, sync.sync.mask
     )
 
     def record_retry_ddl(status: str, synced: int, failed: int, errors: list[str]) -> None:

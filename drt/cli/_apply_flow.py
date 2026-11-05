@@ -629,7 +629,9 @@ def apply_plan(
     from drt.engine.contract import declared_destination_types
 
     exact_column_types = declared_destination_types(
-        ctx_plan.sync.columns, ctx_plan.sync.sync.field_mappings
+        ctx_plan.sync.columns,
+        ctx_plan.sync.sync.field_mappings,
+        ctx_plan.sync.sync.mask,
     )
     replay_sync = _exact_replay_sync(ctx_plan.sync) if exact else ctx_plan.sync
     ctx = _RunContext(

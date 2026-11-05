@@ -19,7 +19,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from drt.config.models import ClickHouseDestinationConfig, DestinationConfig, SyncOptions
+from drt.config.models import (
+    ClickHouseDestinationConfig,
+    DestinationConfig,
+    PostgresDestinationConfig,
+    SyncOptions,
+)
 from drt.destinations._mirror_state import decode_key, diff_keys
 from drt.destinations.query import (
     fetch_all_keys,
@@ -178,6 +183,15 @@ def _writes_full_row(config: DestinationConfig, sync_options: SyncOptions) -> bo
     """
     del config
     return sync_options.mode == "replace"
+
+
+def _full_scan_relation(config: DestinationConfig, table: str) -> str:
+    """Render a diff full-scan relation with the destination's write semantics."""
+    if isinstance(config, PostgresDestinationConfig):
+        from drt.destinations.postgres import _quote_qualified
+
+        return _quote_qualified(table)
+    return table
 
 
 def _is_append_only(config: DestinationConfig, sync_options: SyncOptions) -> bool:
@@ -587,10 +601,12 @@ def compute_diff(
             except NotImplementedError:
                 # ClickHouse (different paramstyle) — fall back to full scan.
                 # keyed fetch is an optimisation, never a correctness need.
-                select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
+                relation = _full_scan_relation(config, table)
+                select_query = f"SELECT * FROM {relation}"  # noqa: S608 — trusted config
                 dest_rows = fetch_rows(config, select_query, columns=[], field_hint=field_hint)
         else:
-            select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
+            relation = _full_scan_relation(config, table)
+            select_query = f"SELECT * FROM {relation}"  # noqa: S608 — trusted config
             dest_rows = fetch_rows(config, select_query, columns=[], field_hint=field_hint)
     except Exception as e:
         return DiffResult(

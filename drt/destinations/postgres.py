@@ -180,7 +180,8 @@ class PostgresDestination(BaseSqlDestination):
     ) -> list[DestinationTableColumn]:
         schema, table = _split_qualified(config.table)
         query = (
-            "SELECT column_name, data_type, is_nullable, column_default, is_identity "
+            "SELECT column_name, data_type, is_nullable, column_default, is_identity, "
+            "is_generated, identity_generation "
             "FROM information_schema.columns WHERE table_name = %s"
         )
         params: list[Any] = [table]
@@ -196,7 +197,12 @@ class PostgresDestination(BaseSqlDestination):
                 name=str(row[0]),
                 data_type=str(row[1]),
                 nullable=str(row[2]).upper() == "YES",
-                has_default=row[3] is not None or str(row[4]).upper() == "YES",
+                has_default=(
+                    row[3] is not None
+                    or str(row[4]).upper() == "YES"
+                    or (len(row) > 5 and str(row[5]).upper() == "ALWAYS")
+                    or (len(row) > 6 and str(row[6]).upper() == "ALWAYS")
+                ),
             )
             for row in cur.fetchall()
         ]
