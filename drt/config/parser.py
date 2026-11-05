@@ -7,13 +7,16 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import ValidationError
 
 from drt.config.models import ColumnConfig, ProjectConfig, SyncConfig
 from drt.config.vars import expand_vars, has_var_template, render_vars, resolve_vars
+
+if TYPE_CHECKING:
+    from drt.integrations.dbt import ManifestCache
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -83,14 +86,12 @@ def _dbt_disagreement(
     for name in sorted(authored_by_name.keys() & derived_by_name.keys()):
         authored_column = authored_by_name[name]
         dbt_column = derived_by_name[name]
-        safe_name = _safe(name)
         if authored_column.type != dbt_column.type:
             details.append(
-                f"{safe_name} type is {authored_column.type} (hand-written) "
-                f"vs {dbt_column.type} (dbt)"
+                f"{name} type is {authored_column.type} (hand-written) vs {dbt_column.type} (dbt)"
             )
         if authored_column.description != dbt_column.description:
-            details.append(f"{safe_name} description differs")
+            details.append(f"{name} description differs")
     if not details:
         return None
     return (
@@ -100,7 +101,10 @@ def _dbt_disagreement(
 
 
 def _resolve_dbt_contract(
-    sync: SyncConfig, project_dir: Path, manifest_path: Path | None
+    sync: SyncConfig,
+    project_dir: Path,
+    manifest_path: Path | None,
+    manifest_cache: ManifestCache,
 ) -> tuple[SyncConfig, str | None]:
     """Resolve ``contract.source: dbt`` once into ordinary ``columns``."""
     if sync.contract is None or sync.contract.source != "dbt":
@@ -122,14 +126,19 @@ def _resolve_dbt_contract(
         )
     path = _manifest_path(project_dir, manifest_path)
     try:
-        dbt_model = resolve_contract_from_manifest(model_name, path)
+        dbt_model = resolve_contract_from_manifest(model_name, path, manifest_cache)
     except FileNotFoundError as exc:
         raise ValueError(str(exc)) from exc
 
-    derived = [
-        ColumnConfig(name=column.name, type=column.type, description=column.description)
-        for column in dbt_model.columns
-    ]
+    derived = []
+    for column in dbt_model.columns:
+        derived_column = ColumnConfig(
+            name=column.name, type=column.type, description=column.description
+        )
+        # Matching must use the exact manifest name. Only its diagnostic form is
+        # sanitized, preserving hand-written ColumnConfig names verbatim.
+        derived_column._diagnostic_name = _safe(column.name)
+        derived.append(derived_column)
     names = [column.name for column in derived]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -281,13 +290,14 @@ def load_syncs(
         return []
     resolved = vars if vars is not None else project_vars(project_dir)
     syncs = []
+    manifest_cache: ManifestCache = {}
     for path in sorted(syncs_dir.glob("*.yml")):
         with path.open() as f:
             data = yaml.safe_load(f)
         data = expand_env_vars(data)
         data = expand_sync_vars(data, resolved)
         sync = SyncConfig.model_validate(data)
-        sync, _warning = _resolve_dbt_contract(sync, project_dir, manifest_path)
+        sync, _warning = _resolve_dbt_contract(sync, project_dir, manifest_path, manifest_cache)
         syncs.append(sync)
 
     # Enterprise audit extension point (#299, ADR 0008) — fires once per
@@ -314,6 +324,7 @@ def load_syncs_safe(
         return SyncLoadResult()
     resolved = vars if vars is not None else project_vars(project_dir)
     result = SyncLoadResult()
+    manifest_cache: ManifestCache = {}
     for path in sorted(syncs_dir.glob("*.yml")):
         with path.open() as f:
             data = yaml.safe_load(f)
@@ -323,7 +334,9 @@ def load_syncs_safe(
             # Check for deprecated keys before validation
             deprecations = _check_deprecated_keys(data)
             sync = SyncConfig.model_validate(data)
-            sync, dbt_warning = _resolve_dbt_contract(sync, project_dir, manifest_path)
+            sync, dbt_warning = _resolve_dbt_contract(
+                sync, project_dir, manifest_path, manifest_cache
+            )
             # `model:` is rendered by the resolver at run time (it owns
             # cursor_value too), so trial-render it here purely to surface an
             # undefined var now rather than mid-run — the output is discarded.

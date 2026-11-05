@@ -157,6 +157,17 @@ class TestPureContractCheck:
             "'extra' expected not declared, actual boolean."
         )
 
+    def test_hand_written_column_name_is_exact_in_contract_message(self) -> None:
+        checked = check_contract([{}], [ColumnConfig(name="items[0]", type="string")], "fail")
+
+        assert checked.message() == (
+            "Column contract violation: 'items[0]' expected string, actual missing."
+        )
+
+        long_name = "column_" + "x" * 100
+        long_checked = check_contract([{}], [ColumnConfig(name=long_name, type="string")], "fail")
+        assert long_name in long_checked.message()
+
     def test_cli_escapes_contract_message_markup(self) -> None:
         from drt.cli.output import print_sync_result
 

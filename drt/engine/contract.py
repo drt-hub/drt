@@ -46,11 +46,8 @@ class ContractCheck:
         return not self.violations
 
     def message(self) -> str:
-        from drt.integrations.dbt import _safe
-
         details = "; ".join(
-            f"{_safe(v.column)!r} expected {_safe(v.expected)}, actual {_safe(v.actual)}"
-            for v in self.violations
+            f"{v.column!r} expected {v.expected}, actual {v.actual}" for v in self.violations
         )
         return f"Column contract violation: {details}."
 
@@ -91,13 +88,15 @@ def check_contract(
     for every non-null value in the batch, while duplicate actual type names are
     collapsed into one deterministic diagnostic.
     """
-    declared = {column.name: column.type for column in columns}
+    declared = {
+        column.name: (column.type, column._diagnostic_name or column.name) for column in columns
+    }
     actual_names = {name for record in records for name in record}
     violations: list[ContractViolation] = []
 
-    for name, expected in declared.items():
+    for name, (expected, diagnostic_name) in declared.items():
         if name not in actual_names:
-            violations.append(ContractViolation(name, expected, "missing"))
+            violations.append(ContractViolation(diagnostic_name, expected, "missing"))
             continue
         incompatible = sorted(
             {
@@ -109,7 +108,9 @@ def check_contract(
             }
         )
         if incompatible:
-            violations.append(ContractViolation(name, expected, " | ".join(incompatible)))
+            violations.append(
+                ContractViolation(diagnostic_name, expected, " | ".join(incompatible))
+            )
 
     if on_extra_columns == "fail":
         for name in sorted(actual_names - declared.keys()):

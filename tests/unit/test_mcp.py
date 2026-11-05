@@ -124,6 +124,45 @@ async def test_validate_returns_valid_syncs(server: FastMCP) -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_preserves_computed_field_brackets(tmp_path: Path) -> None:
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "computed.yml").write_text(
+        "name: computed\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/api\n"
+        "sync:\n"
+        "  computed_fields:\n"
+        "    'amount[usd]': '{{'\n"
+    )
+
+    result = await call(create_server(tmp_path), "drt_validate")
+
+    assert any("computed_fields['amount[usd]']" in error for error in result["errors"]["computed"])
+
+
+def test_validate_only_strips_controls_from_ordinary_errors(tmp_path: Path) -> None:
+    from drt.config.parser import SyncLoadResult
+    from drt.mcp.tools.validate import validate as validate_tool
+
+    ordinary_error = "amount[usd] " + "x" * 1600 + "\nnext"
+
+    class _Context:
+        project_dir = tmp_path
+
+        @staticmethod
+        def load_syncs_safe(manifest_path: str | None = None) -> SyncLoadResult:
+            return SyncLoadResult(errors={"computed": [ordinary_error]})
+
+    response = validate_tool(_Context())
+
+    assert response["errors"]["computed"] == [ordinary_error.replace("\n", "?")]
+
+
+@pytest.mark.asyncio
 async def test_validate_warns_on_hardcoded_secret(tmp_path: Path) -> None:
     """Matches ``drt validate``'s non-strict behaviour: a hardcoded secret is
     a warning, not an error — the sync stays valid (#870)."""

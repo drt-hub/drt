@@ -183,6 +183,7 @@ class ColumnConfig(BaseModel):
     name: str = Field(min_length=1, json_schema_extra={"pattern": r"\S"})
     type: Literal["string", "number", "integer", "boolean", "timestamp", "date", "json"]
     description: str | None = None
+    _diagnostic_name: str | None = PrivateAttr(default=None)
 
     @field_validator("name")
     @classmethod

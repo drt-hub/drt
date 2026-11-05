@@ -21,6 +21,7 @@ from drt.config.parser import load_syncs, load_syncs_safe
 from drt.config.schema import generate_sync_schema, validate_yaml_against_schema
 from drt.destinations.base import SyncResult
 from drt.docs.builder import build_manifest
+from drt.engine.contract import check_contract
 from drt.engine.plan import config_hash
 from drt.engine.sync import run_sync
 from drt.integrations.dbt import portable_type_from_dbt
@@ -515,8 +516,13 @@ def test_runtime_contract_message_sanitizes_manifest_column_name(tmp_path: Path)
         },
     )
 
+    sync = load_syncs(tmp_path)[0]
+    assert sync.columns is not None
+    assert sync.columns[0].name == "[/]\nbad"
+    assert check_contract([{"[/]\nbad": 1}], sync.columns, "fail").passed
+
     result = run_sync(
-        load_syncs(tmp_path)[0],
+        sync,
         _CapturingSource(),
         _Destination(),
         BigQueryProfile(type="bigquery", project="p", dataset="d"),
@@ -618,25 +624,52 @@ def test_a_versioned_model_is_reported_as_versioned_not_just_ambiguous(tmp_path:
         load_syncs(tmp_path)
 
 
-def test_the_manifest_is_parsed_once_per_file_version(tmp_path: Path, monkeypatch) -> None:
+def test_one_load_reads_and_parses_the_manifest_once(tmp_path: Path, monkeypatch) -> None:
     import drt.integrations.dbt as dbt_module
 
     path = _write_manifest(tmp_path, {"model.analytics.customers": _node()})
-    calls: list[int] = []
+    _write_sync(tmp_path)
+    second = _sync_data(name="customers_to_backup")
+    (tmp_path / "syncs" / "backup.yml").write_text(yaml.safe_dump(second, sort_keys=False))
+    reads: list[int] = []
+    parses: list[int] = []
+    real_read_bytes = Path.read_bytes
     real_loads = dbt_module.json.loads
-    monkeypatch.setattr(dbt_module.json, "loads", lambda text: calls.append(1) or real_loads(text))
 
-    first = dbt_module._read_manifest(path)
-    second = dbt_module._read_manifest(path)
+    def read_bytes(candidate: Path) -> bytes:
+        if candidate == path:
+            reads.append(1)
+        return real_read_bytes(candidate)
 
-    assert first is second and len(calls) == 1
-    path.write_text(json.dumps({"nodes": {}, "metadata": {"changed": True}}))
-    assert dbt_module._read_manifest(path) is not first and len(calls) == 2
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(dbt_module.json, "loads", lambda text: parses.append(1) or real_loads(text))
+
+    assert len(load_syncs(tmp_path)) == 2
+    assert len(reads) == 1
+    assert len(parses) == 1
+
+
+def test_one_safe_load_caches_a_manifest_parse_error(tmp_path: Path, monkeypatch) -> None:
+    import drt.integrations.dbt as dbt_module
+
+    _write_sync(tmp_path)
+    second = _sync_data(name="customers_to_backup")
+    (tmp_path / "syncs" / "backup.yml").write_text(yaml.safe_dump(second, sort_keys=False))
+    path = tmp_path / "target" / "manifest.json"
+    path.parent.mkdir()
+    path.write_text("not-json")
+    parses: list[int] = []
+    real_loads = dbt_module.json.loads
+    monkeypatch.setattr(dbt_module.json, "loads", lambda text: parses.append(1) or real_loads(text))
+
+    result = load_syncs_safe(tmp_path)
+
+    assert len(result.errors) == 2
+    assert len(parses) == 1
 
 
 def test_manifest_cache_detects_same_size_replacement_with_restored_mtime(tmp_path: Path) -> None:
-    import drt.integrations.dbt as dbt_module
-
+    _write_sync(tmp_path)
     path = _write_manifest(tmp_path, {"model.analytics.customers": _node()})
     first_payload = path.read_bytes()
     second_payload = first_payload.replace(b'"id"', b'"xy"')
@@ -644,15 +677,15 @@ def test_manifest_cache_detects_same_size_replacement_with_restored_mtime(tmp_pa
     assert len(first_payload) == len(second_payload)
 
     first_stat = path.stat()
-    first = dbt_module._read_manifest(path)
+    first = load_syncs(tmp_path)[0]
     path.write_bytes(second_payload)
     os.utime(path, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns))
 
     second_stat = path.stat()
-    second = dbt_module._read_manifest(path)
+    second = load_syncs(tmp_path)[0]
 
     assert second_stat.st_size == first_stat.st_size
     assert second_stat.st_mtime_ns == first_stat.st_mtime_ns
     assert first is not second
-    assert "id" in first["nodes"]["model.analytics.customers"]["columns"]
-    assert "xy" in second["nodes"]["model.analytics.customers"]["columns"]
+    assert [column.name for column in first.columns or []] == ["id", "email"]
+    assert [column.name for column in second.columns or []] == ["xy", "email"]

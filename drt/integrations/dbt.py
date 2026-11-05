@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
@@ -117,27 +116,35 @@ def _safe(value: object, limit: int = 80) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-# One parse per manifest per process: every dbt-backed sync, and ``plan --all`` reloading
-# the syncs once per name, would otherwise re-parse the whole (often tens of MB) manifest.
-_MANIFEST_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+ManifestCache = dict[Path, dict[str, Any] | Exception]
 
 
-def _read_manifest(manifest_path: Path) -> dict[str, Any]:
+def _read_manifest(
+    manifest_path: Path, manifest_cache: ManifestCache | None = None
+) -> dict[str, Any]:
+    """Read a manifest, reusing it only within the caller's load operation."""
+    cache = manifest_cache if manifest_cache is not None else {}
+    key = manifest_path.resolve()
+    cached = cache.get(key)
+    if isinstance(cached, Exception):
+        raise type(cached)(*cached.args)
+    if cached is not None:
+        return cached
     if not manifest_path.exists():
-        raise FileNotFoundError(f"dbt manifest not found: {manifest_path}")
+        missing_error = FileNotFoundError(f"dbt manifest not found: {manifest_path}")
+        cache[key] = missing_error
+        raise missing_error
     try:
-        payload = manifest_path.read_bytes()
-        key = (str(manifest_path.resolve()), sha256(payload).hexdigest())
-        cached = _MANIFEST_CACHE.get(key)
-        if cached is not None:
-            return cached
-        value = json.loads(payload)
+        value = json.loads(manifest_path.read_bytes())
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Could not read dbt manifest {manifest_path}: {exc}") from exc
+        read_error = ValueError(f"Could not read dbt manifest {manifest_path}: {exc}")
+        cache[key] = read_error
+        raise read_error from exc
     if not isinstance(value, dict):
-        raise ValueError(f"dbt manifest {manifest_path} must contain a JSON object.")
-    _MANIFEST_CACHE.clear()  # keep at most the latest manifest in memory
-    _MANIFEST_CACHE[key] = value
+        shape_error = ValueError(f"dbt manifest {manifest_path} must contain a JSON object.")
+        cache[key] = shape_error
+        raise shape_error
+    cache[key] = value
     return value
 
 
@@ -149,14 +156,18 @@ def _package_name(unique_id: str, node: dict[str, Any]) -> str:
     return parts[1] if len(parts) == 3 else "<unknown>"
 
 
-def resolve_contract_from_manifest(model_name: str, manifest_path: Path) -> DbtContractModel:
+def resolve_contract_from_manifest(
+    model_name: str,
+    manifest_path: Path,
+    manifest_cache: ManifestCache | None = None,
+) -> DbtContractModel:
     """Resolve and normalize the dbt model used by a dbt-sourced contract.
 
     Unqualified ``ref('name')`` is deliberately rejected when more than one
     package contributes that model name. drt does not guess which package dbt
     would select from project dependency context.
     """
-    manifest = _read_manifest(manifest_path)
+    manifest = _read_manifest(manifest_path, manifest_cache)
     nodes = manifest.get("nodes", {})
     if not isinstance(nodes, dict):
         raise ValueError(f"dbt manifest {manifest_path} has an invalid 'nodes' object.")
