@@ -81,6 +81,9 @@ class Plan:
     guards_configured: dict[str, Any] | None = None
     guard_trips: list[GuardTrip] = field(default_factory=list)
     entries: list[PlanEntry] = field(default_factory=list)
+    # Read-only schema reconciliation preview (#760). Statements contain only
+    # safely quoted identifiers and type names selected by drt.
+    ddl: list[str] = field(default_factory=list)
     # Metadata only. The real rows stay in an adjacent age-encrypted sidecar.
     payload: dict[str, Any] | None = None
     plan_key: bytes = field(default=b"", repr=False)
@@ -94,7 +97,7 @@ class Plan:
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.entries)
+        return bool(self.entries or self.ddl)
 
     @property
     def digest(self) -> str:
@@ -155,6 +158,8 @@ class Plan:
         }
         if self.payload is not None:
             body["payload"] = self.payload
+        if self.ddl:
+            body["ddl"] = self.ddl
         return body
 
     def to_json(self) -> str:
@@ -271,6 +276,7 @@ def build_plan(
     guards: Any = None,
     cursor_value: str | None = None,
     created_at: str | None = None,
+    ddl: list[str] | None = None,
 ) -> Plan:
     """Build a :class:`Plan` from a *complete* (un-truncated) diff.
 
@@ -295,6 +301,7 @@ def build_plan(
         total_destination_rows=diff.total_destination_rows,
         delete_baseline=diff.delete_baseline,
         kept_values=diff.kept_values,
+        ddl=list(ddl or []),
     )
 
     if not diff.supported:
@@ -415,6 +422,9 @@ def load_plan_document(text: str, plan_key: bytes) -> dict[str, Any]:
         doc["options"]["redact_keys"]
         doc["options"]["key_id"]
         doc["drt_version"]
+        ddl = doc.get("ddl", [])
+        if not isinstance(ddl, list) or any(not isinstance(item, str) for item in ddl):
+            raise PlanDocumentError("plan ddl must be an array of SQL strings")
     except (KeyError, TypeError) as e:
         raise PlanDocumentError(f"plan file is missing or malformed field: {e}") from e
     return doc
@@ -615,6 +625,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
             },
             "additionalProperties": False,
         },
+        "ddl": {"type": "array", "items": {"type": "string"}},
         "entries": {
             "type": "array",
             "items": {
@@ -685,6 +696,9 @@ def render_markdown(plan: Plan) -> str:
             )
     if plan.kept_values:
         lines += ["", f"{plan.kept_values} existing value(s) kept (`write_policy: fill_empty`)."]
+    if plan.ddl:
+        lines += ["", "DDL that would run:"]
+        lines += [f"- {_code(statement, _MARKDOWN_REASON_LIMIT)}" for statement in plan.ddl]
     for trip in plan.guard_trips:
         lines += ["", f"**Guard tripped:** {_code(trip.message, _MARKDOWN_REASON_LIMIT)}"]
     lines += ["", f"{_code(plan.plan_id)} - digest {_code(plan.digest[:23])}", ""]
@@ -702,6 +716,8 @@ def render_text(plan: Plan) -> str:
     lines.append("  " + (", ".join(parts) if parts else "No changes."))
     if plan.kept_values:
         lines.append(f"  {plan.kept_values} existing value(s) kept (write_policy: fill_empty)")
+    for statement in plan.ddl:
+        lines.append(f"  DDL: {statement}")
     lines.append(f"  Source rows: {plan.total_source_rows}")
     if plan.total_destination_rows is not None:
         lines.append(f"  Destination rows read: {plan.total_destination_rows}")

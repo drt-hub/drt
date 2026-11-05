@@ -4,6 +4,12 @@
     "created_at": {
       "type": "string"
     },
+    "ddl": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "destination": {
       "type": "string"
     },

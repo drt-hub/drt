@@ -124,6 +124,21 @@ class _FakeRaisingDestination:
         return result
 
 
+class _FakeManagedRetryDestination:
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        del config
+        assert sync_options._source_column_types == {"id": "integer"}
+        statement = 'ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "score" BIGINT NULL'
+        if not sync_options._executed_ddl:
+            sync_options._executed_ddl.append(statement)
+        return SyncResult(success=len(records), ddl=[statement])
+
+
 class _FakeSkippingDestination:
     """Reports a ``match_policy``-style skip for ``skip_ids`` — no RowError,
     no batch_index, just a bare ``skipped``/``skipped_no_match`` counter
@@ -967,6 +982,29 @@ def test_retry_normal_completion_does_not_delete_an_untouched_legacy_duplicate_b
     assert [entry.id for entry in remaining] == [untouched.id]
     assert remaining[0].record == {"n": 1}
     assert remaining[0].attempts == 1
+
+
+def test_retry_reports_and_records_managed_table_ddl(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli.commands.retry import replay_dead_letters
+    from drt.config.parser import load_syncs
+    from drt.state.history import HistoryManager
+
+    sync_path = project / "syncs" / "post_users.yml"
+    config = yaml.safe_load(sync_path.read_text())
+    config["columns"] = [{"name": "id", "type": "integer"}]
+    sync_path.write_text(yaml.dump(config))
+    _seed(project, [1])
+    _patch_dest(monkeypatch, _FakeManagedRetryDestination())
+    sync = next(s for s in load_syncs(project) if s.name == "post_users")
+
+    summary = replay_dead_letters(sync, project_dir=project)
+
+    expected = ['ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "score" BIGINT NULL']
+    assert summary["ddl"] == expected
+    [entry] = HistoryManager(project).read("post_users")
+    assert entry.ddl == expected
 
 
 def test_retry_excludes_unattributed_skip_from_ledger_and_audit(

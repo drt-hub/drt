@@ -18,16 +18,42 @@ no observer dependency; the sync engine owns reporting and control flow.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from drt.config.models import ColumnConfig
+from drt.config.models import ColumnConfig, MaskSpec
 
 PortableType = Literal["string", "number", "integer", "boolean", "timestamp", "date", "json"]
 ExtraColumnsPolicy = Literal["fail", "ignore", "drop"]
+
+
+def declared_destination_types(
+    columns: Sequence[ColumnConfig] | None,
+    field_mappings: dict[str, str] | None,
+    mask: dict[str, MaskSpec] | None = None,
+) -> dict[str, str]:
+    """Portable declared types keyed by the destination-facing column name."""
+    return destination_column_types(
+        {column.name: column.type for column in columns or ()}, field_mappings, mask
+    )
+
+
+def destination_column_types(
+    source_types: Mapping[str, str],
+    field_mappings: dict[str, str] | None,
+    mask: dict[str, MaskSpec] | None,
+) -> dict[str, str]:
+    """Map source types to their post-rename, post-mask destination shape."""
+    mappings = field_mappings or {}
+    masked = set(mask or {})
+    destination_types: dict[str, str] = {}
+    for source_name, data_type in source_types.items():
+        destination_name = mappings.get(source_name, source_name)
+        destination_types[destination_name] = "string" if destination_name in masked else data_type
+    return destination_types
 
 
 @dataclass(frozen=True)

@@ -55,8 +55,12 @@ _OBJECT = "Writes whole files or objects; there are no keyed target rows to diff
 _API = "Records live behind an API that could be read back by key (API-based diff, #472)."
 
 PLAN_COVERAGE: dict[str, PlanCoverage] = {
-    "postgres": _SQL_READ,
-    "mysql": _SQL_READ,
+    "postgres": PlanCoverage(
+        "available", "Managed-table CREATE/ALTER statements are previewed without execution."
+    ),
+    "mysql": PlanCoverage(
+        "available", "Managed-table CREATE/ALTER statements are previewed without execution."
+    ),
     "snowflake": _SQL_READ,
     "databricks": _SQL_READ,
     "clickhouse": _SQL_READ,

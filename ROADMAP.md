@@ -274,7 +274,7 @@ Released as **v1.2.0** on 2026-10-21. See [CHANGELOG.md](CHANGELOG.md#120---2026
 
 ## v1.3 — Depth and durability
 
-**Theme: make the review loop auditable and keep it honest.** v1.2 ships `plan` / `apply`; v1.3 deepens it and adds the continuous-improvement mechanism, then picks up the schema, windowing and orchestration items that were parked.
+**Theme: make the review loop auditable and keep it honest.** v1.2 ships `plan` / `apply`; v1.3 deepens it and adds the continuous-improvement mechanism, then picks up the schema and orchestration items that were parked. Items that need a live vendor account, or are feedback-gated, moved to v1.4 (2026-11-05).
 
 | Area | Issue | Scope |
 |---|---|---|
@@ -284,15 +284,28 @@ Released as **v1.2.0** on 2026-10-21. See [CHANGELOG.md](CHANGELOG.md#120---2026
 | schema | [#760](https://github.com/drt-hub/drt/issues/760) | `manage_table` / `on_schema_change` — [ADR 0016](docs/adr/0016-managed-destination-tables.md); first release Postgres + MySQL (in review), warehouses follow |
 | orchestration ✅ | [#1225](https://github.com/drt-hub/drt/issues/1225) | Scheduler scaffolds — `drt deploy cloud-run-job`, `drt deploy k8s-cronjob`, plus a scheduling decision guide (replaces #428) |
 | ecosystem ✅ | [#1226](https://github.com/drt-hub/drt/issues/1226) | Exposures carry owner/freshness; docs site shows last-applied plan and staleness |
-| plan/apply | [#472](https://github.com/drt-hub/drt/issues/472), [#471](https://github.com/drt-hub/drt/issues/471) | Parked from v1.2: API-based diff for SaaS destinations (widens plan coverage), `--diff-fields` |
 | schema | [#761](https://github.com/drt-hub/drt/issues/761) ✅, [#896](https://github.com/drt-hub/drt/issues/896) | Parked from v1.2: column contracts ([ADR 0017](docs/adr/0017-column-contracts.md)); #761 shipped, `contract.source: dbt` (#896) in review; `on_schema_change` itself stays with #760 |
 | alerts ✅ | [#1224](https://github.com/drt-hub/drt/issues/1224) | Parked from v1.2: sync-level freshness — `alerts.on_stale` + `drt status --check` |
-| destinations | [#1237](https://github.com/drt-hub/drt/issues/1237) | Parked from v1.2: HubSpot — preserve human edits (`propertiesWithHistory`), builds on the `fill_empty` batch read |
-| backlog | [#758](https://github.com/drt-hub/drt/issues/758), [#764](https://github.com/drt-hub/drt/issues/764), [#425](https://github.com/drt-hub/drt/issues/425), [#426](https://github.com/drt-hub/drt/issues/426) | Windowed backfill, pre/post-sync SQL hooks, multi-destination fan-out, sync dependency graph — scoped when picked up |
 
 **Out of scope:** a drt-owned scheduler or watcher (ADR 0004).
 
 **Progress:** [milestone/16](https://github.com/drt-hub/drt/milestone/16)
+
+---
+
+## v1.4 — Breadth (candidate)
+
+**Theme: widen what `plan` can see and what a sync can express.** Scoped when picked up; nothing here blocks v1.3.
+
+| Area | Issue | Scope |
+|---|---|---|
+| plan/apply | [#472](https://github.com/drt-hub/drt/issues/472) | API-based plan reads for SaaS destinations — [ADR 0018](docs/adr/0018-api-based-plan-reads.md) accepted; HubSpot first (draft in review, needs a live HubSpot developer account to verify); then Salesforce, Notion, Intercom, Zendesk, Jira, Linear, Airtable |
+| plan/apply | [#471](https://github.com/drt-hub/drt/issues/471) | `--diff-fields` (feedback-gated) |
+| destinations | [#1237](https://github.com/drt-hub/drt/issues/1237) | HubSpot: preserve human edits (`propertiesWithHistory`); needs the same live account |
+| destinations | [#1183](https://github.com/drt-hub/drt/issues/1183), [#1306](https://github.com/drt-hub/drt/issues/1306) | Pipedrive follow-ups (persons shipped in v1.3): organizations and deals, contact-list merge, rate ceiling, error text |
+| reliability | [#1307](https://github.com/drt-hub/drt/issues/1307) | Retrying a non-idempotent create can duplicate the object — audit, then an ADR |
+| engine | [#758](https://github.com/drt-hub/drt/issues/758), [#764](https://github.com/drt-hub/drt/issues/764) | Windowed backfill; pre/post-sync SQL hooks |
+| orchestration | [#425](https://github.com/drt-hub/drt/issues/425), [#426](https://github.com/drt-hub/drt/issues/426) | Multi-destination fan-out; sync dependency graph |
 
 ---
 

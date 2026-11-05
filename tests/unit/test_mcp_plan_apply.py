@@ -42,6 +42,7 @@ class _World:
         self.baseline: int | None = None
         self.calls: list[dict[str, Any]] = []
         self.unsupported = False
+        self.ddl: list[str] = []
 
     def diff(self) -> DiffResult:
         if self.unsupported:
@@ -75,6 +76,7 @@ class _Result:
 
     def __init__(self, world: _World) -> None:
         self.diff = world.diff()
+        self.ddl = list(world.ddl)
 
 
 @pytest.fixture
@@ -162,6 +164,20 @@ async def test_plan_then_apply_end_to_end(project_dir: Path, world: _World) -> N
     results = json.loads((project_dir / "target" / "drt" / "run_results.json").read_text())
     assert results["results"][0]["approved_by"] == "masukai (reviewed in PR 12)"
     assert not (Path.cwd() / ".drt").exists()  # nothing leaked into the working directory
+
+
+@pytest.mark.asyncio
+async def test_plan_and_apply_responses_include_reviewed_ddl(
+    project_dir: Path, world: _World
+) -> None:
+    world.ddl = ['ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS "score" BIGINT NULL']
+    server = create_server(project_dir)
+
+    planned = await call(server, "drt_plan", sync_name="orders_to_pg")
+    assert planned["ddl"] == world.ddl
+
+    applied = await call(server, "drt_apply", plan_id=planned["plan_id"], approved_by="me")
+    assert applied["result"]["ddl"] == world.ddl
 
 
 @pytest.mark.asyncio
