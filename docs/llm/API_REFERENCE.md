@@ -444,6 +444,49 @@ sync:
     lifecycle_stage: overwrite
 ```
 
+### Column contracts (`columns:` / `contract:`, v1.3, #761/#896)
+
+```yaml
+columns:                          # optional; presence declares the model's output
+  - {name: email, type: string, description: Primary identifier}
+  - {name: lifetime_value, type: number}   # string|number|integer|boolean|timestamp|date|json
+contract:
+  enforced: true                  # fail the run before anything is loaded
+  on_extra_columns: fail          # fail (default) | ignore | drop
+  # source: dbt                   # derive columns from an ENFORCED dbt model contract
+```
+
+The first extracted batch is checked before the first destination write; a violation is an
+ordinary failed run (and a failed `drt plan`). `source: dbt` resolves an unqualified
+`ref('model')` through `target/manifest.json` once at load time (`--manifest-path` on
+`validate`/`run`/`plan`/`apply`/`docs generate`); a hand-written `columns:` block wins; a model
+without an enforced dbt contract, a missing manifest, an ambiguous ref or an unmappable type is a
+validation error. Guide: `docs/guides/column-contracts.md`.
+
+### Managed destination tables (`manage_table` / `on_schema_change`, v1.3, #760)
+
+PostgreSQL and MySQL destinations only (other destinations reject the keys at validation):
+
+```yaml
+destination:
+  type: postgres
+  table: public.users_enriched
+  upsert_key: [id]
+  manage_table: true              # CREATE TABLE if missing (default false)
+  on_schema_change: fail          # fail (default) | ignore | append_new_columns
+```
+
+Checked after the first batch (and per batch) before the write. Created columns take their type from
+the declared `columns:` (else `TEXT`); added columns are nullable; drt never drops, renames or
+retypes. `drt plan` and `--dry-run` report the DDL without running it; executed DDL is recorded in
+run history. Guide: `docs/guides/managed-destination-tables.md`.
+
+### Catalog metadata (`meta:`, v1.3, #1226)
+
+`meta: {owner, owner_email, maturity: high|medium|low}` has no runtime effect; it feeds the docs
+site, the manifest (schema v5; `owner_email` only with `--full-labels`) and dbt exposures (never the
+e-mail). Freshness is *declared* via `alerts.on_stale` and checked with `drt status --check`.
+
 ### Change guards (`sync.guards`, #1218)
 
 Limits on how much one run may change. They are evaluated against the change set

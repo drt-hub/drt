@@ -42,6 +42,13 @@ Nothing was written. Read the reason and tell the human; do not retry blindly.
 | "environment differs" / "different plan key" | planned somewhere else | plan here, or use the same `DRT_PLAN_KEY` in both places |
 | "sync definition changed" | the YAML or model SQL changed | plan again |
 
+## v1.3 additions to review
+
+- **Exact replay (CLI only).** `drt plan --include-values --recipient age1...` writes an age-encrypted sidecar next to `plan.json`; `drt apply plan.json --exact` writes exactly the rows that were staged, ignores source drift, still refuses destination drift and deletes the sidecar after a successful apply (`--keep-payload` keeps it). It is deliberately **not** available through MCP: an agent should not stage or replay row values. Never print a decrypted row.
+- **Column contracts.** A sync with `contract.enforced: true` fails the run (and the plan) with `Column contract violation: ...` before anything is written; name the offending columns from the message.
+- **Managed tables.** With `manage_table` / `on_schema_change`, `drt_plan` and `drt_apply` results include the DDL that would run or did run; read it to the human before approval (a `CREATE TABLE` or `ADD COLUMN` is part of the change).
+- **Lineage.** Run history and the docs manifest record `plan_id` and `approved_by` for applied plans.
+
 ## Things to know
 
 - A plan is a **guard in front of a normal run**, not a transaction: apply recomputes the plan and refuses on any difference, then runs the sync, which writes every extracted row. The source can still change in the short window after verification.
