@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-05
+
+**Depth and durability.** The review loop became auditable (plan/apply lineage, exact-replay apply, a generated plan-coverage matrix, sync freshness), the schema cluster landed (column contracts, `contract.source: dbt`, managed destination tables for Postgres and MySQL) and scheduler scaffolds, catalog owner metadata and a Pipedrive destination joined them. Drop-in upgrade from v1.2.1: every new key is opt-in and every new plan field is additive and omitted when absent.
+
 ### Added
 
 - **Pipedrive destination** ([#1183](https://github.com/drt-hub/drt/issues/1183)): create or update Pipedrive persons (`object: person`; `organization` and `deal` follow in later PRs). Each row is looked up with an exact search on `match_field` (`email`, `name` or `phone`), then the match is updated or a new person is created; more than one match is a row error and nothing is written. Supports `match_policy` (`update_only` / `create_only`), `on_error`, destination-level retry/rate-limit overrides and an `https`-only `base_url` override. Searches use their own bucket capped at 4 requests per second (Pipedrive's search limit is tighter than the rest of the API, [#1306](https://github.com/drt-hub/drt/issues/1306)), and every retry attempt spends a limiter slot. The token is sent in the `x-api-token` header, never in the URL. `emails` / `phones` are sent only when a person is created, because Pipedrive replaces whole contact lists on update. Columns outside the reserved set go to `custom_fields` and must be renamed to Pipedrive's 40-character field keys with `sync.field_mappings`; an unknown key surfaces as a per-row API error. Each row costs about 25 API tokens (search 20 + write 5). (PR [#1285](https://github.com/drt-hub/drt/pull/1285))
