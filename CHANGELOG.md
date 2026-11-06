@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.3.0] - 2026-11-05
+## [1.3.0] - 2026-11-06
 
 **Depth and durability.** The review loop became auditable (plan/apply lineage, exact-replay apply, a generated plan-coverage matrix, sync freshness), the schema cluster landed (column contracts, `contract.source: dbt`, managed destination tables for Postgres and MySQL) and scheduler scaffolds, catalog owner metadata and a Pipedrive destination joined them. Drop-in upgrade from v1.2.1: every new key is opt-in and every new plan field is additive and omitted when absent.
 

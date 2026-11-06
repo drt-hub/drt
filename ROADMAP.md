@@ -272,9 +272,9 @@ Released as **v1.2.0** on 2026-10-21. See [CHANGELOG.md](CHANGELOG.md#120---2026
 
 ---
 
-## v1.3 — Depth and durability ✅ Shipped 2026-11-05
+## v1.3 — Depth and durability ✅ Shipped 2026-11-06
 
-**Theme: make the review loop auditable and keep it honest.** v1.2 ships `plan` / `apply`; v1.3 deepens it and adds the continuous-improvement mechanism, then picks up the schema and orchestration items that were parked. Items that need a live vendor account, or are feedback-gated, moved to v1.4 (2026-11-05).
+**Theme: make the review loop auditable and keep it honest.** v1.2 ships `plan` / `apply`; v1.3 deepens it and adds the continuous-improvement mechanism, then picks up the schema and orchestration items that were parked. Items that need a live vendor account, or are feedback-gated, moved to v1.4 (2026-11-06).
 
 | Area | Issue | Scope |
 |---|---|---|
@@ -289,7 +289,7 @@ Released as **v1.2.0** on 2026-10-21. See [CHANGELOG.md](CHANGELOG.md#120---2026
 
 **Out of scope:** a drt-owned scheduler or watcher (ADR 0004).
 
-Released as **v1.3.0** on 2026-11-05. See [CHANGELOG.md](CHANGELOG.md#130---2026-11-05) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v1.3.0) for the full feature list. The items that need a live vendor account or are feedback-gated moved to the v1.4 candidate section below.
+Released as **v1.3.0** on 2026-11-06. See [CHANGELOG.md](CHANGELOG.md#130---2026-11-06) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v1.3.0) for the full feature list. The items that need a live vendor account or are feedback-gated moved to the v1.4 candidate section below.
 
 **Progress:** [milestone/16](https://github.com/drt-hub/drt/milestone/16)
 
