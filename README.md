@@ -174,6 +174,8 @@ In the demo above (Docker + pip, no cloud accounts), a CRM table already has an 
 - **Try it:** [`examples/review-demo`](examples/review-demo) — one script, a 60-second walkthrough, with copy-paste prompts for an AI agent (`drt_plan` → human approval → `drt_apply`).
 - **In CI:** `drt deploy github-actions --with-plan` scaffolds a plan comment on the pull request and an apply on merge.
 - **Read the guide:** [plan / apply](docs/guides/plan.md), including what it guarantees and what it does not (it is a guard in front of a normal run, not a transaction; plan needs a destination drt can read back, which today means SQL databases and warehouses).
+- **Declare and protect the schema:** [column contracts](docs/guides/column-contracts.md) (fail before a renamed or retyped model column reaches a destination; derive them from an enforced dbt contract) and opt-in [managed destination tables](docs/guides/managed-destination-tables.md) for PostgreSQL and MySQL.
+- **Exact replay:** `drt plan --include-values --recipient ...` + `drt apply --exact` (CLI only) write exactly the rows an approver staged, through an age-encrypted payload; see [plan / apply](docs/guides/plan.md).
 
 ## CLI Reference
 
