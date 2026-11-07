@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
+from decimal import Decimal
+from json import dumps
 from typing import Any
+from uuid import UUID
 
 from drt.config.destinations_saas import KafkaDestinationConfig
 from drt.config.models import DestinationConfig, SyncOptions
@@ -83,13 +86,14 @@ class KafkaDestination:
                 if result.failed and sync_options.on_error == "fail":
                     break
                 try:
-                    # seriealize record here.
-                    pass
+                    body, key = self._serialize_record(record, config)
                 except (TypeError, ValueError) as exc:
-                    pass
+                    fail(index, exc)
+                    continue
 
                 limiter.acquire()
                 report = partial(on_delivery, index)
+                send_record = partial(send, body, key, report)
                 # TODO: create a send_record callback using send and report callbacks.
                 send_record = None
                 try:
@@ -117,6 +121,20 @@ class KafkaDestination:
         result.skipped = len(records) - result.total
         result.row_errors.sort(key=lambda error: error.batch_index)
         return result
+
+    @staticmethod
+    def _serialize_record(
+        record: dict[str, Any], config: KafkaDestinationConfig
+    ) -> tuple[bytes, bytes | None]:
+        key = None
+        if config.key_field is not None:
+            value = record.get(config.key_field)
+            if not isinstance(value, (str, int, float, Decimal, UUID)):
+                raise ValueError(
+                    f"Kafka key_field {config.key_field!r} must contain a non-null scalar."
+                )
+            key = str(value).encode("utf-8")
+        return dumps(record, default=str, ensure_ascii=False).encode("utf-8"), key
 
     def _close(self) -> None:
         """Close client connection."""
