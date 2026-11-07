@@ -112,8 +112,6 @@ class KafkaDestination:
                 limiter.acquire()
                 report = partial(on_delivery, index)
                 send_record = partial(send, body, key, report)
-                # TODO: create a send_record callback using send and report callbacks.
-                send_record = None
                 try:
                     if not with_retry(
                         send_record, retry, retry_on=lambda exc: isinstance(exc, BufferError)
