@@ -20,6 +20,7 @@ from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 
+
 class KafkaDestination:
     """Append-only destination using the existing load and lifecycle hooks."""
 
@@ -50,9 +51,9 @@ class KafkaDestination:
             )
             if not brokers:
                 raise ValueError(
-                    "Kafka bootstrap_servers_env must resolve to a non-empty broker list. (e.g. " \
-                    "bootstrap_servers_env=" \
-                    "broker1.example.com:9092," \
+                    "Kafka bootstrap_servers_env must resolve to a non-empty broker list. (e.g. "
+                    "bootstrap_servers_env="
+                    "broker1.example.com:9092,"
                     "broker2.example.com:9092)"
                 )
             self._bootstrap_servers = ",".join(brokers)
@@ -70,15 +71,32 @@ class KafkaDestination:
         pending: set[int] = set()
 
         def fail(index: int, exc: Exception) -> None:
-                    pass
-        
+            pass
+
         def on_delivery(index: int, error: Any, message: Any) -> None:
             """Upate pending, result counters"""
             pass
 
-        def send(body: bytes, key:bytes | None, report: Callable[[Any, Any], None]) -> bool:
+        def send(body: bytes, key: bytes | None, report: Callable[[Any, Any], None]) -> bool:
             """Call the Kafka's producer API here."""
-            pass
+            # Poll the previous callback before sending
+            producer.poll(0)
+            if result.failed and sync_options.on_error == "fail":
+                return False
+            try:
+                producer.produce(
+                    topic=config.topic,
+                    value=body,
+                    key=key,
+                    headers=config.headers,
+                    on_delivery=report,
+                )
+            except BufferError:
+                producer.poll(0)
+                if result.failed and sync_options.on_error == "fail":
+                    return False
+                raise
+            return True
 
         try:
             for index, record in enumerate(records):
@@ -164,8 +182,7 @@ class KafkaDestination:
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> None:
-        """Safety drain/close only; delivery accounting belongs to load()
-        """
+        """Safety drain/close only; delivery accounting belongs to load()"""
         self._close()
 
     def reset_write_state(
@@ -181,8 +198,7 @@ class KafkaDestination:
         config: KafkaDestinationConfig,
         bootstrap_servers: str,
     ) -> Any:
-        """Validate declared auth configs before lazily importing the optional SDK.
-        """
+        """Validate declared auth configs before lazily importing the optional SDK."""
         settings: dict[str, Any] = {
             "bootstrap.servers": bootstrap_servers,
             "enable.idempotence": config.enable_idempotence,
@@ -192,7 +208,7 @@ class KafkaDestination:
                 "none": "PLAINTEXT",
                 "ssl": "SSL",
                 "sasl_plain": "SASL_PLAINTEXT",
-                "sasl_scram": "SASL_SSL"
+                "sasl_scram": "SASL_SSL",
             }[config.auth.type],
         }
         if not config.enable_idempotence:
@@ -207,7 +223,7 @@ class KafkaDestination:
             ("password_env", "sasl.password"),
             ("ca_env", "ssl.ca.location"),
             ("cert_env", "ssl.certificate.location"),
-            ("key_env", "ssl.key.location")
+            ("key_env", "ssl.key.location"),
         ):
             reference = getattr(config.auth, field)
             if reference is not None:
@@ -249,8 +265,7 @@ class KafkaDestination:
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> None:
-        """Safety drain/close only; delivery accounting belongs to load()
-        """
+        """Safety drain/close only; delivery accounting belongs to load()"""
         self._close()
 
     def reset_write_state(
@@ -266,8 +281,7 @@ class KafkaDestination:
         config: KafkaDestinationConfig,
         bootstrap_servers: str,
     ) -> Any:
-        """Validate declared auth configs before lazily importing the optional SDK.
-        """
+        """Validate declared auth configs before lazily importing the optional SDK."""
         settings: dict[str, Any] = {
             "bootstrap.servers": bootstrap_servers,
             "enable.idempotence": config.enable_idempotence,
@@ -277,7 +291,7 @@ class KafkaDestination:
                 "none": "PLAINTEXT",
                 "ssl": "SSL",
                 "sasl_plain": "SASL_PLAINTEXT",
-                "sasl_scram": "SASL_SSL"
+                "sasl_scram": "SASL_SSL",
             }[config.auth.type],
         }
         if not config.enable_idempotence:
@@ -292,7 +306,7 @@ class KafkaDestination:
             ("password_env", "sasl.password"),
             ("ca_env", "ssl.ca.location"),
             ("cert_env", "ssl.certificate.location"),
-            ("key_env", "ssl.key.location")
+            ("key_env", "ssl.key.location"),
         ):
             reference = getattr(config.auth, field)
             if reference is not None:
