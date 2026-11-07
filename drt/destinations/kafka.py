@@ -74,8 +74,14 @@ class KafkaDestination:
             pass
 
         def on_delivery(index: int, error: Any, message: Any) -> None:
-            """Upate pending, result counters"""
-            pass
+            """Update pending, result counters"""
+            if index not in pending:
+                return
+            pending.remove(index)
+            if error is None:
+                result.success += 1
+            else:
+                fail(index, RuntimeError(f"Kafka delivery failed: {error}"))
 
         def send(body: bytes, key: bytes | None, report: Callable[[Any, Any], None]) -> bool:
             """Call the Kafka's producer API here."""
