@@ -33,18 +33,24 @@ and `Manifest.from_dict()` continues to load v1 through v6:
   `drt.engine.plan_coverage`. Supported statuses are `available`, `partial`,
   `api-reads`, `needs-api-diff` and `unavailable`. Undeclared/plugin destination
   types omit the block; absence does not claim unavailability.
+- `syncs[].plan = {status, reason}` starts with that destination declaration and
+  replaces it with `unavailable` plus the planner's sync-level blocker when the
+  sync uses an unsupported match policy, diff extraction, or metadata key.
 - `syncs[].columns_source = dbt|declared` identifies the effective column
   declaration. A hand-written `columns:` block that overrides a dbt contract is
   `declared`.
 - Explicitly authored destination `manage_table` and `on_schema_change` values
-  appear on the destination object. Pydantic defaults are not published as if
-  the operator had declared them.
+  appear on the sync object, because syncs sharing one destination node may
+  declare different policies. Pydantic defaults are not published as if the
+  operator had declared them.
 
 The HTML sync page renders a bounded run-history table only when `runs[]` exists.
 It shows UTC time, status, row counts, plan id, guard outcome, exact replay and an
 approver column only when an approver survived the safe-label policy. Plan
 coverage appears on destination pages and in the sync page's existing State tab.
-Contract provenance and managed-table declarations appear only when present.
+The destination page shows connector-level coverage; the sync page shows the
+effective sync-level result. Contract provenance and managed-table declarations
+appear only when present, and managed-table policy appears only on sync pages.
 
 ### Scale mode
 
@@ -60,6 +66,12 @@ The existing visual fixture has ten syncs despite the original scope assumption
 that it had fewer than eight. To preserve its Linux-only snapshots, scale mode
 enhances the already-visible top-bar search and keeps the facet panel closed until
 interaction; the resting layout does not move.
+
+Multi-file pages retain only names, slugs and counts in their navigation JSON.
+The larger search corpus and facet metadata are emitted solely as escaped DOM
+attributes on the overview page, so catalog size grows linearly rather than
+repeating every sync description in every generated page. Tag lists use JSON
+arrays, preserving authored values that contain `|`.
 
 ### Determinism
 

@@ -44,7 +44,7 @@ _None._
 
 | Destination | Why |
 |---|---|
-| `amplitude` | Event/message sink: there is no stored target state to diff. |
+| `amplitude` | Events and user/people profiles are written through an API that drt cannot read back by key, so there is no plan. |
 | `azure_blob` | Writes whole files or objects; there are no keyed target rows to diff. |
 | `discord` | Event/message sink: there is no stored target state to diff. |
 | `email_smtp` | Event/message sink: there is no stored target state to diff. |
@@ -52,9 +52,9 @@ _None._
 | `gcs` | Writes whole files or objects; there are no keyed target rows to diff. |
 | `github_actions` | Triggers a workflow run; Event/message sink: there is no stored target state to diff. |
 | `google_ads` | Conversion upload: Event/message sink: there is no stored target state to diff. |
-| `klaviyo` | Event/message sink: there is no stored target state to diff. |
+| `klaviyo` | Events and user/people profiles are written through an API that drt cannot read back by key, so there is no plan. |
 | `meta_conversions` | Event/message sink: there is no stored target state to diff. |
-| `mixpanel` | Event/message sink: there is no stored target state to diff. |
+| `mixpanel` | Events and user/people profiles are written through an API that drt cannot read back by key, so there is no plan. |
 | `parquet` | Writes whole files or objects; there are no keyed target rows to diff. |
 | `rest_api` | Generic HTTP endpoint: drt has no read-back contract for it. |
 | `s3` | Writes whole files or objects; there are no keyed target rows to diff. |

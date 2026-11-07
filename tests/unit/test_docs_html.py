@@ -636,8 +636,6 @@ def test_sync_run_history_plan_coverage_provenance_and_managed_table_render(
     destination = replace(
         base.destinations[0],
         plan=DestinationPlan("needs-api-diff", "Records require bounded API reads."),
-        manage_table=True,
-        on_schema_change="append_new_columns",
     )
     run = SyncRun(
         started_at="2026-11-07T01:00:00+00:00",
@@ -651,7 +649,14 @@ def test_sync_run_history_plan_coverage_provenance_and_managed_table_render(
         approved_by="alice",
         exact=True,
     )
-    sync = replace(base.syncs[0], runs=(run,), columns_source="dbt")
+    sync = replace(
+        base.syncs[0],
+        runs=(run,),
+        columns_source="dbt",
+        plan=DestinationPlan("unavailable", "This sync has a planner blocker."),
+        manage_table=True,
+        on_schema_change="append_new_columns",
+    )
     manifest = replace(base, destinations=[destination, *base.destinations[1:]], syncs=[sync])
 
     first, second = tmp_path / "first", tmp_path / "second"
@@ -666,12 +671,14 @@ def test_sync_run_history_plan_coverage_provenance_and_managed_table_render(
     assert "tripped: max_deletes (forced)" in sync_html
     assert ">exact<" in sync_html and ">alice<" in sync_html
     assert "dbt-derived" in sync_html
-    assert "drt plan:" in sync_html and "needs-api-diff" in sync_html
+    assert "drt plan:" in sync_html and "unavailable" in sync_html
+    assert "This sync has a planner blocker." in sync_html
     assert "manage_table: true" in sync_html
     assert "on_schema_change: append_new_columns" in sync_html
     assert "drt plan:" in destination_html
     assert "Records require bounded API reads." in destination_html
-    assert "Managed table:" in destination_html
+    assert "Managed table:" not in destination_html
+    assert "manage_table" not in destination_html
     assert (first / "sync/customers-to-discord.html").read_bytes() == (
         second / "sync/customers-to-discord.html"
     ).read_bytes()
@@ -740,6 +747,45 @@ def test_scale_mode_threshold_and_facets(tmp_path: Path) -> None:
     assert 'data-search="sync_0 description 0 discord (webhook) growth growth"' in large_html
     assert "applyScaleFilters" in (large / "assets/app.js").read_text(encoding="utf-8")
     assert "data-scale-filter-root" in inline_html and "applyScaleFilters" in inline_html
+
+
+def test_scale_metadata_stays_on_overview_and_output_does_not_grow_quadratically(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "large"
+    render_html(_scale_manifest(200), out)
+
+    sync_page = (out / "sync/sync-0.html").read_text(encoding="utf-8")
+    overview = (out / "index.html").read_text(encoding="utf-8")
+
+    assert "Description 199" not in sync_page
+    assert '"search_text"' not in sync_page
+    assert "description 199" in overview
+
+
+def test_scale_filter_tags_are_json_arrays_and_preserve_pipe_characters(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    manifest = _scale_manifest(8)
+    manifest.syncs[0] = replace(manifest.syncs[0], tags=("customer|vip",))
+    out = tmp_path / "pipe-tag"
+    render_html(manifest, out)
+
+    overview = (out / "index.html").read_text(encoding="utf-8")
+    app_js = (out / "assets/app.js").read_text(encoding="utf-8")
+
+    assert "customer|vip" in overview
+    assert 'data-tags="[&#34;customer|vip&#34;]"' in overview
+    assert 'JSON.parse(li.getAttribute("data-tags") || "[]")' in app_js
+
+
+def test_escape_focus_guard_prevents_the_facet_panel_from_reopening(site: Path) -> None:
+    app_js = (site / "assets/app.js").read_text(encoding="utf-8")
+
+    assert "if (suppressPanelOpen) return;" in app_js
+    escape_handler = app_js[app_js.index('if (event.key === "Escape")') :]
+    assert escape_handler.index("suppressPanelOpen = true") < escape_handler.index("input.focus()")
+    assert escape_handler.index("input.focus()") < escape_handler.index("suppressPanelOpen = false")
 
 
 def test_sync_page_is_unchanged_without_operational_metadata(site: Path) -> None:

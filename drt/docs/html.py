@@ -226,7 +226,7 @@ _BASE = """\
   <aside class="sidebar">
     <details class="group" data-group="syncs" open>
       <summary>Syncs <span class="count">{{ nav.syncs|length }}</span></summary>
-      <ul>{% for s in nav.syncs %}<li{% if scale_mode and active == 'overview' %} data-scale-sync data-search="{{ s.search_text }}" data-owner="{{ s.owner }}" data-maturity="{{ s.maturity }}" data-tags="{{ s.tags }}"{% endif %}><a href="{{ root }}sync/{{ s.slug }}.html"
+      <ul>{% for s in nav.syncs %}<li{% if scale_mode and active == 'overview' %}{% set scale = scale_syncs[s.name] %} data-scale-sync data-search="{{ scale.search_text }}" data-owner="{{ scale.owner }}" data-maturity="{{ scale.maturity }}" data-tags="{{ scale.tags_json }}"{% endif %}><a href="{{ root }}sync/{{ s.slug }}.html"
         {{ 'class=current' if s.slug==current_slug and active=='sync' }}>{{ s.name }}</a></li>
       {% endfor %}</ul>
     </details>
@@ -406,7 +406,7 @@ _SYNC = """\
     {% if sync.meta %}<div>owner: {{ sync.meta.owner or '&mdash;'|safe }} &middot; maturity: <code>{{ sync.meta.maturity }}</code></div>{% endif %}
     {% if sync.freshness %}<div>freshness: last success within <code>{{ freshness_label }}</code></div>{% endif %}
     {% if last_plan %}<div class="font-mono">last applied plan: {{ last_plan }}</div>{% endif %}
-    {% if destination_manage_table is not none or destination_on_schema_change is not none %}<div>managed table:{% if destination_manage_table is not none %} <code>manage_table: {{ destination_manage_table|string|lower }}</code>{% endif %}{% if destination_on_schema_change is not none %} &middot; <code>on_schema_change: {{ destination_on_schema_change }}</code>{% endif %}</div>{% endif %}
+    {% if sync.manage_table is not none or sync.on_schema_change is not none %}<div>managed table:{% if sync.manage_table is not none %} <code>manage_table: {{ sync.manage_table|string|lower }}</code>{% endif %}{% if sync.on_schema_change is not none %} &middot; <code>on_schema_change: {{ sync.on_schema_change }}</code>{% endif %}</div>{% endif %}
   </div>
 </div>
 
@@ -452,9 +452,9 @@ _SYNC = """\
 </div>
 
 <div class="tab-panel" data-tab="state">
-  {% if destination_plan %}
+  {% if sync.plan %}
   <h2>Planning</h2>
-  <p class="plan-coverage"><strong>drt plan:</strong> <code>{{ destination_plan.status }}</code>{% if destination_plan.reason %} &middot; {{ destination_plan.reason }}{% endif %}</p>
+  <p class="plan-coverage"><strong>drt plan:</strong> <code>{{ sync.plan.status }}</code>{% if sync.plan.reason %} &middot; {{ sync.plan.reason }}{% endif %}</p>
   {% endif %}
   <h2>State</h2>
   {% if state %}
@@ -525,7 +525,6 @@ _DESTINATION = (
 <h1><span class="badge" style="background:{{ badge.bg }};color:{{ badge.fg }}">{{ badge.initials }}</span> {{ destination.label }}</h1>
 <p class="lede">{{ destination.type }} &middot; external &middot; fed by {{ syncs|length }} sync{{ 's' if syncs|length != 1 }}</p>
 {% if destination.plan %}<p class="plan-coverage"><strong>drt plan:</strong> <code>{{ destination.plan.status }}</code>{% if destination.plan.reason %} &middot; {{ destination.plan.reason }}{% endif %}</p>{% endif %}
-{% if destination.manage_table is not none or destination.on_schema_change is not none %}<p class="managed-table"><strong>Managed table:</strong>{% if destination.manage_table is not none %} <code>manage_table: {{ destination.manage_table|string|lower }}</code>{% endif %}{% if destination.on_schema_change is not none %} &middot; <code>on_schema_change: {{ destination.on_schema_change }}</code>{% endif %}</p>{% endif %}
 <h2>Fed by</h2>
 <table>
   <tr><th>Sync</th><th>Source</th><th>Mode</th><th>Last status</th></tr>
@@ -631,27 +630,7 @@ def render_html(
     tag_slugs = {t: _slug(t) for t in tag_syncs}
 
     nav = {
-        "syncs": [
-            {
-                "name": s.name,
-                "slug": sync_slugs[s.name],
-                "search_text": " ".join(
-                    (
-                        s.name,
-                        s.description,
-                        dest_by_id[s.destination].label
-                        if s.destination in dest_by_id
-                        else s.destination,
-                        " ".join(s.tags),
-                        s.meta.owner if s.meta and s.meta.owner else "",
-                    )
-                ).lower(),
-                "owner": s.meta.owner if s.meta and s.meta.owner else "",
-                "maturity": s.meta.maturity if s.meta else "high",
-                "tags": "|".join(s.tags),
-            }
-            for s in manifest.syncs
-        ],
+        "syncs": [{"name": s.name, "slug": sync_slugs[s.name]} for s in manifest.syncs],
         "sources": [{"name": s.name, "slug": source_slugs[s.name]} for s in manifest.sources],
         "destinations": [
             {"label": d.label, "slug": dest_slugs[d.name]} for d in manifest.destinations
@@ -659,6 +638,25 @@ def render_html(
         "tags": [
             {"name": t, "slug": tag_slugs[t], "count": len(tag_syncs[t])} for t in sorted(tag_syncs)
         ],
+    }
+    scale_syncs = {
+        s.name: {
+            "search_text": " ".join(
+                (
+                    s.name,
+                    s.description,
+                    dest_by_id[s.destination].label
+                    if s.destination in dest_by_id
+                    else s.destination,
+                    " ".join(s.tags),
+                    s.meta.owner if s.meta and s.meta.owner else "",
+                )
+            ).lower(),
+            "owner": s.meta.owner if s.meta and s.meta.owner else "",
+            "maturity": s.meta.maturity if s.meta else "high",
+            "tags_json": json.dumps(list(s.tags), separators=(",", ":")),
+        }
+        for s in manifest.syncs
     }
 
     # Asset payloads, shared by the default asset files and --inline embedding
@@ -678,6 +676,7 @@ def render_html(
         "schema_version": manifest.schema_version,
         "profile": manifest.project.profile if manifest.project else "",
         "nav": nav,
+        "scale_syncs": scale_syncs,
         "scale_mode": len(manifest.syncs) >= SCALE_MODE_SYNC_THRESHOLD,
         "scale_owners": sorted(
             {s.meta.owner for s in manifest.syncs if s.meta is not None and s.meta.owner}
@@ -907,9 +906,6 @@ def render_html(
                 source_slug=source_slugs.get(s.source, _slug(s.source)),
                 destination_slug=dest_slugs.get(s.destination, _slug(s.destination)),
                 destination_label=dest.label if dest else s.destination,
-                destination_plan=dest.plan if dest else None,
-                destination_manage_table=dest.manage_table if dest else None,
-                destination_on_schema_change=dest.on_schema_change if dest else None,
                 freshness_label=_duration_label(s.freshness.max_age_seconds) if s.freshness else "",
                 last_plan=next((run.plan_id for run in s.runs if run.plan_id), None),
                 run_rows=run_rows,

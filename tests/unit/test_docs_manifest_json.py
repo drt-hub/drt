@@ -591,8 +591,11 @@ class TestManifestV7Catalog:
         full = build_manifest(tmp_path, include_state=True, full_labels=True).to_dict()
 
         assert default["destinations"][0]["plan"]["status"] == "available"
-        assert default["destinations"][0]["manage_table"] is True
-        assert default["destinations"][0]["on_schema_change"] == "append_new_columns"
+        assert "manage_table" not in default["destinations"][0]
+        assert "on_schema_change" not in default["destinations"][0]
+        assert default["syncs"][0]["plan"]["status"] == "available"
+        assert default["syncs"][0]["manage_table"] is True
+        assert default["syncs"][0]["on_schema_change"] == "append_new_columns"
         assert default["syncs"][0]["columns_source"] == "declared"
         run = default["syncs"][0]["runs"][0]
         assert run["exact"] is True and "approved_by" not in run
@@ -610,8 +613,8 @@ class TestManifestV7Catalog:
 
         data = build_manifest(tmp_path, include_state=True).to_dict()
 
-        assert "manage_table" not in data["destinations"][0]
-        assert "on_schema_change" not in data["destinations"][0]
+        assert "manage_table" not in data["syncs"][0]
+        assert "on_schema_change" not in data["syncs"][0]
         assert "columns_source" not in data["syncs"][0]
         assert "exact" not in data["syncs"][0]["runs"][0]
 
@@ -635,10 +638,66 @@ class TestManifestV7Catalog:
 
         assert manifest.schema_version == 6
         assert manifest.syncs[0].columns_source is None
+        assert manifest.syncs[0].plan is None
+        assert manifest.syncs[0].manage_table is None
+        assert manifest.syncs[0].on_schema_change is None
         assert manifest.destinations[0].plan is None
         serialized = manifest.to_dict()
         assert "columns_source" not in serialized["syncs"][0]
+        assert "plan" not in serialized["syncs"][0]
+        assert "manage_table" not in serialized["syncs"][0]
+        assert "on_schema_change" not in serialized["syncs"][0]
         assert "plan" not in serialized["destinations"][0]
+
+    @pytest.mark.parametrize(
+        ("option", "value", "reason_fragment"),
+        [
+            ("match_policy", "update_only", "match_policy"),
+            ("incremental_strategy", "diff", "incremental_strategy: diff"),
+        ],
+    )
+    def test_sync_plan_applies_postgres_planner_blockers(
+        self,
+        tmp_path: Path,
+        option: str,
+        value: str,
+        reason_fragment: str,
+    ) -> None:
+        _write_project(tmp_path)
+        sync = _pg_sync("users", "public.users")
+        options = sync["sync"]
+        assert isinstance(options, dict)
+        options[option] = value
+        _write_sync(tmp_path, "users.yml", sync)
+
+        data = build_manifest(tmp_path).to_dict()
+
+        assert data["destinations"][0]["plan"]["status"] == "available"
+        assert data["syncs"][0]["plan"]["status"] == "unavailable"
+        assert reason_fragment in data["syncs"][0]["plan"]["reason"]
+
+    def test_managed_table_declarations_are_per_sync_for_shared_table(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        first = _pg_sync("first", "public.users")
+        second = _pg_sync("second", "public.users")
+        first_destination = first["destination"]
+        second_destination = second["destination"]
+        assert isinstance(first_destination, dict)
+        assert isinstance(second_destination, dict)
+        first_destination.update({"manage_table": True, "on_schema_change": "append_new_columns"})
+        second_destination.update({"manage_table": False, "on_schema_change": "ignore"})
+        _write_sync(tmp_path, "first.yml", first)
+        _write_sync(tmp_path, "second.yml", second)
+
+        data = build_manifest(tmp_path).to_dict()
+
+        assert len(data["destinations"]) == 1
+        assert "manage_table" not in data["destinations"][0]
+        syncs = {sync["name"]: sync for sync in data["syncs"]}
+        assert syncs["first"]["manage_table"] is True
+        assert syncs["first"]["on_schema_change"] == "append_new_columns"
+        assert syncs["second"]["manage_table"] is False
+        assert syncs["second"]["on_schema_change"] == "ignore"
 
 
 @pytest.mark.parametrize(
@@ -646,8 +705,9 @@ class TestManifestV7Catalog:
     [
         {"destination": {"extra": True}},
         {"destination": {"plan": {"status": "available"}}},
-        {"destination": {"manage_table": "true"}},
-        {"destination": {"on_schema_change": "drop_columns"}},
+        {"sync": {"plan": {"status": "available"}}},
+        {"sync": {"manage_table": "true"}},
+        {"sync": {"on_schema_change": "drop_columns"}},
         {"sync": {"columns_source": "generated"}},
         {
             "sync": {

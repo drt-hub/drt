@@ -285,7 +285,9 @@ APP_JS = """\
       var tag = scaleRoot.querySelector("[data-scale-tag]");
       var result = scaleRoot.querySelector(".scale-filter-result");
       var clear = scaleRoot.querySelector(".scale-filter-clear");
+      var suppressPanelOpen = false;
       function openPanel() {
+        if (suppressPanelOpen) return;
         panel.hidden = false;
         input.setAttribute("aria-expanded", "true");
       }
@@ -296,7 +298,7 @@ APP_JS = """\
         var tagValue = tag.value;
         var visible = 0;
         document.querySelectorAll("[data-scale-sync]").forEach(function (li) {
-          var tags = (li.getAttribute("data-tags") || "").split("|");
+          var tags = JSON.parse(li.getAttribute("data-tags") || "[]");
           var hit = (!q || (li.getAttribute("data-search") || "").indexOf(q) !== -1) &&
             (!ownerValue || li.getAttribute("data-owner") === ownerValue) &&
             (!maturityValue || li.getAttribute("data-maturity") === maturityValue) &&
@@ -324,7 +326,9 @@ APP_JS = """\
         if (event.key === "Escape") {
           panel.hidden = true;
           input.setAttribute("aria-expanded", "false");
+          suppressPanelOpen = true;
           input.focus();
+          suppressPanelOpen = false;
         }
       });
       applyScaleFilters();

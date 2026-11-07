@@ -68,7 +68,16 @@ Do not use that flag for a public bucket or committed artifact.
 At eight syncs, the overview search gains owner, maturity and tag facets. Text
 search covers sync name, description, destination, tags and owner. Filtering is
 progressive enhancement: with JavaScript disabled every sync remains visible,
-and the controls work in both multi-file and `--inline` hash navigation.
+and the controls work in both multi-file and `--inline` hash navigation. Escape
+closes the facet panel from the search field, a select, or the Clear button.
+Filter metadata exists only on the overview page, so multi-file output grows
+linearly with the catalog; tags are encoded individually, including tags that
+contain `|`.
+
+Destination pages report connector-level `drt plan` coverage. A sync page
+reports the effective result after sync-level planner blockers and is the only
+page that shows that sync's explicitly declared `manage_table` and
+`on_schema_change` policy.
 
 ## Deterministic output
 

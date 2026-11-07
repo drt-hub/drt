@@ -32,6 +32,7 @@ from drt.docs.manifest import (
     SyncRun,
     SyncStateSnapshot,
 )
+from drt.engine.plan import unsupported_reason
 from drt.engine.plan_coverage import plan_coverage
 from drt.state.factory import build_state_bundle
 from drt.state.history import HistoryEntry, HistoryStore
@@ -364,23 +365,23 @@ def build_manifest(
     for sync_cfg in syncs_result.syncs:
         dest = sync_cfg.destination
         dest_id = dest_ids[f"{dest.type}|{dest.describe()}"]
+        coverage = plan_coverage(sync_cfg.destination.type)
+        destination_plan = (
+            DestinationPlan(status=coverage.status, reason=coverage.reason)
+            if coverage is not None
+            else None
+        )
         if dest_id not in destinations:
-            coverage = plan_coverage(sync_cfg.destination.type)
-            manage_table, on_schema_change = _managed_table_declaration(sync_cfg)
             destinations[dest_id] = Destination(
                 name=dest_id,
                 type=sync_cfg.destination.type,
                 label=_destination_label(sync_cfg, full_labels),
-                plan=(
-                    DestinationPlan(status=coverage.status, reason=coverage.reason)
-                    if coverage is not None
-                    else None
-                ),
-                manage_table=manage_table,
-                on_schema_change=on_schema_change,
+                plan=destination_plan,
             )
 
         sync_state = states.get(sync_cfg.name)
+        blocker = unsupported_reason(sync_cfg)
+        manage_table, on_schema_change = _managed_table_declaration(sync_cfg)
         syncs.append(
             Sync(
                 name=sync_cfg.name,
@@ -402,6 +403,13 @@ def build_manifest(
                 freshness=_sync_freshness(sync_cfg),
                 columns=_declared_columns(sync_cfg),
                 columns_source=_columns_source(sync_cfg),
+                plan=(
+                    DestinationPlan(status="unavailable", reason=blocker)
+                    if blocker is not None
+                    else destination_plan
+                ),
+                manage_table=manage_table,
+                on_schema_change=on_schema_change,
             )
         )
 

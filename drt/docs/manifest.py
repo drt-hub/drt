@@ -62,9 +62,11 @@ omitted when absent, so manifests from v1-v6 continue to load unchanged:
 - ``runs[].exact`` records exact-replay applies.
 - ``destinations[].plan`` carries the deterministic declaration from
   :mod:`drt.engine.plan_coverage`.
+- ``syncs[].plan`` applies sync-level planner blockers to that destination
+  declaration.
 - ``syncs[].columns_source`` distinguishes dbt-derived and hand-written
   column declarations.
-- ``destinations[].manage_table`` / ``on_schema_change`` carry explicitly
+- ``syncs[].manage_table`` / ``on_schema_change`` carry explicitly
   authored managed-table settings.
 """
 
@@ -107,8 +109,6 @@ class Destination:
     type: str
     label: str  # human-readable describe(), e.g. "slack (#alerts)"
     plan: DestinationPlan | None = None
-    manage_table: bool | None = None
-    on_schema_change: SchemaChangePolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +211,9 @@ class Sync:
     freshness: SyncFreshness | None = None  # schema v5
     columns: tuple[SyncColumn, ...] = ()  # schema v6; declaration order
     columns_source: ColumnsSource | None = None  # schema v7; only with columns
+    plan: DestinationPlan | None = None  # schema v7; destination coverage + sync blockers
+    manage_table: bool | None = None  # schema v7; explicitly authored only
+    on_schema_change: SchemaChangePolicy | None = None  # schema v7; explicitly authored only
 
 
 @dataclass(frozen=True)
@@ -324,6 +327,12 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
         ]
     if s.columns_source is not None:
         d["columns_source"] = s.columns_source
+    if s.plan is not None:
+        d["plan"] = {"status": s.plan.status, "reason": s.plan.reason}
+    if s.manage_table is not None:
+        d["manage_table"] = s.manage_table
+    if s.on_schema_change is not None:
+        d["on_schema_change"] = s.on_schema_change
     return d
 
 
@@ -362,10 +371,6 @@ def _destination_to_dict(destination: Destination) -> dict[str, Any]:
             "status": destination.plan.status,
             "reason": destination.plan.reason,
         }
-    if destination.manage_table is not None:
-        data["manage_table"] = destination.manage_table
-    if destination.on_schema_change is not None:
-        data["on_schema_change"] = destination.on_schema_change
     return data
 
 
@@ -375,8 +380,6 @@ def _destination_from_dict(data: dict[str, Any]) -> Destination:
         "type",
         "label",
         "plan",
-        "manage_table",
-        "on_schema_change",
     }
     if unknown:
         raise ValueError(f"manifest destinations[] has unknown key(s): {sorted(unknown)}")
@@ -393,23 +396,11 @@ def _destination_from_dict(data: dict[str, Any]) -> Destination:
         plan = DestinationPlan(**plan_data)
     else:
         plan = None
-    manage_table = data.get("manage_table")
-    if manage_table is not None and not isinstance(manage_table, bool):
-        raise ValueError("manifest destinations[].manage_table must be a boolean")
-    on_schema_change = data.get("on_schema_change")
-    if on_schema_change is not None and on_schema_change not in {
-        "fail",
-        "ignore",
-        "append_new_columns",
-    }:
-        raise ValueError("manifest destinations[].on_schema_change is malformed")
     return Destination(
         name=data["name"],
         type=data["type"],
         label=data["label"],
         plan=plan,
-        manage_table=manage_table,
-        on_schema_change=on_schema_change,
     )
 
 
@@ -449,6 +440,29 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
     columns_source = d.get("columns_source")
     if columns_source is not None and columns_source not in {"dbt", "declared"}:
         raise ValueError("manifest syncs[].columns_source must be dbt or declared")
+    plan_data = d.get("plan")
+    if plan_data is not None:
+        if (
+            not isinstance(plan_data, dict)
+            or set(plan_data) != {"status", "reason"}
+            or plan_data.get("status")
+            not in {"available", "partial", "api-reads", "needs-api-diff", "unavailable"}
+            or not isinstance(plan_data.get("reason"), str)
+        ):
+            raise ValueError("manifest syncs[].plan is malformed")
+        plan = DestinationPlan(**plan_data)
+    else:
+        plan = None
+    manage_table = d.get("manage_table")
+    if manage_table is not None and not isinstance(manage_table, bool):
+        raise ValueError("manifest syncs[].manage_table must be a boolean")
+    on_schema_change = d.get("on_schema_change")
+    if on_schema_change is not None and on_schema_change not in {
+        "fail",
+        "ignore",
+        "append_new_columns",
+    }:
+        raise ValueError("manifest syncs[].on_schema_change is malformed")
     runs: list[SyncRun] = []
     for run_data in d.get("runs", []):
         if "exact" in run_data and not isinstance(run_data["exact"], bool):
@@ -470,4 +484,7 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         freshness=_freshness_from_dict(d.get("freshness")),
         columns=tuple(SyncColumn(**column) for column in d.get("columns", [])),
         columns_source=columns_source,
+        plan=plan,
+        manage_table=manage_table,
+        on_schema_change=on_schema_change,
     )
