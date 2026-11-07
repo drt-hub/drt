@@ -1,7 +1,7 @@
-"""Kafka destination interface scaffold for #1180.
+"""Append-only Kafka destination with confirmed, per-batch delivery outcomes.
 
-Not registered or usable yet. Delivery, authentication, and lifecycle behavior
-remain unimplemented pending the owner's design decisions.
+One producer is reused until finalize_sync/reset_write_state closes the run.
+Producer idempotence protects librdkafka retries, not application-level replays.
 """
 
 from __future__ import annotations
@@ -270,3 +270,4 @@ class KafkaDestination:
                 "Kafka safety drain found unconfirmed messages after load(); "
                 "the sync must not be reported as successful."
             )
+        
