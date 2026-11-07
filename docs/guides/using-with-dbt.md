@@ -137,7 +137,7 @@ Use Dagster, Airflow, or a simple script to chain them:
 dbt run && drt run
 ```
 
-Or with [dagster-drt](../integrations/dagster-drt/):
+Or with [dagster-drt](../../integrations/dagster-drt/):
 
 ```python
 from dagster import Definitions
