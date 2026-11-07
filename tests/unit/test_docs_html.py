@@ -625,6 +625,123 @@ def test_sync_page_shows_owner_declared_freshness_and_last_plan(tmp_path: Path) 
     assert "last applied plan: sha256:abc123" in html
 
 
+def test_sync_run_history_plan_coverage_provenance_and_managed_table_render(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from drt.docs.manifest import DestinationPlan, SyncRun
+
+    base = _manifest()
+    destination = replace(
+        base.destinations[0],
+        plan=DestinationPlan("needs-api-diff", "Records require bounded API reads."),
+        manage_table=True,
+        on_schema_change="append_new_columns",
+    )
+    run = SyncRun(
+        started_at="2026-11-07T01:00:00+00:00",
+        completed_at="2026-11-07T01:00:05+00:00",
+        duration_seconds=5.0,
+        status="partial",
+        records_synced=8,
+        records_failed=2,
+        plan_id="sha256:reviewed",
+        guards={"tripped": [{"guard": "max_deletes"}], "forced": True},
+        approved_by="alice",
+        exact=True,
+    )
+    sync = replace(base.syncs[0], runs=(run,), columns_source="dbt")
+    manifest = replace(base, destinations=[destination, *base.destinations[1:]], syncs=[sync])
+
+    first, second = tmp_path / "first", tmp_path / "second"
+    render_html(manifest, first)
+    render_html(manifest, second)
+
+    sync_html = (first / "sync/customers-to-discord.html").read_text(encoding="utf-8")
+    destination_html = (first / "destination/dest-discord-x.html").read_text(encoding="utf-8")
+    assert "Run history" in sync_html and "Time (UTC)" in sync_html
+    assert "8 synced · 2 failed" in sync_html
+    assert "sha256:reviewed" in sync_html
+    assert "tripped: max_deletes (forced)" in sync_html
+    assert ">exact<" in sync_html and ">alice<" in sync_html
+    assert "dbt-derived" in sync_html
+    assert "drt plan:" in sync_html and "needs-api-diff" in sync_html
+    assert "manage_table: true" in sync_html
+    assert "on_schema_change: append_new_columns" in sync_html
+    assert "drt plan:" in destination_html
+    assert "Records require bounded API reads." in destination_html
+    assert "Managed table:" in destination_html
+    assert (first / "sync/customers-to-discord.html").read_bytes() == (
+        second / "sync/customers-to-discord.html"
+    ).read_bytes()
+
+
+def test_run_history_omits_approver_column_when_no_run_has_one(tmp_path: Path) -> None:
+    from drt.docs.manifest import SyncRun
+
+    run = SyncRun(
+        started_at="2026-11-07T01:00:00Z",
+        completed_at="2026-11-07T01:00:01Z",
+        duration_seconds=1.0,
+        status="success",
+        records_synced=1,
+        records_failed=0,
+        guards={"tripped": [], "forced": False},
+    )
+    out = tmp_path / "docs"
+    render_html(_ops_manifest(runs=(run,)), out)
+
+    html = (out / "sync/customers-to-discord.html").read_text(encoding="utf-8")
+    history = html[html.index("Run history") :]
+    assert "<th>Approver</th>" not in history
+    assert "passed" in history
+
+
+def _scale_manifest(sync_count: int) -> Manifest:
+    from dataclasses import replace
+
+    from drt.docs.manifest import SyncMeta
+
+    base = _manifest()
+    syncs = [
+        replace(
+            base.syncs[0],
+            name=f"sync_{index}",
+            description=f"Description {index}",
+            tags=("growth",) if index % 2 == 0 else ("ops",),
+            meta=SyncMeta(owner="Growth" if index % 2 == 0 else "Platform", maturity="medium"),
+        )
+        for index in range(sync_count)
+    ]
+    return replace(base, syncs=syncs, edges=[])
+
+
+def test_scale_mode_threshold_and_facets(tmp_path: Path) -> None:
+    from drt.docs.html import SCALE_MODE_SYNC_THRESHOLD
+
+    assert SCALE_MODE_SYNC_THRESHOLD == 8
+    small, large, inline = tmp_path / "small", tmp_path / "large", tmp_path / "inline"
+    render_html(_scale_manifest(SCALE_MODE_SYNC_THRESHOLD - 1), small)
+    render_html(_scale_manifest(SCALE_MODE_SYNC_THRESHOLD), large)
+    render_html(_scale_manifest(SCALE_MODE_SYNC_THRESHOLD), inline, inline_assets=True)
+
+    small_html = (small / "index.html").read_text(encoding="utf-8")
+    large_html = (large / "index.html").read_text(encoding="utf-8")
+    inline_html = (inline / "index.html").read_text(encoding="utf-8")
+    assert "data-scale-filter-root" not in small_html
+    assert "data-scale-sync" not in small_html
+    assert "data-scale-filter-root" in large_html
+    assert "data-scale-sync" in large_html
+    assert 'id="drt-scale-filters" hidden' in large_html
+    assert "All owners" in large_html
+    assert "All maturities" in large_html
+    assert "All tags" in large_html
+    assert 'data-search="sync_0 description 0 discord (webhook) growth growth"' in large_html
+    assert "applyScaleFilters" in (large / "assets/app.js").read_text(encoding="utf-8")
+    assert "data-scale-filter-root" in inline_html and "applyScaleFilters" in inline_html
+
+
 def test_sync_page_is_unchanged_without_operational_metadata(site: Path) -> None:
     html = (site / "sync/customers-to-discord.html").read_text(encoding="utf-8")
 

@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 from drt import __version__
 from drt._redaction import redact_error_text as _redact_error_text
@@ -15,10 +16,13 @@ from drt.config.models import SyncConfig
 from drt.config.parser import load_project, load_syncs_safe
 from drt.docs.manifest import (
     SCHEMA_VERSION,
+    ColumnsSource,
     Destination,
+    DestinationPlan,
     Edge,
     Manifest,
     Project,
+    SchemaChangePolicy,
     Source,
     Sync,
     SyncColumn,
@@ -28,6 +32,7 @@ from drt.docs.manifest import (
     SyncRun,
     SyncStateSnapshot,
 )
+from drt.engine.plan_coverage import plan_coverage
 from drt.state.factory import build_state_bundle
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import SyncState
@@ -181,6 +186,7 @@ def _sync_runs(entries: list[HistoryEntry], redact: bool) -> tuple[SyncRun, ...]
                 guards=e.guards,
                 # A person's name: same opt-in as the other redacted labels (#696).
                 approved_by=None if redact else e.approved_by,
+                exact=e.exact,
             )
         )
     return tuple(runs)
@@ -239,6 +245,30 @@ def _declared_columns(sync_cfg: SyncConfig) -> tuple[SyncColumn, ...]:
         SyncColumn(name=column.name, type=column.type, description=column.description)
         for column in (sync_cfg.columns or [])
     )
+
+
+def _columns_source(sync_cfg: SyncConfig) -> ColumnsSource | None:
+    """Where the effective column declaration came from (schema v7)."""
+    if not sync_cfg.columns:
+        return None
+    return sync_cfg._columns_source or "declared"
+
+
+def _managed_table_declaration(
+    sync_cfg: SyncConfig,
+) -> tuple[bool | None, SchemaChangePolicy | None]:
+    """Explicitly authored managed-table settings, never Pydantic defaults."""
+    destination = sync_cfg.destination
+    fields_set: set[str] = getattr(destination, "model_fields_set", set())
+    manage_table = (
+        bool(getattr(destination, "manage_table")) if "manage_table" in fields_set else None
+    )
+    on_schema_change = (
+        cast(SchemaChangePolicy, getattr(destination, "on_schema_change"))
+        if "on_schema_change" in fields_set
+        else None
+    )
+    return manage_table, on_schema_change
 
 
 def collect_dbt_exposure_inputs(
@@ -335,10 +365,19 @@ def build_manifest(
         dest = sync_cfg.destination
         dest_id = dest_ids[f"{dest.type}|{dest.describe()}"]
         if dest_id not in destinations:
+            coverage = plan_coverage(sync_cfg.destination.type)
+            manage_table, on_schema_change = _managed_table_declaration(sync_cfg)
             destinations[dest_id] = Destination(
                 name=dest_id,
                 type=sync_cfg.destination.type,
                 label=_destination_label(sync_cfg, full_labels),
+                plan=(
+                    DestinationPlan(status=coverage.status, reason=coverage.reason)
+                    if coverage is not None
+                    else None
+                ),
+                manage_table=manage_table,
+                on_schema_change=on_schema_change,
             )
 
         sync_state = states.get(sync_cfg.name)
@@ -362,6 +401,7 @@ def build_manifest(
                 meta=_sync_meta(sync_cfg, full_labels),
                 freshness=_sync_freshness(sync_cfg),
                 columns=_declared_columns(sync_cfg),
+                columns_source=_columns_source(sync_cfg),
             )
         )
 

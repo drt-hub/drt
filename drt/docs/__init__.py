@@ -7,6 +7,7 @@ from drt.docs.html import render_html
 from drt.docs.manifest import (
     SCHEMA_VERSION,
     Destination,
+    DestinationPlan,
     Edge,
     Manifest,
     Project,
@@ -22,6 +23,7 @@ from drt.docs.mermaid import render_mermaid
 __all__ = [
     "SCHEMA_VERSION",
     "Destination",
+    "DestinationPlan",
     "Edge",
     "Manifest",
     "Project",

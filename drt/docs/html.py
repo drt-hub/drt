@@ -30,6 +30,10 @@ from drt.docs._svg import _badge, _marker_defs, _node_card, _slug, _slug_map
 from drt.docs.dag import render_dag_svg
 from drt.docs.manifest import Manifest, Sync
 
+# Large catalogs need faceted navigation; small ones are faster to scan as-is.
+# Keep this single threshold shared by rendering and tests (ADR 0019).
+SCALE_MODE_SYNC_THRESHOLD = 8
+
 
 def _ego_svg(
     sync: Sync,
@@ -198,13 +202,31 @@ _BASE = """\
        href="{{ root }}index.html">Overview</a>
     <a class="navbtn {{ 'active' if active=='dag' }}" href="{{ root }}dag.html">DAG</a>
   </nav>
-  <span class="search"><input id="drt-search" type="search" placeholder="Filter…" autocomplete="off"></span>
+  {% if scale_mode and active == 'overview' %}
+  <span class="search scale-search" data-scale-filter-root>
+    <input id="drt-search" type="search" placeholder="Filter…" autocomplete="off"
+      aria-label="Search syncs" aria-controls="drt-scale-filters" aria-expanded="false">
+    <span class="scale-filter-panel" id="drt-scale-filters" hidden>
+      <label>Owner
+        <select data-scale-owner><option value="">All owners</option>{% for value in scale_owners %}<option value="{{ value }}">{{ value }}</option>{% endfor %}</select>
+      </label>
+      <label>Maturity
+        <select data-scale-maturity><option value="">All maturities</option>{% for value in scale_maturities %}<option value="{{ value }}">{{ value }}</option>{% endfor %}</select>
+      </label>
+      <label>Tag
+        <select data-scale-tag><option value="">All tags</option>{% for value in scale_tags %}<option value="{{ value }}">#{{ value }}</option>{% endfor %}</select>
+      </label>
+      <button type="button" class="scale-filter-clear">Clear</button>
+      <span class="scale-filter-result" role="status" aria-live="polite"></span>
+    </span>
+  </span>
+  {% else %}<span class="search"><input id="drt-search" type="search" placeholder="Filter…" autocomplete="off"></span>{% endif %}
 </header>
 <div class="shell">
   <aside class="sidebar">
     <details class="group" data-group="syncs" open>
       <summary>Syncs <span class="count">{{ nav.syncs|length }}</span></summary>
-      <ul>{% for s in nav.syncs %}<li><a href="{{ root }}sync/{{ s.slug }}.html"
+      <ul>{% for s in nav.syncs %}<li{% if scale_mode and active == 'overview' %} data-scale-sync data-search="{{ s.search_text }}" data-owner="{{ s.owner }}" data-maturity="{{ s.maturity }}" data-tags="{{ s.tags }}"{% endif %}><a href="{{ root }}sync/{{ s.slug }}.html"
         {{ 'class=current' if s.slug==current_slug and active=='sync' }}>{{ s.name }}</a></li>
       {% endfor %}</ul>
     </details>
@@ -384,11 +406,12 @@ _SYNC = """\
     {% if sync.meta %}<div>owner: {{ sync.meta.owner or '&mdash;'|safe }} &middot; maturity: <code>{{ sync.meta.maturity }}</code></div>{% endif %}
     {% if sync.freshness %}<div>freshness: last success within <code>{{ freshness_label }}</code></div>{% endif %}
     {% if last_plan %}<div class="font-mono">last applied plan: {{ last_plan }}</div>{% endif %}
+    {% if destination_manage_table is not none or destination_on_schema_change is not none %}<div>managed table:{% if destination_manage_table is not none %} <code>manage_table: {{ destination_manage_table|string|lower }}</code>{% endif %}{% if destination_on_schema_change is not none %} &middot; <code>on_schema_change: {{ destination_on_schema_change }}</code>{% endif %}</div>{% endif %}
   </div>
 </div>
 
 {% if sync.columns %}
-<h2>Column contract</h2>
+<h2>Column contract{% if sync.columns_source %} <span class="provenance">{{ "dbt-derived" if sync.columns_source == "dbt" else "declared" }}</span>{% endif %}</h2>
 <table>
   <tr><th>Name</th><th>Type</th><th>Description</th></tr>
   {% for column in sync.columns %}
@@ -429,6 +452,10 @@ _SYNC = """\
 </div>
 
 <div class="tab-panel" data-tab="state">
+  {% if destination_plan %}
+  <h2>Planning</h2>
+  <p class="plan-coverage"><strong>drt plan:</strong> <code>{{ destination_plan.status }}</code>{% if destination_plan.reason %} &middot; {{ destination_plan.reason }}{% endif %}</p>
+  {% endif %}
   <h2>State</h2>
   {% if state %}
   <table>
@@ -440,6 +467,23 @@ _SYNC = """\
   </table>
   {% else %}
   <div class="empty">No state recorded yet. Run <code>drt run --select {{ sync.name }}</code> to populate.</div>
+  {% endif %}
+  {% if sync.runs %}
+  <h2>Run history</h2>
+  <table class="run-history">
+    <tr><th>Time (UTC)</th><th>Status</th><th>Rows</th><th>Plan ID</th><th>Guards</th><th>Replay</th>{% if show_approver %}<th>Approver</th>{% endif %}</tr>
+    {% for run in run_rows %}
+    <tr>
+      <td class="font-mono">{{ run.started_at }}</td>
+      <td><span class="status-{{ run.status }}">{{ run.status }}</span></td>
+      <td class="font-mono">{{ run.rows }}</td>
+      <td class="font-mono">{{ run.plan_id or "—" }}</td>
+      <td>{{ run.guards }}</td>
+      <td>{{ "exact" if run.exact else "—" }}</td>
+      {% if show_approver %}<td>{{ run.approved_by or "—" }}</td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table>
   {% endif %}
 </div>
 {% endblock %}
@@ -480,6 +524,8 @@ _DESTINATION = (
 <div class="crumb"><a href="../index.html">Destinations</a> / {{ destination.label }}</div>
 <h1><span class="badge" style="background:{{ badge.bg }};color:{{ badge.fg }}">{{ badge.initials }}</span> {{ destination.label }}</h1>
 <p class="lede">{{ destination.type }} &middot; external &middot; fed by {{ syncs|length }} sync{{ 's' if syncs|length != 1 }}</p>
+{% if destination.plan %}<p class="plan-coverage"><strong>drt plan:</strong> <code>{{ destination.plan.status }}</code>{% if destination.plan.reason %} &middot; {{ destination.plan.reason }}{% endif %}</p>{% endif %}
+{% if destination.manage_table is not none or destination.on_schema_change is not none %}<p class="managed-table"><strong>Managed table:</strong>{% if destination.manage_table is not none %} <code>manage_table: {{ destination.manage_table|string|lower }}</code>{% endif %}{% if destination.on_schema_change is not none %} &middot; <code>on_schema_change: {{ destination.on_schema_change }}</code>{% endif %}</p>{% endif %}
 <h2>Fed by</h2>
 <table>
   <tr><th>Sync</th><th>Source</th><th>Mode</th><th>Last status</th></tr>
@@ -585,7 +631,27 @@ def render_html(
     tag_slugs = {t: _slug(t) for t in tag_syncs}
 
     nav = {
-        "syncs": [{"name": s.name, "slug": sync_slugs[s.name]} for s in manifest.syncs],
+        "syncs": [
+            {
+                "name": s.name,
+                "slug": sync_slugs[s.name],
+                "search_text": " ".join(
+                    (
+                        s.name,
+                        s.description,
+                        dest_by_id[s.destination].label
+                        if s.destination in dest_by_id
+                        else s.destination,
+                        " ".join(s.tags),
+                        s.meta.owner if s.meta and s.meta.owner else "",
+                    )
+                ).lower(),
+                "owner": s.meta.owner if s.meta and s.meta.owner else "",
+                "maturity": s.meta.maturity if s.meta else "high",
+                "tags": "|".join(s.tags),
+            }
+            for s in manifest.syncs
+        ],
         "sources": [{"name": s.name, "slug": source_slugs[s.name]} for s in manifest.sources],
         "destinations": [
             {"label": d.label, "slug": dest_slugs[d.name]} for d in manifest.destinations
@@ -612,6 +678,14 @@ def render_html(
         "schema_version": manifest.schema_version,
         "profile": manifest.project.profile if manifest.project else "",
         "nav": nav,
+        "scale_mode": len(manifest.syncs) >= SCALE_MODE_SYNC_THRESHOLD,
+        "scale_owners": sorted(
+            {s.meta.owner for s in manifest.syncs if s.meta is not None and s.meta.owner}
+        ),
+        "scale_maturities": sorted(
+            {s.meta.maturity if s.meta is not None else "high" for s in manifest.syncs}
+        ),
+        "scale_tags": sorted(tag_syncs),
         # Single-object bundle (#821): pages render as fragments (main only) so
         # the builder can assemble them into one document; default is the full
         # per-page "base" layout.
@@ -796,6 +870,32 @@ def render_html(
             for e in manifest.edges
             if e.kind == "lookup" and e.from_ == s.name
         ]
+        run_rows: list[dict[str, object]] = []
+        for run in s.runs:
+            tripped = run.guards.get("tripped", []) if run.guards else []
+            guard_names = [str(item.get("guard", "guard")) for item in tripped]
+            if guard_names:
+                guard_outcome = "tripped: " + ", ".join(guard_names)
+                if run.guards and run.guards.get("forced"):
+                    guard_outcome += " (forced)"
+            elif run.guards is not None:
+                guard_outcome = "passed"
+            else:
+                guard_outcome = "—"
+            rows = f"{run.records_synced} synced"
+            if run.records_failed:
+                rows += f" · {run.records_failed} failed"
+            run_rows.append(
+                {
+                    "started_at": run.started_at,
+                    "status": run.status,
+                    "rows": rows,
+                    "plan_id": run.plan_id,
+                    "guards": guard_outcome,
+                    "exact": run.exact,
+                    "approved_by": run.approved_by,
+                }
+            )
         emit(
             f"sync/{sync_slugs[s.name]}.html",
             env.get_template("sync").render(
@@ -807,8 +907,13 @@ def render_html(
                 source_slug=source_slugs.get(s.source, _slug(s.source)),
                 destination_slug=dest_slugs.get(s.destination, _slug(s.destination)),
                 destination_label=dest.label if dest else s.destination,
+                destination_plan=dest.plan if dest else None,
+                destination_manage_table=dest.manage_table if dest else None,
+                destination_on_schema_change=dest.on_schema_change if dest else None,
                 freshness_label=_duration_label(s.freshness.max_age_seconds) if s.freshness else "",
                 last_plan=next((run.plan_id for run in s.runs if run.plan_id), None),
+                run_rows=run_rows,
+                show_approver=any(run.approved_by for run in s.runs),
                 yaml_html=yaml_html,
                 yaml_is_raw=raw_yaml is not None,
                 yaml_path=yaml_path,

@@ -152,6 +152,7 @@ def _resolve_dbt_contract(
     resolved = sync.model_copy(update={"columns": authored or derived})
     resolved._dbt_relation_name = dbt_model.relation_name
     resolved._dbt_contract_resolved = True
+    resolved._columns_source = "declared" if authored is not None else "dbt"
     return resolved, warning
 
 

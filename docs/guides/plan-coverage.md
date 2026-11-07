@@ -20,6 +20,10 @@
 |---|---|
 | `bigquery` | Only `mode: insert` (append-only) can be planned. `merge`, mirror and replace need a target read that BigQuery does not implement yet. |
 
+## Planned through bounded API reads
+
+_None._
+
 ## Not planned yet — could be (API-based diff, #472)
 
 | Destination | Why |

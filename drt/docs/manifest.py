@@ -55,6 +55,17 @@ sync, omitted when absent:
 - ``columns``: the model-output declaration as ``{name, type, description?}``.
   This is repository configuration, not run state, so regeneration remains
   byte-identical. Manifests from v1-v5 continue to load with no columns.
+
+Schema v7 (ADR 0019) is a pure superset of v6. All additions are optional and
+omitted when absent, so manifests from v1-v6 continue to load unchanged:
+
+- ``runs[].exact`` records exact-replay applies.
+- ``destinations[].plan`` carries the deterministic declaration from
+  :mod:`drt.engine.plan_coverage`.
+- ``syncs[].columns_source`` distinguishes dbt-derived and hand-written
+  column declarations.
+- ``destinations[].manage_table`` / ``on_schema_change`` carry explicitly
+  authored managed-table settings.
 """
 
 from __future__ import annotations
@@ -62,9 +73,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 EdgeKind = Literal["source_to_sync", "sync_to_destination", "lookup"]
+PlanStatus = Literal["available", "partial", "api-reads", "needs-api-diff", "unavailable"]
+ColumnsSource = Literal["dbt", "declared"]
+SchemaChangePolicy = Literal["fail", "ignore", "append_new_columns"]
 
 
 @dataclass(frozen=True)
@@ -80,10 +94,21 @@ class Source:
 
 
 @dataclass(frozen=True)
+class DestinationPlan:
+    """Declared ``drt plan`` coverage for a built-in destination (schema v7)."""
+
+    status: PlanStatus
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class Destination:
     name: str  # synthesized node id (stable across runs)
     type: str
     label: str  # human-readable describe(), e.g. "slack (#alerts)"
+    plan: DestinationPlan | None = None
+    manage_table: bool | None = None
+    on_schema_change: SchemaChangePolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +149,7 @@ class SyncRun:
     plan_id: str | None = None
     guards: dict[str, Any] | None = None
     approved_by: str | None = None  # only populated with --full-labels
+    exact: bool | None = None  # schema v7; omitted for ordinary runs
 
 
 @dataclass(frozen=True)
@@ -184,6 +210,7 @@ class Sync:
     meta: SyncMeta | None = None  # schema v5
     freshness: SyncFreshness | None = None  # schema v5
     columns: tuple[SyncColumn, ...] = ()  # schema v6; declaration order
+    columns_source: ColumnsSource | None = None  # schema v7; only with columns
 
 
 @dataclass(frozen=True)
@@ -217,9 +244,7 @@ class Manifest:
             ),
             "syncs": [_sync_to_dict(s) for s in self.syncs],
             "sources": [{"name": s.name, "type": s.type} for s in self.sources],
-            "destinations": [
-                {"name": d.name, "type": d.type, "label": d.label} for d in self.destinations
-            ],
+            "destinations": [_destination_to_dict(d) for d in self.destinations],
             "edges": [{"kind": e.kind, "from": e.from_, "to": e.to} for e in self.edges],
         }
 
@@ -235,7 +260,7 @@ class Manifest:
             project=project,
             syncs=[_sync_from_dict(s) for s in data.get("syncs", [])],
             sources=[Source(**s) for s in data.get("sources", [])],
-            destinations=[Destination(**d) for d in data.get("destinations", [])],
+            destinations=[_destination_from_dict(d) for d in data.get("destinations", [])],
             edges=[
                 Edge(kind=e["kind"], from_=e["from"], to=e["to"]) for e in data.get("edges", [])
             ],
@@ -297,6 +322,8 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
             }
             for column in s.columns
         ]
+    if s.columns_source is not None:
+        d["columns_source"] = s.columns_source
     return d
 
 
@@ -319,7 +346,71 @@ def _run_to_dict(r: SyncRun) -> dict[str, Any]:
         d["guards"] = r.guards
     if r.approved_by is not None:
         d["approved_by"] = r.approved_by
+    if r.exact is not None:
+        d["exact"] = r.exact
     return d
+
+
+def _destination_to_dict(destination: Destination) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "name": destination.name,
+        "type": destination.type,
+        "label": destination.label,
+    }
+    if destination.plan is not None:
+        data["plan"] = {
+            "status": destination.plan.status,
+            "reason": destination.plan.reason,
+        }
+    if destination.manage_table is not None:
+        data["manage_table"] = destination.manage_table
+    if destination.on_schema_change is not None:
+        data["on_schema_change"] = destination.on_schema_change
+    return data
+
+
+def _destination_from_dict(data: dict[str, Any]) -> Destination:
+    unknown = set(data) - {
+        "name",
+        "type",
+        "label",
+        "plan",
+        "manage_table",
+        "on_schema_change",
+    }
+    if unknown:
+        raise ValueError(f"manifest destinations[] has unknown key(s): {sorted(unknown)}")
+    plan_data = data.get("plan")
+    if plan_data is not None:
+        if (
+            not isinstance(plan_data, dict)
+            or set(plan_data) != {"status", "reason"}
+            or plan_data.get("status")
+            not in {"available", "partial", "api-reads", "needs-api-diff", "unavailable"}
+            or not isinstance(plan_data.get("reason"), str)
+        ):
+            raise ValueError("manifest destinations[].plan is malformed")
+        plan = DestinationPlan(**plan_data)
+    else:
+        plan = None
+    manage_table = data.get("manage_table")
+    if manage_table is not None and not isinstance(manage_table, bool):
+        raise ValueError("manifest destinations[].manage_table must be a boolean")
+    on_schema_change = data.get("on_schema_change")
+    if on_schema_change is not None and on_schema_change not in {
+        "fail",
+        "ignore",
+        "append_new_columns",
+    }:
+        raise ValueError("manifest destinations[].on_schema_change is malformed")
+    return Destination(
+        name=data["name"],
+        type=data["type"],
+        label=data["label"],
+        plan=plan,
+        manage_table=manage_table,
+        on_schema_change=on_schema_change,
+    )
 
 
 def _meta_from_dict(data: Any) -> SyncMeta | None:
@@ -355,6 +446,14 @@ def _freshness_from_dict(data: Any) -> SyncFreshness | None:
 def _sync_from_dict(d: dict[str, Any]) -> Sync:
     state_data = d.get("state")
     state = SyncStateSnapshot(**state_data) if state_data else None
+    columns_source = d.get("columns_source")
+    if columns_source is not None and columns_source not in {"dbt", "declared"}:
+        raise ValueError("manifest syncs[].columns_source must be dbt or declared")
+    runs: list[SyncRun] = []
+    for run_data in d.get("runs", []):
+        if "exact" in run_data and not isinstance(run_data["exact"], bool):
+            raise ValueError("manifest syncs[].runs[].exact must be a boolean")
+        runs.append(SyncRun(**{**run_data, "errors": tuple(run_data.get("errors", []))}))
     return Sync(
         name=d["name"],
         source=d["source"],
@@ -363,13 +462,12 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         description=d.get("description", ""),
         tags=tuple(d.get("tags", [])),
         state=state,
-        runs=tuple(
-            SyncRun(**{**r, "errors": tuple(r.get("errors", []))}) for r in d.get("runs", [])
-        ),
+        runs=tuple(runs),
         fields=tuple(SyncField(**f) for f in d.get("fields", [])),
         dlq_depth=d.get("dlq_depth"),
         config_hash=d.get("config_hash"),
         meta=_meta_from_dict(d.get("meta")),
         freshness=_freshness_from_dict(d.get("freshness")),
         columns=tuple(SyncColumn(**column) for column in d.get("columns", [])),
+        columns_source=columns_source,
     )
