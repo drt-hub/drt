@@ -168,6 +168,7 @@ def test_explicit_manifest_path_is_project_relative(tmp_path: Path) -> None:
 
 
 def test_hand_written_columns_win_and_validate_warns(tmp_path: Path) -> None:
+    _write_project(tmp_path)
     _write_sync(
         tmp_path,
         columns=[
@@ -188,6 +189,7 @@ def test_hand_written_columns_win_and_validate_warns(tmp_path: Path) -> None:
     assert "hand-written columns override dbt model 'customers'" in warning
     assert "id type is string (hand-written) vs integer (dbt)" in warning
     assert "only hand-written: local_only" in warning
+    assert build_manifest(tmp_path).to_dict()["syncs"][0]["columns_source"] == "declared"
     assert "only in dbt: email" in warning
 
 
@@ -534,7 +536,9 @@ def test_runtime_contract_message_sanitizes_manifest_column_name(tmp_path: Path)
     assert all(character.isprintable() for character in result.errors[0])
 
 
-def test_docs_manifest_reuses_v6_columns_and_resolved_fingerprint(tmp_path: Path) -> None:
+def test_docs_manifest_reuses_columns_with_dbt_provenance_and_resolved_fingerprint(
+    tmp_path: Path,
+) -> None:
     _write_project(tmp_path)
     _write_sync(tmp_path)
     _write_manifest(tmp_path, {"model.analytics.customers": _node()})
@@ -542,11 +546,12 @@ def test_docs_manifest_reuses_v6_columns_and_resolved_fingerprint(tmp_path: Path
     manifest = build_manifest(tmp_path, include_state=False)
     serialized = manifest.to_dict()["syncs"][0]
 
-    assert manifest.schema_version == 6
+    assert manifest.schema_version == 7
     assert serialized["columns"] == [
         {"name": "id", "type": "integer", "description": "Customer key"},
         {"name": "email", "type": "string"},
     ]
+    assert serialized["columns_source"] == "dbt"
     assert serialized["config_hash"] == sync_fingerprint(load_syncs(tmp_path)[0], tmp_path)[7:]
 
 

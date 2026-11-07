@@ -236,6 +236,9 @@ scaffold.
 
 ### Visualize your syncs
 
+See the [generated docs site guide](docs/guides/docs-site.md) for the HTML,
+single-object `--inline`, safe-label, run-history and large-catalog modes.
+
 Generate a Mermaid DAG from your local `drt_project.yml` and `syncs/*.yml` files:
 
 ```bash

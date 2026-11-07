@@ -75,6 +75,11 @@ warehouse-backed `_drt_history` stores when their optional column can be added. 
 `drt_run_sync`, and `drt_apply` responses expose the same `ddl` list. A DLQ retry that executes DDL
 also returns and prints it and writes a history entry for that schema change.
 
+`drt docs generate` publishes explicitly authored `manage_table` and
+`on_schema_change` values in manifest schema v7 and on the destination and sync
+pages. Unset Pydantic defaults are omitted, so the catalog distinguishes an
+operator declaration from default behavior.
+
 Exact replay stores rows, not connector cursor metadata. DDL typed only by optional source metadata
 therefore cannot be reproduced and exact apply fails clearly. Declare the columns in `sync.columns`
 when a managed-table plan must support `--include-values`; config-declared portable types are fully

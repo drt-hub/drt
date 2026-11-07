@@ -19,6 +19,9 @@ Status values:
 ``partial``
     Only some write shapes can be planned (an append-only ``mode: insert``, whose
     write is known exactly without reading the target).
+``api-reads``
+    Planned through bounded, opt-in keyed API reads (ADR 0018). Destinations move
+    here only after that capability is implemented and live-verified.
 ``needs-api-diff``
     The destination has an API that could answer "what exists today"; planning it
     is the API-based diff work of #472. Not planned today.
@@ -38,9 +41,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-PlanStatus = Literal["available", "partial", "needs-api-diff", "unavailable"]
+PlanStatus = Literal["available", "partial", "api-reads", "needs-api-diff", "unavailable"]
 
-PLAN_STATUSES: tuple[PlanStatus, ...] = ("available", "partial", "needs-api-diff", "unavailable")
+PLAN_STATUSES: tuple[PlanStatus, ...] = (
+    "available",
+    "partial",
+    "api-reads",
+    "needs-api-diff",
+    "unavailable",
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,10 @@ _SQL_READ = PlanCoverage("available")
 _EVENT = "Event/message sink: there is no stored target state to diff."
 _OBJECT = "Writes whole files or objects; there are no keyed target rows to diff."
 _API = "Records live behind an API that could be read back by key (API-based diff, #472)."
+_PROFILE_EVENT_API = (
+    "Events and user/people profiles are written through an API that drt cannot read back "
+    "by key, so there is no plan."
+)
 
 PLAN_COVERAGE: dict[str, PlanCoverage] = {
     "postgres": PlanCoverage(
@@ -80,9 +93,9 @@ PLAN_COVERAGE: dict[str, PlanCoverage] = {
     "pipedrive": PlanCoverage("needs-api-diff", _API),
     "salesforce_bulk": PlanCoverage("needs-api-diff", _API),
     "zendesk": PlanCoverage("needs-api-diff", _API),
-    "amplitude": PlanCoverage("unavailable", _EVENT),
-    "mixpanel": PlanCoverage("unavailable", _EVENT),
-    "klaviyo": PlanCoverage("unavailable", _EVENT),
+    "amplitude": PlanCoverage("unavailable", _PROFILE_EVENT_API),
+    "mixpanel": PlanCoverage("unavailable", _PROFILE_EVENT_API),
+    "klaviyo": PlanCoverage("unavailable", _PROFILE_EVENT_API),
     "meta_conversions": PlanCoverage("unavailable", _EVENT),
     "google_ads": PlanCoverage("unavailable", "Conversion upload: " + _EVENT),
     "discord": PlanCoverage("unavailable", _EVENT),

@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (v1.3.1)
+
+- **`drt docs` operational catalog upgrade** ([ADR 0019](docs/adr/0019-catalog-run-history-plan-coverage-and-filter.md)): sync pages now render bounded run history with plan/guard/exact-replay lineage, destination pages show declared connector-level `drt plan` coverage while sync pages apply sync-level planner blockers, column contracts identify dbt-derived vs hand-written provenance, and explicitly configured managed-table policy is visible per sync. Projects with at least eight syncs gain deterministic client-side search (name, description, destination, tags and owner) plus owner/maturity/tag facets in both multi-file and `--inline` modes; overview-only filter metadata keeps multi-file output linear and JSON-array tag encoding preserves `|`. The manifest moves additively to **schema v7** (`runs[].exact`, `destinations[].plan`, `syncs[].plan`, `syncs[].columns_source`, sync-level managed-table declarations; omit when absent; v1-v6 still load). Default catalogs continue to withhold `owner_email` and `approved_by`, no clock-relative freshness verdict is added, and there are no new runtime dependencies.
+
 ## [1.3.0] - 2026-11-06
 
 **Depth and durability.** The review loop became auditable (plan/apply lineage, exact-replay apply, a generated plan-coverage matrix, sync freshness), the schema cluster landed (column contracts, `contract.source: dbt`, managed destination tables for Postgres and MySQL) and scheduler scaffolds, catalog owner metadata and a Pipedrive destination joined them. Drop-in upgrade from v1.2.1: every new key is opt-in and every new plan field is additive and omitted when absent.

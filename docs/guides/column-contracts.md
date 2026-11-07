@@ -153,6 +153,8 @@ unavailable with the contract error and does not produce a partial change set.
 Changing hand-written columns, contract policy, or dbt-resolved columns changes
 the plan `config_hash`; `drt apply` refuses an older plan.
 
-`drt docs generate` publishes declared names, portable types, and descriptions
-on the sync page and in manifest schema v6 under `syncs[].columns`. The block is
-omitted when absent, and manifests from schema v1 through v5 still load.
+`drt docs generate` publishes declared names, portable types, descriptions and
+their effective provenance on the sync page. Manifest schema v7 carries the
+columns under `syncs[].columns` and `syncs[].columns_source` as `dbt` or
+`declared`; a hand-written block that overrides dbt is `declared`. Both are
+omitted when absent, and manifests from schema v1 through v6 still load.

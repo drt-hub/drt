@@ -58,6 +58,15 @@ def _append_only(destination_type: str) -> bool:
     return always or chosen
 
 
+def _offers_profile_mode(destination_type: str) -> bool:
+    """Whether one endpoint mode writes persistent user/profile state."""
+    config_class, _impl = registry._destination_registry[destination_type]
+    field = config_class.model_fields.get("endpoint")
+    if field is None:
+        return False
+    return bool({"identify", "profile", "people_set"} & set(typing.get_args(field.annotation)))
+
+
 def _derived_group(destination_type: str) -> str:
     if _reads_target(destination_type):
         return "available"
@@ -94,6 +103,9 @@ def test_anything_short_of_available_says_why(destination_type: str) -> None:
     declared = PLAN_COVERAGE[destination_type]
     if declared.status != "available":
         assert len(declared.reason.strip()) > 10
+    if declared.status == "unavailable" and _offers_profile_mode(destination_type):
+        assert "no stored target state" not in declared.reason.lower()
+        assert "profile" in declared.reason.lower()
 
 
 def test_an_undeclared_type_has_no_declaration_rather_than_a_wrong_one() -> None:
