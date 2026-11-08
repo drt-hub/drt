@@ -286,6 +286,7 @@ APP_JS = """\
       var result = scaleRoot.querySelector(".scale-filter-result");
       var clear = scaleRoot.querySelector(".scale-filter-clear");
       var suppressPanelOpen = false;
+      var escaping = false;
       function openPanel() {
         if (suppressPanelOpen) return;
         panel.hidden = false;
@@ -310,7 +311,12 @@ APP_JS = """\
         if (emptyMsg) emptyMsg.hidden = visible > 0;
       }
       input.addEventListener("focus", openPanel);
-      input.addEventListener("input", function () { openPanel(); applyScaleFilters(); });
+      input.addEventListener("input", function () {
+        // A search input's native Escape clears its value and fires `input` right after the
+        // keydown; that must not reopen the panel the same Escape just closed.
+        if (!escaping) openPanel();
+        applyScaleFilters();
+      });
       [owner, maturity, tag].forEach(function (select) {
         select.addEventListener("change", applyScaleFilters);
       });
@@ -327,6 +333,8 @@ APP_JS = """\
           panel.hidden = true;
           input.setAttribute("aria-expanded", "false");
           suppressPanelOpen = true;
+          escaping = true;
+          setTimeout(function () { escaping = false; }, 0);
           input.focus();
           suppressPanelOpen = false;
         }

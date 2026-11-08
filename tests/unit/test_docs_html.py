@@ -841,3 +841,15 @@ def test_a_sensitive_key_inside_any_flow_mapping_is_masked(tmp_path: Path) -> No
     _path, shown = collect_sync_yaml_texts(tmp_path)["s"]
 
     assert "hunter2" not in shown and "pw9" not in shown
+
+
+def test_native_search_escape_does_not_reopen_the_facet_panel(site: Path) -> None:
+    # A search input's native Escape clears its value and fires `input` right after the
+    # keydown (verified in a browser against the generated fixture). The input handler must
+    # skip openPanel() for that event, and the flag must be released on the next task.
+    app_js = (site / "assets/app.js").read_text(encoding="utf-8")
+
+    assert "if (!escaping) openPanel();" in app_js
+    escape_handler = app_js[app_js.index('if (event.key === "Escape")') :]
+    assert "escaping = true;" in escape_handler
+    assert "setTimeout(function () { escaping = false; }, 0);" in escape_handler
