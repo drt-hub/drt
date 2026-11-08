@@ -65,6 +65,7 @@ DESTINATION_CONFIG_CLASSES: dict[str, type[BaseModel]] = {
     "hubspot": _models.HubSpotDestinationConfig,
     "intercom": _models.IntercomDestinationConfig,
     "jira": _models.JiraDestinationConfig,
+    "kafka": _models.KafkaDestinationConfig,
     "klaviyo": _models.KlaviyoDestinationConfig,
     "linear": _models.LinearDestinationConfig,
     "meta_conversions": _models.MetaConversionsDestinationConfig,
