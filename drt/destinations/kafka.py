@@ -44,6 +44,10 @@ class KafkaDestination:
         The engine and DLQ replay mark ledger entries after load() returns;
         queued messages alone must never be reported as delivered.
         """
+        assert isinstance(config, KafkaDestinationConfig)
+        if not records:
+            return SyncResult()
+
         # Client def for the first time.
         if self._client is None:
             servers = resolve_env(None, config.bootstrap_servers_env)
@@ -168,6 +172,8 @@ class KafkaDestination:
     def _close(self) -> None:
         """Close client connection."""
         producer = self._client
+        if producer is None:
+            return
         remaining = len(producer)
         try:
             if remaining:
@@ -214,11 +220,11 @@ class KafkaDestination:
             "bootstrap.servers": bootstrap_servers,
             "enable.idempotence": config.enable_idempotence,
             "acks": "all",
-            "delivery.timeout.ms": int(config.delivery_timeout_s * 1000),
+            "message.timeout.ms": int(config.delivery_timeout_s * 1000),
             "security.protocol": {
                 "none": "PLAINTEXT",
                 "ssl": "SSL",
-                "sasl_plain": "SASL_PLAINTEXT",
+                "sasl_plain": "SASL_SSL",
                 "sasl_scram": "SASL_SSL",
             }[config.auth.type],
         }
@@ -241,33 +247,9 @@ class KafkaDestination:
                 value = resolve_env(None, reference)
                 if value is None or not value.strip():
                     raise ValueError(f"Kafka auth.{field} must resolve to a non-empty value.")
-            settings[setting] = value
+                settings[setting] = value
         try:
             from confluent_kafka import Producer  # type: ignore[import-untyped]
         except ImportError as exc:
             raise ImportError("Kafka destination requires: pip install drt-core[kafka]") from exc
         return Producer(settings)
-
-    def _close(self) -> None:
-        """Close client connection."""
-        producer = self._client
-        remaining = len(producer)
-        try:
-            if remaining:
-                producer.flush(self._delivery_timeout_s)
-        finally:
-            if len(producer):
-                producer.purge()
-                producer.flush(0)
-            if len(producer):
-                raise RuntimeError("Kafka producer still has undelivered messages after cleanup.")
-            if not producer.close():
-                raise RuntimeError("Kafka producer close failed.")
-            self._client = None
-            self._bootstrap_servers = ""
-        if remaining:
-            raise RuntimeError(
-                "Kafka safety drain found unconfirmed messages after load(); "
-                "the sync must not be reported as successful."
-            )
-        
