@@ -1093,6 +1093,10 @@ class SyncConfig(BaseModel):
     # was loaded, while keeping derived data out of the public YAML model.
     _dbt_relation_name: str | None = PrivateAttr(default=None)
     _dbt_contract_resolved: bool = PrivateAttr(default=False)
+    # Documentation provenance for the resolved ``columns`` list. A dbt-source
+    # contract can still have an authored ``columns:`` block, which wins; the
+    # public catalog must describe the columns that actually won resolution.
+    _columns_source: Literal["dbt", "declared"] | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _check_column_contract(self) -> SyncConfig:

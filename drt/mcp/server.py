@@ -627,7 +627,9 @@ def create_server(project_dir: Path | None = None) -> Any:
                 last-run state (status, records synced, timestamps), recent
                 run history (``runs``), and DLQ depth.
             full_labels: Keep verbatim connection details (endpoints, senders,
-                buckets) in destination labels and embedded error text.
+                buckets) in destination labels and embedded error text, and
+                include personal-data fields such as ``owner_email`` and
+                run-history ``approved_by``.
                 Defaults to the same docs-safe output as the CLI (#696/#698);
                 enable only when the manifest stays in a trusted context,
                 mirroring ``drt docs generate --full-labels``.
