@@ -338,7 +338,7 @@ override must be explicit (`drt run --force-guards`, or `--force-guards` on
   in `target/drt/run_results.json`, and in warehouse-backed `_drt_history` (an
   optional `guards` column that drt adds on the first append when the role may
   alter the table; otherwise it logs a warning and records the legacy columns only,
-  see [warehouse state](warehouse-state.md#optional-history-columns-guards)).
+  see [warehouse state](warehouse-state.md#optional-history-columns-guards-plan_id-approved_by-exact-ddl)).
 
 ## Exit codes
 
@@ -499,7 +499,7 @@ this run apply, and who approved it?" answerable from history alone:
   tool return `plan_id`, `approved_by` and `guards` on each entry.
 - Warehouse-backed history stores them in optional `plan_id` / `approved_by`
   columns, added on the first append like `guards` (see
-  [Warehouse-backed state](warehouse-state.md#optional-history-columns)).
+  [Warehouse-backed state](warehouse-state.md#optional-history-columns-guards-plan_id-approved_by-exact-ddl)).
 - The docs manifest (schema v4) carries `plan_id` and `guards` on each
   `runs[]` entry. `approved_by` is a person's name, so it appears only with
   `drt docs generate --full-labels`. See
