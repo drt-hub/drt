@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from drt.config.parser import load_syncs_safe
@@ -188,3 +189,22 @@ def test_v8_sources_round_trip_and_old_manifest_omits_them() -> None:
         "syncs": [{"name": "s", "source": "warehouse", "destination": "d", "mode": "upsert"}],
     }
     assert "sources" not in Manifest.from_dict(old_shape).to_dict()["syncs"][0]
+
+
+def test_v8_sources_rejects_non_string_relation_names() -> None:
+    document = {
+        "schema_version": 8,
+        "drt_version": "1.3.0",
+        "syncs": [
+            {
+                "name": "s",
+                "source": "public.orders",
+                "destination": "d",
+                "mode": "upsert",
+                "sources": ["public.orders", 42],
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="sources must be an array of strings"):
+        Manifest.from_dict(document)
