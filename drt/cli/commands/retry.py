@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -45,6 +45,57 @@ def replay_dead_letters(
     clear: bool = False,
     project_dir: Path = Path("."),
 ) -> dict[str, Any]:
+    """Inspect / replay / clear a sync's Dead Letter Queue (see ``_replay_dead_letters``).
+
+    Closes the destination's per-run write state afterwards, on success and on
+    error alike — the same ``reset_write_state`` hook ``run_sync`` calls from its
+    ``finally``. A destination that holds a client across ``load()`` calls
+    (e.g. Kafka's producer) would otherwise never release it. Only the reset
+    hook runs here, deliberately not ``finalize_sync``: that hook performs the
+    sync's end-of-run work (mirror deletes, swap cutover, managed-table DDL),
+    which must not be driven by a replay of a handful of dead letters.
+    """
+    from drt.cli._helpers import get_destination
+
+    acquired: list[Any] = []
+
+    def acquire() -> Any:
+        destination = get_destination(sync)
+        acquired.append(destination)
+        return destination
+
+    try:
+        return _replay_dead_letters(
+            sync,
+            acquire,
+            project=project,
+            limit=limit,
+            dry_run=dry_run,
+            clear=clear,
+            project_dir=project_dir,
+        )
+    finally:
+        for destination in acquired:
+            resetter = getattr(destination, "reset_write_state", None)
+            if callable(resetter):
+                try:
+                    resetter(sync.destination, sync.sync)
+                except Exception as exc:  # noqa: BLE001 — best-effort, as in run_sync
+                    logging.getLogger(__name__).warning(
+                        "Write-state reset after retry failed for sync=%r: %s", sync.name, exc
+                    )
+
+
+def _replay_dead_letters(
+    sync: SyncConfig,
+    acquire_destination: Callable[[], Any],
+    *,
+    project: ProjectConfig | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
+    clear: bool = False,
+    project_dir: Path = Path("."),
+) -> dict[str, Any]:
     """Inspect / replay / clear a sync's Dead Letter Queue.
 
     Pure core shared by the ``drt retry`` CLI command and the MCP ``drt_retry``
@@ -58,7 +109,6 @@ def replay_dead_letters(
         - ``"ok"``       — records replayed; see ``succeeded`` / ``still_failing``
         - ``"failed"``   — a staged destination failed during ``finalize()``
     """
-    from drt.cli._helpers import get_destination
     from drt.config.base import ProjectConfig
     from drt.config.parser import load_project
     from drt.destinations.base import StagedDestination
@@ -104,7 +154,7 @@ def replay_dead_letters(
             "status": "dry_run",
         }
 
-    dest = get_destination(sync)
+    dest = acquire_destination()
     from drt.engine.contract import declared_destination_types
 
     retry_started_at = datetime.now(timezone.utc).isoformat()
