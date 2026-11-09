@@ -68,6 +68,13 @@ omitted when absent, so manifests from v1-v6 continue to load unchanged:
   column declarations.
 - ``syncs[].manage_table`` / ``on_schema_change`` carry explicitly
   authored managed-table settings.
+
+Schema v8 (#1045, ADR 0020) is a pure superset of v7. Its optional
+``syncs[].sources`` list carries every source node discovered from a supported
+raw-SQL model. The older scalar ``syncs[].source`` remains the deterministic
+first input for consumers that only understand one source. ``sources`` is
+omitted when no SQL-derived lineage is available, so v1-v7 manifests keep
+their serialized shape when they are loaded and written again.
 """
 
 from __future__ import annotations
@@ -75,7 +82,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 EdgeKind = Literal["source_to_sync", "sync_to_destination", "lookup"]
 PlanStatus = Literal["available", "partial", "api-reads", "needs-api-diff", "unavailable"]
@@ -214,6 +221,9 @@ class Sync:
     plan: DestinationPlan | None = None  # schema v7; destination coverage + sync blockers
     manage_table: bool | None = None  # schema v7; explicitly authored only
     on_schema_change: SchemaChangePolicy | None = None  # schema v7; explicitly authored only
+    # Schema v8: complete, ordered input relation list for parsed raw SQL.
+    # ``source`` remains the deterministic first input for legacy consumers.
+    sources: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -281,6 +291,8 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
     }
     if s.config_hash is not None:
         d["config_hash"] = s.config_hash
+    if s.sources:
+        d["sources"] = list(s.sources)
     if s.state is not None:
         d["state"] = {
             "last_sync_at": s.state.last_sync_at,
@@ -463,6 +475,9 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         "append_new_columns",
     }:
         raise ValueError("manifest syncs[].on_schema_change is malformed")
+    sources = d.get("sources", [])
+    if not isinstance(sources, list) or not all(isinstance(source, str) for source in sources):
+        raise ValueError("manifest syncs[].sources must be an array of strings")
     runs: list[SyncRun] = []
     for run_data in d.get("runs", []):
         if "exact" in run_data and not isinstance(run_data["exact"], bool):
@@ -487,4 +502,5 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         plan=plan,
         manage_table=manage_table,
         on_schema_change=on_schema_change,
+        sources=tuple(sources),
     )

@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+from sqlglot import exp, parse
+from sqlglot.errors import SqlglotError
+from sqlglot.optimizer.scope import traverse_scope
+
 from drt import __version__
 from drt._redaction import redact_error_text as _redact_error_text
 from drt.config.duration import parse_max_age
@@ -34,6 +38,7 @@ from drt.docs.manifest import (
 )
 from drt.engine.plan import unsupported_reason
 from drt.engine.plan_coverage import plan_coverage
+from drt.engine.resolver import parse_ref
 from drt.state.factory import build_state_bundle
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import SyncState
@@ -147,6 +152,63 @@ def _table_aliases(table: str) -> tuple[str, ...]:
     if "." in table:
         aliases.append(table.rsplit(".", maxsplit=1)[-1])
     return tuple(dict.fromkeys(aliases))
+
+
+def _raw_model_sql(sync_cfg: SyncConfig, project_dir: Path) -> str | None:
+    """Return executable hand-written SQL, never a dbt/profile ``ref()``.
+
+    A local ``syncs/models/<ref>.sql`` takes precedence at run time, so it is
+    raw SQL for lineage purposes too. A bare ``ref()`` without that override is
+    deliberately left alone: resolving it would require a dbt manifest or a
+    profile and could claim a relation this docs build has not inspected.
+    """
+    model_ref = parse_ref(sync_cfg.model)
+    if model_ref is None:
+        return sync_cfg.model
+
+    sql_file = project_dir / "syncs" / "models" / f"{model_ref}.sql"
+    if not sql_file.is_file():
+        return None
+    try:
+        return sql_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        # Keep docs generation available if a local model disappears between
+        # config loading and this best-effort catalog pass.
+        return None
+
+
+def _postgres_source_relations(sql: str | None) -> tuple[str, ...]:
+    """Extract physical Postgres relations from one read-only SQL statement.
+
+    SQLGlot's scope walker, rather than a regex over ``FROM``/``JOIN``, keeps
+    nested queries and CTE references straight: CTEs become nested ``Scope``
+    objects while only real tables remain :class:`~sqlglot.exp.Table` sources.
+    Parser failure, an empty model, or multiple statements produces no partial
+    lineage — callers retain the established generic profile source instead.
+    """
+    if not sql:
+        return ()
+    try:
+        statements = [
+            statement for statement in parse(sql, read="postgres") if statement is not None
+        ]
+    except SqlglotError:
+        return ()
+    if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+        return ()
+
+    relations: set[str] = set()
+    for scope in traverse_scope(statements[0]):
+        for source in scope.sources.values():
+            # CTEs and derived tables are scopes, not physical source tables.
+            # Table-valued functions do not carry an Identifier and are not
+            # relations that the manifest can name truthfully.
+            if not isinstance(source, exp.Table) or not isinstance(source.this, exp.Identifier):
+                continue
+            relation = source.copy()
+            relation.set("alias", None)
+            relations.add(relation.sql(dialect="postgres"))
+    return tuple(sorted(relations))
 
 
 def _state_snapshot(state: SyncState, redact: bool) -> SyncStateSnapshot:
@@ -357,12 +419,29 @@ def build_manifest(
     source_type = project.source.type if project.source else "configured"
     source = Source(name=project.profile, type=source_type)
 
+    sources: dict[str, Source] = {}
     destinations: dict[str, Destination] = {}
     syncs: list[Sync] = []
     edges: list[Edge] = []
     dest_ids = _allocate_destination_ids(syncs_result.syncs)
 
     for sync_cfg in syncs_result.syncs:
+        # #1045 deliberately starts with the one dialect we can exercise in
+        # this repository. ``profiles.yml`` is private machine configuration,
+        # so an explicit project-level source declaration is the only safe
+        # signal that raw SQL should be parsed as Postgres.
+        relations = (
+            _postgres_source_relations(_raw_model_sql(sync_cfg, project_dir))
+            if source_type == "postgres"
+            else ()
+        )
+        input_sources = relations or (source.name,)
+        for source_name in input_sources:
+            sources.setdefault(
+                source_name,
+                Source(name=source_name, type="postgres" if relations else source_type),
+            )
+
         dest = sync_cfg.destination
         dest_id = dest_ids[f"{dest.type}|{dest.describe()}"]
         coverage = plan_coverage(sync_cfg.destination.type)
@@ -385,7 +464,10 @@ def build_manifest(
         syncs.append(
             Sync(
                 name=sync_cfg.name,
-                source=source.name,
+                # ``source`` stays populated for existing consumers. ``sources``
+                # is the complete, deterministic list when raw SQL yielded more
+                # than one physical Postgres relation (schema v8).
+                source=input_sources[0],
                 destination=dest_id,
                 mode=sync_cfg.sync.mode,
                 description=sync_cfg.description,
@@ -410,10 +492,14 @@ def build_manifest(
                 ),
                 manage_table=manage_table,
                 on_schema_change=on_schema_change,
+                sources=relations,
             )
         )
 
-        edges.append(Edge(kind="source_to_sync", from_=source.name, to=sync_cfg.name))
+        edges.extend(
+            Edge(kind="source_to_sync", from_=source_name, to=sync_cfg.name)
+            for source_name in input_sources
+        )
         edges.append(Edge(kind="sync_to_destination", from_=sync_cfg.name, to=dest_id))
 
     # Heuristic lookup edges: if sync A's destination has lookups pointing at a table
@@ -449,7 +535,7 @@ def build_manifest(
         .replace("+00:00", "Z"),
         project=Project(name=project.name, profile=project.profile),
         syncs=syncs,
-        sources=[source],
+        sources=[sources[name] for name in sorted(sources)],
         destinations=list(destinations.values()),
         edges=edges,
     )

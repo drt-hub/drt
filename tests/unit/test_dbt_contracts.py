@@ -546,7 +546,7 @@ def test_docs_manifest_reuses_columns_with_dbt_provenance_and_resolved_fingerpri
     manifest = build_manifest(tmp_path, include_state=False)
     serialized = manifest.to_dict()["syncs"][0]
 
-    assert manifest.schema_version == 7
+    assert manifest.schema_version == 8
     assert serialized["columns"] == [
         {"name": "id", "type": "integer", "description": "Customer key"},
         {"name": "email", "type": "string"},
