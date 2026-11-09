@@ -45,6 +45,9 @@ class KafkaDestination:
         queued messages alone must never be reported as delivered.
         """
         assert isinstance(config, KafkaDestinationConfig)
+        if not records:
+            return SyncResult()
+
         # Client def for the first time.
         if self._client is None:
             servers = resolve_env(None, config.bootstrap_servers_env)
@@ -217,11 +220,11 @@ class KafkaDestination:
             "bootstrap.servers": bootstrap_servers,
             "enable.idempotence": config.enable_idempotence,
             "acks": "all",
-            "delivery.timeout.ms": int(config.delivery_timeout_s * 1000),
+            "message.timeout.ms": int(config.delivery_timeout_s * 1000),
             "security.protocol": {
                 "none": "PLAINTEXT",
                 "ssl": "SSL",
-                "sasl_plain": "SASL_PLAINTEXT",
+                "sasl_plain": "SASL_SSL",
                 "sasl_scram": "SASL_SSL",
             }[config.auth.type],
         }
