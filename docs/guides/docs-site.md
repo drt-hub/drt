@@ -21,7 +21,10 @@ the same client-side filtering behavior.
 
 ## What the catalog shows
 
-- source → sync → destination lineage and destination lookups;
+- source → sync → destination lineage and destination lookups. For raw
+  Postgres models, declare `source.type: postgres` in `drt_project.yml` to
+  publish the physical tables the model reads; other source types continue to
+  show the configured profile;
 - declared owner, maturity and freshness contract (never a clock-relative
   fresh/stale verdict);
 - column contracts and whether the effective declaration was hand-written or
@@ -46,9 +49,12 @@ The manifest is also available directly:
 drt docs generate --format json
 ```
 
-Schema v7 adds `runs[].exact`, destination plan coverage, column provenance and
-explicit managed-table settings. All additions are omitted when absent, and drt
-continues to load schema v1 through v6 manifests.
+Schema v8 adds `syncs[].sources` for every physical relation discovered in a
+supported raw Postgres model. The older scalar `syncs[].source` remains the
+deterministic first input for compatibility. SQL text never enters the manifest;
+unparseable SQL, non-Postgres sources, and unresolved dbt refs retain the
+configured-profile source. All additions are omitted when absent, and drt
+continues to load schema v1 through v7 manifests.
 
 ## Safe labels and personal data
 
