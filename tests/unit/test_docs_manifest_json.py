@@ -14,11 +14,13 @@ from drt.config.fingerprint import sync_fingerprints
 from drt.docs import (
     SCHEMA_VERSION,
     Destination,
+    DestinationPlan,
     Edge,
     Manifest,
     Project,
     Source,
     Sync,
+    SyncColumn,
     SyncField,
     SyncRun,
     SyncStateSnapshot,
@@ -28,8 +30,8 @@ from drt.docs import (
 runner = CliRunner()
 
 
-def test_schema_version_is_4() -> None:
-    assert SCHEMA_VERSION == 4
+def test_schema_version_is_7() -> None:
+    assert SCHEMA_VERSION == 7
 
 
 def _write_project(project_dir: Path, profile: str = "bq_prod", name: str = "demo") -> None:
@@ -136,18 +138,31 @@ class TestManifestRoundTrip:
                             records_failed=48,
                             errors=("row 12: boom",),
                             cursor_value_used="2026-05-13T23:55:00Z",
+                            exact=True,
                         ),
                     ),
                     fields=(
                         SyncField(name="email_address", source_name="email", mask="hash"),
                         SyncField(name="phone", source_name="phone", mask="truncate"),
                     ),
+                    columns=(
+                        SyncColumn(name="email", type="string", description="Primary ID"),
+                        SyncColumn(name="score", type="number"),
+                    ),
+                    columns_source="declared",
                     dlq_depth=3,
                     config_hash="0123456789abcdef",
                 ),
             ],
             sources=[Source(name="bq_prod", type="bigquery")],
-            destinations=[Destination(name="dest_hubspot_x", type="hubspot", label="hubspot (x)")],
+            destinations=[
+                Destination(
+                    name="dest_hubspot_x",
+                    type="hubspot",
+                    label="hubspot (x)",
+                    plan=DestinationPlan(status="needs-api-diff", reason="API read needed."),
+                )
+            ],
             edges=[
                 Edge(kind="source_to_sync", from_="bq_prod", to="users_to_hubspot"),
                 Edge(kind="sync_to_destination", from_="users_to_hubspot", to="dest_hubspot_x"),
@@ -173,7 +188,7 @@ class TestManifestRoundTrip:
         # omitted when absent rather than emitted as a null placeholder.
         assert "config_hash" not in roundtrip.to_dict()["syncs"][0]
 
-    @pytest.mark.parametrize("schema_version", [1, 2])
+    @pytest.mark.parametrize("schema_version", [1, 2, 3, 4, 5, 6])
     def test_old_shape_without_config_hash_loads_as_none(self, schema_version: int) -> None:
         old_shape = {
             "schema_version": schema_version,
@@ -199,6 +214,8 @@ class TestManifestRoundTrip:
 
         assert manifest.schema_version == schema_version
         assert manifest.syncs[0].config_hash is None
+        assert manifest.syncs[0].columns == ()
+        assert manifest.syncs[0].columns_source is None
 
     def test_edge_from_is_serialized_as_from_keyword(self) -> None:
         m = Manifest(
@@ -230,6 +247,46 @@ class TestManifestRoundTrip:
         assert "runs" not in sync_dict
         assert "fields" not in sync_dict
         assert "dlq_depth" not in sync_dict
+        assert "columns" not in sync_dict
+
+    def test_v6_columns_omit_description_when_absent(self) -> None:
+        manifest = Manifest(
+            schema_version=SCHEMA_VERSION,
+            drt_version="1.3.0",
+            syncs=[
+                Sync(
+                    name="s",
+                    source="src",
+                    destination="dst",
+                    mode="full",
+                    columns=(
+                        SyncColumn(name="email", type="string", description="Primary ID"),
+                        SyncColumn(name="score", type="number"),
+                    ),
+                )
+            ],
+        )
+        assert manifest.to_dict()["syncs"][0]["columns"] == [
+            {"name": "email", "type": "string", "description": "Primary ID"},
+            {"name": "score", "type": "number"},
+        ]
+
+    def test_builder_includes_authored_columns_without_state(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        sync = _pg_sync("users", "public.users")
+        sync["columns"] = [
+            {"name": "id", "type": "integer", "description": "Warehouse key"},
+            {"name": "email", "type": "string"},
+        ]
+        sync["contract"] = {"enforced": True}
+        _write_sync(tmp_path, "users.yml", sync)
+
+        manifest = build_manifest(tmp_path, include_state=False)
+
+        assert manifest.syncs[0].columns == (
+            SyncColumn(name="id", type="integer", description="Warehouse key"),
+            SyncColumn(name="email", type="string"),
+        )
 
 
 class TestBuildManifestWithState:
@@ -503,6 +560,193 @@ class TestManifestV4Lineage:
         assert (run.plan_id, run.guards, run.approved_by) == (None, None, None)
 
 
+class TestManifestV7Catalog:
+    """ADR 0019 additions from real sync config and history artifacts."""
+
+    def test_exact_plan_coverage_and_managed_table_declaration(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        sync = _pg_sync("users", "public.users")
+        destination = sync["destination"]
+        assert isinstance(destination, dict)
+        destination.update({"manage_table": True, "on_schema_change": "append_new_columns"})
+        sync["columns"] = [{"name": "id", "type": "integer"}]
+        sync["contract"] = {"enforced": True}
+        _write_sync(tmp_path, "users.yml", sync)
+        _write_history(
+            tmp_path,
+            "users",
+            [
+                _history_entry(
+                    "users",
+                    "2026-11-07T01:00:00+00:00",
+                    plan_id="sha256:reviewed",
+                    approved_by="alice",
+                    guards={"tripped": [{"guard": "max_deletes"}], "forced": True},
+                    exact=True,
+                )
+            ],
+        )
+
+        default = build_manifest(tmp_path, include_state=True).to_dict()
+        full = build_manifest(tmp_path, include_state=True, full_labels=True).to_dict()
+
+        assert default["destinations"][0]["plan"]["status"] == "available"
+        assert "manage_table" not in default["destinations"][0]
+        assert "on_schema_change" not in default["destinations"][0]
+        assert default["syncs"][0]["plan"]["status"] == "available"
+        assert default["syncs"][0]["manage_table"] is True
+        assert default["syncs"][0]["on_schema_change"] == "append_new_columns"
+        assert default["syncs"][0]["columns_source"] == "declared"
+        run = default["syncs"][0]["runs"][0]
+        assert run["exact"] is True and "approved_by" not in run
+        assert full["syncs"][0]["runs"][0]["approved_by"] == "alice"
+        assert Manifest.from_dict(default).to_dict() == default
+
+    def test_defaults_and_absent_exact_are_omitted(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+        _write_history(
+            tmp_path,
+            "users",
+            [_history_entry("users", "2026-11-07T01:00:00+00:00")],
+        )
+
+        data = build_manifest(tmp_path, include_state=True).to_dict()
+
+        assert "manage_table" not in data["syncs"][0]
+        assert "on_schema_change" not in data["syncs"][0]
+        assert "columns_source" not in data["syncs"][0]
+        assert "exact" not in data["syncs"][0]["runs"][0]
+
+    def test_schema_v6_manifest_still_loads_without_v7_fields(self) -> None:
+        v6 = {
+            "schema_version": 6,
+            "drt_version": "1.3.0",
+            "syncs": [
+                {
+                    "name": "users",
+                    "source": "warehouse",
+                    "destination": "dest",
+                    "mode": "upsert",
+                    "columns": [{"name": "id", "type": "integer"}],
+                }
+            ],
+            "destinations": [{"name": "dest", "type": "postgres", "label": "users"}],
+        }
+
+        manifest = Manifest.from_dict(v6)
+
+        assert manifest.schema_version == 6
+        assert manifest.syncs[0].columns_source is None
+        assert manifest.syncs[0].plan is None
+        assert manifest.syncs[0].manage_table is None
+        assert manifest.syncs[0].on_schema_change is None
+        assert manifest.destinations[0].plan is None
+        serialized = manifest.to_dict()
+        assert "columns_source" not in serialized["syncs"][0]
+        assert "plan" not in serialized["syncs"][0]
+        assert "manage_table" not in serialized["syncs"][0]
+        assert "on_schema_change" not in serialized["syncs"][0]
+        assert "plan" not in serialized["destinations"][0]
+
+    @pytest.mark.parametrize(
+        ("option", "value", "reason_fragment"),
+        [
+            ("match_policy", "update_only", "match_policy"),
+            ("incremental_strategy", "diff", "incremental_strategy: diff"),
+        ],
+    )
+    def test_sync_plan_applies_postgres_planner_blockers(
+        self,
+        tmp_path: Path,
+        option: str,
+        value: str,
+        reason_fragment: str,
+    ) -> None:
+        _write_project(tmp_path)
+        sync = _pg_sync("users", "public.users")
+        options = sync["sync"]
+        assert isinstance(options, dict)
+        options[option] = value
+        _write_sync(tmp_path, "users.yml", sync)
+
+        data = build_manifest(tmp_path).to_dict()
+
+        assert data["destinations"][0]["plan"]["status"] == "available"
+        assert data["syncs"][0]["plan"]["status"] == "unavailable"
+        assert reason_fragment in data["syncs"][0]["plan"]["reason"]
+
+    def test_managed_table_declarations_are_per_sync_for_shared_table(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        first = _pg_sync("first", "public.users")
+        second = _pg_sync("second", "public.users")
+        first_destination = first["destination"]
+        second_destination = second["destination"]
+        assert isinstance(first_destination, dict)
+        assert isinstance(second_destination, dict)
+        first_destination.update({"manage_table": True, "on_schema_change": "append_new_columns"})
+        second_destination.update({"manage_table": False, "on_schema_change": "ignore"})
+        _write_sync(tmp_path, "first.yml", first)
+        _write_sync(tmp_path, "second.yml", second)
+
+        data = build_manifest(tmp_path).to_dict()
+
+        assert len(data["destinations"]) == 1
+        assert "manage_table" not in data["destinations"][0]
+        syncs = {sync["name"]: sync for sync in data["syncs"]}
+        assert syncs["first"]["manage_table"] is True
+        assert syncs["first"]["on_schema_change"] == "append_new_columns"
+        assert syncs["second"]["manage_table"] is False
+        assert syncs["second"]["on_schema_change"] == "ignore"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"destination": {"extra": True}},
+        {"destination": {"plan": {"status": "available"}}},
+        {"sync": {"plan": {"status": "available"}}},
+        {"sync": {"manage_table": "true"}},
+        {"sync": {"on_schema_change": "drop_columns"}},
+        {"sync": {"columns_source": "generated"}},
+        {
+            "sync": {
+                "runs": [
+                    {
+                        "started_at": "t0",
+                        "completed_at": "t1",
+                        "duration_seconds": 1.0,
+                        "status": "success",
+                        "records_synced": 1,
+                        "records_failed": 0,
+                        "exact": "yes",
+                    }
+                ]
+            }
+        },
+    ],
+)
+def test_malformed_v7_fields_are_rejected(bad: dict[str, dict[str, object]]) -> None:
+    destination = {"name": "dest", "type": "postgres", "label": "users"}
+    destination.update(bad.get("destination", {}))
+    sync: dict[str, object] = {
+        "name": "users",
+        "source": "warehouse",
+        "destination": "dest",
+        "mode": "upsert",
+    }
+    sync.update(bad.get("sync", {}))
+    document = {
+        "schema_version": 7,
+        "drt_version": "1.3.1",
+        "syncs": [sync],
+        "destinations": [destination],
+    }
+
+    with pytest.raises(ValueError):
+        Manifest.from_dict(document)
+
+
 class TestBuildManifestFields:
     """Schema v2 (#808): declared write-side column facts from field_mappings + mask."""
 
@@ -706,3 +950,84 @@ class TestDocsGenerateJsonCLI:
         result = runner.invoke(app, ["docs", "generate", "--format", "html"])
         assert result.exit_code == 0, result.output
         assert (tmp_path / "target" / "docs" / "index.html").exists()
+
+
+class TestManifestV5MetaAndFreshness:
+    """Schema v5 (#1226): sync.meta and the declared freshness contract."""
+
+    def _project(self, tmp_path: Path, extra: dict[str, object]) -> None:
+        import yaml
+
+        _write_project(tmp_path)
+        sync = _pg_sync("users", "public.users")
+        sync.update(extra)
+        (tmp_path / "syncs").mkdir(exist_ok=True)
+        (tmp_path / "syncs" / "users.yml").write_text(yaml.safe_dump(sync))
+
+    def test_meta_and_declared_freshness_are_emitted_without_an_email_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        self._project(
+            tmp_path,
+            {
+                "meta": {"owner": "Growth", "owner_email": "growth@example.com", "maturity": "low"},
+                "alerts": {"on_stale": {"max_age": "6h", "never_run": "error"}},
+            },
+        )
+
+        sync = build_manifest(tmp_path).to_dict()["syncs"][0]
+
+        assert sync["meta"] == {"owner": "Growth", "maturity": "low"}
+        assert sync["freshness"] == {"max_age_seconds": 21600, "never_run": "error"}
+        assert "growth@example.com" not in json.dumps(sync)
+
+    def test_full_labels_adds_the_owner_email(self, tmp_path: Path) -> None:
+        self._project(tmp_path, {"meta": {"owner": "Growth", "owner_email": "growth@example.com"}})
+
+        sync = build_manifest(tmp_path, full_labels=True).to_dict()["syncs"][0]
+
+        assert sync["meta"]["owner_email"] == "growth@example.com"
+
+    def test_a_sync_without_them_omits_both_keys_and_round_trips(self, tmp_path: Path) -> None:
+        self._project(tmp_path, {})
+
+        data = build_manifest(tmp_path).to_dict()
+
+        assert "meta" not in data["syncs"][0] and "freshness" not in data["syncs"][0]
+        assert Manifest.from_dict(data).to_dict() == data
+
+    def test_a_v4_manifest_still_loads(self) -> None:
+        v4 = {
+            "schema_version": 4,
+            "drt_version": "1.2.1",
+            "syncs": [{"name": "u", "source": "s", "destination": "d", "mode": "upsert"}],
+        }
+
+        sync = Manifest.from_dict(v4).syncs[0]
+
+        assert sync.meta is None and sync.freshness is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"meta": []},
+        {"meta": "owner"},
+        {"meta": {"owner": 123}},
+        {"meta": {"owner": "a", "extra": 1}},
+        {"meta": {"maturity": "ultra"}},
+        {"freshness": {"max_age_seconds": "6h"}},
+        {"freshness": {"max_age_seconds": 60, "never_run": "maybe"}},
+        {"freshness": {"max_age_seconds": 60, "bogus": 1}},
+        {"freshness": []},
+    ],
+)
+def test_malformed_v5_meta_or_freshness_is_rejected_consistently(bad: dict[str, object]) -> None:
+    doc = {
+        "schema_version": 5,
+        "drt_version": "1.3.0",
+        "syncs": [{"name": "u", "source": "s", "destination": "d", "mode": "upsert", **bad}],
+    }
+
+    with pytest.raises(ValueError):
+        Manifest.from_dict(doc)

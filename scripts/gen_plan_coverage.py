@@ -21,6 +21,7 @@ DOC = Path(__file__).resolve().parent.parent / "docs" / "guides" / "plan-coverag
 _HEADINGS = {
     "available": "Planned (true create / update / delete change set)",
     "partial": "Partly planned",
+    "api-reads": "Planned through bounded API reads",
     "needs-api-diff": "Not planned yet — could be (API-based diff, #472)",
     "unavailable": "Not planned — no target state to diff",
 }
@@ -48,7 +49,12 @@ def render() -> str:
             lines += ["_None._", ""]
             continue
         if status == "available":
-            lines += [", ".join(f"`{m}`" for m in members), ""]
+            lines += ["| Destination | Coverage note |", "|---|---|"]
+            lines += [
+                f"| `{m}` | {PLAN_COVERAGE[m].reason or 'True keyed target diff.'} |"
+                for m in members
+            ]
+            lines.append("")
             continue
         lines += ["| Destination | Why |", "|---|---|"]
         lines += [f"| `{m}` | {PLAN_COVERAGE[m].reason} |" for m in members]

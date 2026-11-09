@@ -44,13 +44,17 @@ change detector, not a whole-project one.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from drt.config.parser import expand_env_vars, expand_sync_vars, project_vars
 from drt.engine.resolver import parse_ref
+
+if TYPE_CHECKING:
+    from drt.config.models import SyncConfig
 
 # Long enough that collisions are not a practical concern, short enough to read
 # in a manifest diff or a CI log line.
@@ -96,6 +100,30 @@ def sync_fingerprints(project_dir: Path | str = Path(".")) -> dict[str, str]:
         fingerprints[name] = _digest(raw, _model_bytes(data, root))
 
     return fingerprints
+
+
+def resolved_sync_fingerprint(sync: SyncConfig, project_dir: Path | str = Path(".")) -> str | None:
+    """Fingerprint one sync, including a dbt-derived contract snapshot.
+
+    Ordinary syncs retain #772's exact file-byte fingerprint. A
+    ``contract.source: dbt`` sync additionally hashes only the resolved dbt
+    facts that affect execution (columns and relation), never the whole
+    manifest. Thus a stale plan/baseline is invalidated when dbt changes the
+    contract without pulling unrelated manifest churn or resolved secrets into
+    the hash.
+    """
+    base = sync_fingerprints(project_dir).get(sync.name)
+    if base is None:
+        return None
+    if sync.contract is None or sync.contract.source != "dbt":
+        return base
+    derived = {
+        "base": base,
+        "columns": [column.model_dump(mode="json") for column in (sync.columns or [])],
+        "relation_name": sync._dbt_relation_name,
+    }
+    encoded = json.dumps(derived, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:_DIGEST_CHARS]
 
 
 def _parse(raw: bytes) -> dict[str, Any] | None:

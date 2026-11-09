@@ -66,6 +66,13 @@ class FakeS3Client:
         self.next_head_error: FakeClientError | None = None
         self.next_get_error: FakeClientError | None = None
         self.next_put_error: FakeClientError | None = None
+        self.bucket_exists = True
+
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("list", kwargs))
+        if not self.bucket_exists:
+            raise FakeClientError("NoSuchBucket", 404)
+        return {"KeyCount": 0}
 
     def _advance(self, key: str) -> None:
         _, old_etag = self.objects[key]
@@ -147,7 +154,23 @@ def test_missing_object_returns_create_only_none_token(
     client = S3ObjectClient("bucket", client=storage)
 
     assert client.read_for_update("missing") == (None, None)
-    assert storage.calls == [("head", {"Bucket": "bucket", "Key": "missing"})]
+    assert storage.calls == [
+        ("head", {"Bucket": "bucket", "Key": "missing"}),
+        ("list", {"Bucket": "bucket", "MaxKeys": 1}),  # confirms the bucket is there
+    ]
+
+
+def test_a_generic_404_from_a_missing_bucket_is_not_empty_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HeadObject reports a deleted bucket as a bare 404; the probe must catch it (#1224)."""
+    _install_botocore(monkeypatch)
+    storage = FakeS3Client()
+    storage.bucket_exists = False
+    client = S3ObjectClient("bucket", client=storage)
+
+    with pytest.raises(FakeClientError, match="NoSuchBucket"):
+        client.read_for_update("missing")
 
 
 def test_read_for_update_raises_after_every_pinned_read_races(

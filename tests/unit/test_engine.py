@@ -157,6 +157,41 @@ def test_run_sync_dry_run(tmp_path: Path) -> None:
     assert dest.calls == []  # destination never called
 
 
+def test_exact_plan_payload_capture_includes_metadata_columns(tmp_path: Path) -> None:
+    sync = SyncConfig.model_validate(
+        {
+            "name": "metadata_payload",
+            "model": "SELECT 1",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "metadata_columns": {
+                    "synced_at": "_synced_at",
+                    "run_id": "_run_id",
+                    "sync_name": "_sync_name",
+                }
+            },
+        }
+    )
+    sync.sync._capture_plan_payload = True
+
+    result = run_sync(
+        sync,
+        FakeSource([{"id": 1}]),
+        FakeDestination(),
+        _make_profile(),
+        tmp_path,
+        dry_run=True,
+        compute_diff=True,
+        run_id="plan-run-id",
+    )
+
+    [captured] = result._plan_payload_records  # type: ignore[attr-defined]
+    assert captured["id"] == 1
+    assert captured["_run_id"] == "plan-run-id"
+    assert captured["_sync_name"] == "metadata_payload"
+    assert captured["_synced_at"]
+
+
 def test_run_sync_on_error_fail_stops(tmp_path: Path) -> None:
     rows = [{"id": i} for i in range(9)]
     source = FakeSource(rows)
@@ -911,6 +946,62 @@ def test_watermark_storage_used_when_configured(tmp_path: Path) -> None:
     assert "2024-01-01" in captured_queries[0]
     # Watermark should be updated
     assert wm_storage.get("wm_sync") == "2024-01-05"
+
+
+def test_exact_replay_updates_run_state_without_using_transformed_cursor(tmp_path: Path) -> None:
+    from drt.cli._apply_flow import _exact_replay_sync
+    from drt.state.manager import StateManager, SyncState
+    from drt.state.watermark import LocalWatermarkStorage
+
+    state = StateManager(tmp_path)
+    state.save_sync(
+        SyncState(
+            sync_name="exact_incremental",
+            last_run_at="before",
+            records_synced=7,
+            status="success",
+            last_cursor_value="2026-10-20",
+        )
+    )
+    watermark = LocalWatermarkStorage(tmp_path)
+    watermark.save("exact_incremental", "2026-10-20")
+    sync = SyncConfig.model_validate(
+        {
+            "name": "exact_incremental",
+            "model": "SELECT * FROM events",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "source_cursor",
+                "field_mappings": {"source_cursor": "delivered_cursor"},
+                "mask": {"delivered_cursor": "redact"},
+            },
+        }
+    )
+    replay_sync = _exact_replay_sync(sync)
+    destination = FakeDestination()
+
+    result = run_sync(
+        replay_sync,
+        FakeSource([{"id": 1, "delivered_cursor": "[REDACTED]"}]),
+        destination,
+        _make_profile(),
+        tmp_path,
+        state_manager=state,
+        watermark_storage=watermark,
+        observer=StatePersistingObserver(state, watermark),
+        exact=True,
+    )
+
+    assert result.cursor_value_used is None
+    assert destination.calls == [[{"id": 1, "delivered_cursor": "[REDACTED]"}]]
+    saved = state.get_last_sync("exact_incremental")
+    assert saved is not None
+    assert saved.last_run_at != "before"
+    assert saved.records_synced == 1
+    assert saved.status == "success"
+    assert saved.last_cursor_value == "2026-10-20"
+    assert watermark.get("exact_incremental") == "2026-10-20"
 
 
 # ---------------------------------------------------------------------------

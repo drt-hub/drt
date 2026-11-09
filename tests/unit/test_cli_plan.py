@@ -58,6 +58,12 @@ def _patch_engine(monkeypatch: pytest.MonkeyPatch, diff: DiffResult, calls: list
 
         def __init__(self) -> None:
             self.diff = diff
+            self._plan_payload_records = [
+                *diff.added,
+                *(new for _old, new in diff.updated),
+                *diff.inserted,
+                *(new for _old, new in diff.replaced),
+            ]
 
     def fake_run_sync(*args: Any, **kwargs: Any) -> _Result:
         calls.append((args, kwargs))
@@ -100,6 +106,302 @@ def test_plan_writes_a_complete_unsampled_plan_file(
     assert kwargs["compute_diff"] is True
     assert kwargs["diff_limit"] > 10**9  # not a sample
     assert "plan_id" in result.output
+
+
+def test_include_values_writes_only_an_encrypted_private_sidecar(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stat
+
+    from pyrage import x25519
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_SECRETS_KEY", str(identity))
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads((project / "plan.json").read_text())
+    sidecar = project / "plan.json.payload"
+    assert document["schema_version"] == 2
+    assert document["payload"]["rows"] == 2
+    assert document["payload"]["bytes"] == len(sidecar.read_bytes())
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+    assert b"a@example.com" not in sidecar.read_bytes()
+    assert "a@example.com" not in (project / "plan.json").read_text()
+
+
+def test_exact_sidecar_is_atomically_replaced_with_private_mode(tmp_path: Path) -> None:
+    import os
+    import stat
+
+    from drt.cli.commands.plan import _write_new_bytes
+
+    path = tmp_path / "plan.json.payload"
+    path.write_bytes(b"old")
+    replaced_from: list[Path] = []
+    real_replace = os.replace
+
+    def tracked_replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        source_path = Path(source)
+        replaced_from.append(source_path)
+        assert source_path != path
+        assert stat.S_IMODE(source_path.stat().st_mode) == 0o600
+        real_replace(source, target)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "replace", tracked_replace)
+        _write_new_bytes(path, b"new")
+
+    assert replaced_from
+    assert path.read_bytes() == b"new"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_failed_atomic_sidecar_replace_removes_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from drt.cli.commands.plan import _write_new_bytes
+
+    path = tmp_path / "plan.json.payload"
+
+    def fail_replace(_source: str | os.PathLike[str], _target: str | os.PathLike[str]) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        _write_new_bytes(path, b"new")
+
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_failed_plan_write_removes_new_exact_sidecar(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    from drt.cli.commands import plan as plan_command
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_SECRETS_KEY", str(identity))
+
+    def fail_plan_write(_path: Path, _text: str) -> None:
+        raise OSError("plan write failed")
+
+    monkeypatch.setattr(plan_command, "_write_new_file", fail_plan_write)
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert not (project / "plan.json.payload").exists()
+
+
+def test_sidecar_cleanup_failure_does_not_mask_plan_write_error(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    from drt.cli.commands import plan as plan_command
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_SECRETS_KEY", str(identity))
+
+    def fail_plan_write(_path: Path, _text: str) -> None:
+        raise OSError("plan write failed")
+
+    monkeypatch.setattr(plan_command, "_write_new_file", fail_plan_write)
+    real_unlink = Path.unlink
+
+    def fail_sidecar_unlink(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.name == "plan.json.payload":
+            raise OSError("cleanup failed")
+        real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_sidecar_unlink)
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, OSError)
+    assert str(result.exception) == "plan write failed"
+
+
+def test_private_age_identity_is_rejected_without_echoing_it(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    _patch_engine(monkeypatch, _changes(), [])
+    private_identity = str(x25519.Identity.generate())
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            private_identity,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert private_identity not in result.output
+    assert "that is a private identity" in result.output
+    assert "public key (age1...)" in result.output.replace("\n", " ")
+
+
+def test_invalid_age_recipient_is_never_echoed(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+    invalid = "not-a-recipient-sensitive-input"
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            invalid,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert invalid not in result.output
+    assert "Invalid age X25519 recipient." in result.output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["orders_to_pg", "--recipient", "age1notused"],
+        ["orders_to_pg", "--include-values", "--recipient", "age1missingout"],
+        ["orders_to_pg", "--max-payload-rows", "0"],
+        ["orders_to_pg", "--out", "plan.json", "--include-values"],
+    ],
+)
+def test_exact_plan_option_validation(project: Path, args: list[str]) -> None:
+    result = runner.invoke(app, ["plan", *args])
+
+    assert result.exit_code == 1
+
+
+def test_plan_recipients_can_come_from_environment(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_PLAN_RECIPIENTS", str(identity.to_public()))
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--out", "plan.json", "--include-values"])
+
+    assert result.exit_code == 0, result.output
+    assert (project / "plan.json.payload").exists()
+
+
+def test_include_values_over_row_cap_is_unavailable(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    _patch_engine(monkeypatch, _changes(), [])
+    identity = x25519.Identity.generate()
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+            "--max-payload-rows",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "--max-payload-rows is 1" in result.output
+    assert not (project / "plan.json").exists()
+    assert not (project / "plan.json.payload").exists()
+
+
+def test_include_values_over_byte_cap_is_unavailable(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyrage import x25519
+
+    from drt.cli import _plan_payload
+
+    _patch_engine(monkeypatch, _changes(), [])
+    monkeypatch.setattr(_plan_payload, "MAX_PAYLOAD_BYTES", 20)
+    identity = x25519.Identity.generate()
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "orders_to_pg",
+            "--out",
+            "plan.json",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "byte cap is 20 bytes" in result.output
+    assert not (project / "plan.json").exists()
 
 
 def test_plan_json_output_is_the_plan(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,6 +459,31 @@ def test_partial_extraction_is_never_an_available_plan(
 
     assert result.exit_code == 1
     assert "did not complete" in result.output
+    assert not (project / "plan.json").exists()
+
+
+def test_contract_violation_is_reported_clearly_and_writes_no_plan(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.engine import sync as sync_module
+
+    _patch_engine(monkeypatch, DiffResult(total_source_rows=0), [])
+
+    class _Failed:
+        failed = 1
+        interrupted = False
+        cursor_value_used: str | None = None
+        diff = DiffResult(total_source_rows=0)
+        errors = ["Column contract violation: 'id' expected integer, actual string."]
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _Failed())
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--out", "plan.json"])
+
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert "Column contract violation" in output
+    assert "expected integer, actual string" in output
     assert not (project / "plan.json").exists()
 
 

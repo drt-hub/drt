@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, model_validator
 
 from drt.config.base import (
     DescribableConfig,
@@ -226,6 +226,11 @@ class PostgresDestinationConfig(BaseSqlDestinationConfig):
     upsert_key: list[str]  # columns for ON CONFLICT
     ssl: SslConfig | None = None
     json_columns: list[str] | None = None  # columns that hold JSON/JSONB data
+    # Managed destination tables (#760, ADR 0016). StrictBool deliberately
+    # rejects YAML strings such as ``"false"`` whose truthiness would be a
+    # dangerous surprise on an option that grants drt permission to run DDL.
+    manage_table: StrictBool = False
+    on_schema_change: Literal["fail", "ignore", "append_new_columns"] = "fail"
 
     def _describe_detail(self) -> str:
         return f"{self.table}"
@@ -250,6 +255,8 @@ class MySQLDestinationConfig(BaseSqlDestinationConfig):
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
     ssl: SslConfig | None = None
     json_columns: list[str] | None = None  # columns that hold JSON data
+    manage_table: StrictBool = False
+    on_schema_change: Literal["fail", "ignore", "append_new_columns"] = "fail"
 
     def _describe_detail(self) -> str:
         return f"{self.table}"

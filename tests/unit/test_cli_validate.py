@@ -171,6 +171,22 @@ def test_cli_validate_invalid_sync_shows_errors(
     assert result.exit_code == 1
 
 
+def test_cli_validate_preserves_computed_field_brackets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync = {
+        **VALID_SYNC,
+        "sync": {"computed_fields": {"amount[usd]": "{{"}},
+    }
+    _write_sync(tmp_path / "syncs", "computed", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "computed_fields['amount[usd]']" in result.output
+
+
 def test_cli_validate_mixed_shows_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_sync(tmp_path / "syncs", "a_good", VALID_SYNC)
     _write_sync(tmp_path / "syncs", "b_bad", {"name": "bad"})

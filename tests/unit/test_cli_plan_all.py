@@ -69,6 +69,7 @@ class _Result:
     def __init__(self, world: _World, name: str, dry_run: bool) -> None:
         self.diff = world.diff(name)
         self.failed = 1 if (not dry_run and world.fail_write_for == name) else 0
+        self._plan_payload_records = list(world.rows[name])
 
 
 @pytest.fixture
@@ -121,6 +122,49 @@ def test_plan_all_writes_one_plan_per_sync_and_one_markdown_report(project: Path
     assert result.output.startswith("<!-- drt-plan -->")
     assert "2 sync(s); 2 with changes." in result.output
     assert "a_orders" in result.output and "b_users" in result.output
+
+
+def test_exact_directory_apply_decrypts_one_payload_at_a_time(
+    project: Path,
+    world: _World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pyrage import x25519
+
+    from drt.cli import _apply_flow
+    from drt.engine import diff as diff_module
+
+    identity = x25519.Identity.generate()
+    monkeypatch.setenv("DRT_SECRETS_KEY", str(identity))
+    planned = runner.invoke(
+        app,
+        [
+            "plan",
+            "--all",
+            "--out-dir",
+            "plans",
+            "--include-values",
+            "--recipient",
+            str(identity.to_public()),
+        ],
+    )
+    assert planned.exit_code == 0, planned.output
+    monkeypatch.setattr(diff_module, "fetch_rows_by_keys", lambda *_a, **_k: [])
+    real_load = _apply_flow.load_exact_payload
+    writes_seen_before_each_decrypt: list[list[str]] = []
+
+    def tracked_load(*args: Any, **kwargs: Any) -> Any:
+        writes_seen_before_each_decrypt.append(list(world.writes))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(_apply_flow, "load_exact_payload", tracked_load)
+
+    applied = runner.invoke(app, ["apply", "plans", "--exact", "--auto-approve"])
+
+    assert applied.exit_code == 0, applied.output
+    assert writes_seen_before_each_decrypt == [[], ["a_orders"]]
+    assert world.writes == ["a_orders", "b_users"]
+    assert list((project / "plans").glob("*.payload")) == []
 
 
 def test_a_sync_that_cannot_be_planned_is_reported_not_fatal(project: Path, world: _World) -> None:

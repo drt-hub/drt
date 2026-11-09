@@ -174,6 +174,8 @@ In the demo above (Docker + pip, no cloud accounts), a CRM table already has an 
 - **Try it:** [`examples/review-demo`](examples/review-demo) — one script, a 60-second walkthrough, with copy-paste prompts for an AI agent (`drt_plan` → human approval → `drt_apply`).
 - **In CI:** `drt deploy github-actions --with-plan` scaffolds a plan comment on the pull request and an apply on merge.
 - **Read the guide:** [plan / apply](docs/guides/plan.md), including what it guarantees and what it does not (it is a guard in front of a normal run, not a transaction; plan needs a destination drt can read back, which today means SQL databases and warehouses).
+- **Declare and protect the schema:** [column contracts](docs/guides/column-contracts.md) (fail before a renamed or retyped model column reaches a destination; derive them from an enforced dbt contract) and opt-in [managed destination tables](docs/guides/managed-destination-tables.md) for PostgreSQL and MySQL.
+- **Exact replay:** `drt plan --include-values --recipient ...` + `drt apply --exact` (CLI only) write exactly the rows an approver staged, through an age-encrypted payload; see [plan / apply](docs/guides/plan.md).
 
 ## CLI Reference
 
@@ -221,12 +223,21 @@ drt serve                   # start HTTP webhook endpoint
 drt docs generate --format mermaid  # print project DAG as Mermaid
 drt docs generate --format dbt-exposures  # print dbt exposure YAML for ref() syncs
 drt deploy github-actions   # scaffold a scheduled sync workflow (drt-action + secrets wired)
+drt deploy cloud-run-job --schedule "40 3 * * *"  # Dockerfile + Cloud Run/Scheduler specs
+drt deploy k8s-cronjob --schedule "40 3 * * *"    # hardened batch/v1 CronJob manifest
 drt mcp run                 # start MCP server (requires drt-core[mcp])
 drt --install-completion    # install shell completion (bash/zsh/fish)
 drt --show-completion       # show completion script
 ```
 
+See the [scheduling decision guide](docs/guides/scheduling.md) before choosing
+between warehouse-native scheduling, Dagster sensors, `drt serve`, or a deploy
+scaffold.
+
 ### Visualize your syncs
+
+See the [generated docs site guide](docs/guides/docs-site.md) for the HTML,
+single-object `--inline`, safe-label, run-history and large-catalog modes.
 
 Generate a Mermaid DAG from your local `drt_project.yml` and `syncs/*.yml` files:
 
@@ -374,7 +385,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 ### Destinations
 
 <details>
-<summary><b>36 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
+<summary><b>37 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
 
 | Connector               | Status    | Install                            | Auth                              |
 | ----------------------- | --------- | ---------------------------------- | --------------------------------- |
@@ -383,6 +394,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Discord Webhook         | ✅ v0.4.2 | (core)                             | Webhook URL                       |
 | GitHub Actions          | ✅ v0.1   | (core)                             | Token (env var)                   |
 | HubSpot                 | ✅ v0.1   | (core)                             | Token (env var)                   |
+| [Pipedrive](docs/connectors/pipedrive.md) | ✅ next | (core) | API token (env var) |
 | Zendesk                 | ✅ v0.7   | (core)                             | Basic (email + API token)         |
 | Amplitude               | ✅ v0.7   | (core)                             | Project API key (env var)         |
 | Klaviyo                 | ✅ v0.8   | (core)                             | Private API key (env var)         |

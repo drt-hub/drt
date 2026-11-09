@@ -6,13 +6,23 @@
 
 ## Planned (true create / update / delete change set)
 
-`clickhouse`, `databricks`, `mysql`, `postgres`, `snowflake`
+| Destination | Coverage note |
+|---|---|
+| `clickhouse` | True keyed target diff. |
+| `databricks` | True keyed target diff. |
+| `mysql` | Managed-table CREATE/ALTER statements are previewed without execution. |
+| `postgres` | Managed-table CREATE/ALTER statements are previewed without execution. |
+| `snowflake` | True keyed target diff. |
 
 ## Partly planned
 
 | Destination | Why |
 |---|---|
 | `bigquery` | Only `mode: insert` (append-only) can be planned. `merge`, mirror and replace need a target read that BigQuery does not implement yet. |
+
+## Planned through bounded API reads
+
+_None._
 
 ## Not planned yet — could be (API-based diff, #472)
 
@@ -26,6 +36,7 @@
 | `jira` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `linear` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `notion` | Records live behind an API that could be read back by key (API-based diff, #472). |
+| `pipedrive` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `salesforce_bulk` | Records live behind an API that could be read back by key (API-based diff, #472). |
 | `zendesk` | Records live behind an API that could be read back by key (API-based diff, #472). |
 
@@ -33,7 +44,7 @@
 
 | Destination | Why |
 |---|---|
-| `amplitude` | Event/message sink: there is no stored target state to diff. |
+| `amplitude` | Events and user/people profiles are written through an API that drt cannot read back by key, so there is no plan. |
 | `azure_blob` | Writes whole files or objects; there are no keyed target rows to diff. |
 | `discord` | Event/message sink: there is no stored target state to diff. |
 | `email_smtp` | Event/message sink: there is no stored target state to diff. |
@@ -42,9 +53,9 @@
 | `github_actions` | Triggers a workflow run; Event/message sink: there is no stored target state to diff. |
 | `google_ads` | Conversion upload: Event/message sink: there is no stored target state to diff. |
 | `kafka` | Topic: Event/message sink: there is no stored target state to diff. |
-| `klaviyo` | Event/message sink: there is no stored target state to diff. |
+| `klaviyo` | Events and user/people profiles are written through an API that drt cannot read back by key, so there is no plan. |
 | `meta_conversions` | Event/message sink: there is no stored target state to diff. |
-| `mixpanel` | Event/message sink: there is no stored target state to diff. |
+| `mixpanel` | Events and user/people profiles are written through an API that drt cannot read back by key, so there is no plan. |
 | `parquet` | Writes whole files or objects; there are no keyed target rows to diff. |
 | `rest_api` | Generic HTTP endpoint: drt has no read-back contract for it. |
 | `s3` | Writes whole files or objects; there are no keyed target rows to diff. |

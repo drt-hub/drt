@@ -62,6 +62,11 @@ def docs_generate(
             "default multi-file output."
         ),
     ),
+    manifest_path: Path | None = typer.Option(
+        None,
+        "--manifest-path",
+        help="dbt manifest for contract.source: dbt (default: target/manifest.json).",
+    ),
 ) -> None:
     """Generate the project's sync catalog or an integration artifact."""
     from drt.docs.builder import build_manifest
@@ -76,8 +81,10 @@ def docs_generate(
 
         # Exposures are a repo-derived artifact. Run state and full destination
         # labels are neither needed nor safe to copy into a dbt project.
-        manifest = build_manifest(Path("."), include_state=False, history_depth=0)
-        inputs = collect_dbt_exposure_inputs(Path("."))
+        manifest = build_manifest(
+            Path("."), include_state=False, history_depth=0, manifest_path=manifest_path
+        )
+        inputs = collect_dbt_exposure_inputs(Path("."), manifest_path=manifest_path)
         typer.echo(
             render_dbt_exposures(
                 manifest,
@@ -95,6 +102,7 @@ def docs_generate(
             include_state=include_state,
             full_labels=full_labels,
             history_depth=history_depth,
+            manifest_path=manifest_path,
         )
         print(render_mermaid(manifest))
         return
@@ -105,13 +113,14 @@ def docs_generate(
             include_state=include_state,
             full_labels=full_labels,
             history_depth=history_depth,
+            manifest_path=manifest_path,
         )
         output.mkdir(parents=True, exist_ok=True)
-        manifest_path = output / "manifest.json"
-        with manifest_path.open("w") as f:
+        output_manifest_path = output / "manifest.json"
+        with output_manifest_path.open("w") as f:
             json.dump(manifest.to_dict(), f, indent=2)
         console.print(
-            f"Wrote [bold]{manifest_path}[/bold] "
+            f"Wrote [bold]{output_manifest_path}[/bold] "
             f"({len(manifest.syncs)} sync(s), schema_version={manifest.schema_version})"
         )
         return
@@ -130,6 +139,7 @@ def docs_generate(
             include_state=include_state,
             full_labels=full_labels,
             history_depth=history_depth,
+            manifest_path=manifest_path,
         )
         sync_yaml_texts = collect_sync_yaml_texts(Path("."))
         try:

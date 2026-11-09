@@ -71,7 +71,9 @@ recommendation.
 
 ## Setup
 
-No extra installation needed. Just run `dbt run` before `drt run` so that `target/manifest.json` exists.
+No extra installation is needed. Run `dbt run` (or at least `dbt compile`)
+before drt so that `target/manifest.json` exists. drt only reads the artifact;
+it never invokes dbt.
 
 ## How it works
 
@@ -91,6 +93,42 @@ dbt run
 drt run
 ```
 
+If CI stores the artifact somewhere else, pass the same project-relative or
+absolute path to commands that load the contract:
+
+```bash
+drt validate --manifest-path artifacts/dbt/manifest.json
+drt plan customers_to_crm --manifest-path artifacts/dbt/manifest.json
+drt run --manifest-path artifacts/dbt/manifest.json
+```
+
+Use the same path for `drt apply` that was used for `drt plan`.
+
+## Use dbt columns as a drt contract
+
+`contract.source: dbt` derives the expected source columns from the manifest
+node selected by an exact `model: ref(...)`:
+
+```yaml
+name: customers_to_crm
+model: ref('customers')
+contract:
+  enforced: true
+  source: dbt
+destination:
+  type: hubspot
+  object_type: contacts
+  id_property: email
+```
+
+Every dbt column must declare `data_type`. drt normalizes common warehouse
+spellings to its portable contract types; see [Column
+contracts](column-contracts.md#dbt-type-normalization) for the mapping and
+validation rules. A hand-written `columns:` block wins, while `drt validate`
+warns if it differs from the manifest. The resolved columns appear in `drt
+docs generate` and are snapshotted when config loads, so drt does not reread a
+changing manifest midway through a run or plan.
+
 ## Pipeline automation
 
 Use Dagster, Airflow, or a simple script to chain them:
@@ -99,7 +137,7 @@ Use Dagster, Airflow, or a simple script to chain them:
 dbt run && drt run
 ```
 
-Or with [dagster-drt](../integrations/dagster-drt/):
+Or with [dagster-drt](../../integrations/dagster-drt/):
 
 ```python
 from dagster import Definitions
@@ -133,6 +171,34 @@ precedence at runtime, so publishing the dbt ref would claim false lineage.
 If `--output` points outside `target/`, the HTML page is not reachable through
 `dbt docs serve`, so the exporter omits the URL. The command only writes to
 stdout; you choose and commit the destination file yourself.
+
+### Owner, maturity and the freshness contract
+
+By default every exposure says `owner: {name: drt}` and `maturity: high`. Give a
+sync a `meta` block and dbt sees who owns it and how far to trust it:
+
+```yaml
+# syncs/users_to_hubspot.yml
+meta:
+  owner: Growth team          # exposure owner.name
+  owner_email: growth@acme.io # personal data: never written to dbt exposures, and masked in the docs site
+  maturity: medium            # high | medium | low (default high)
+alerts:
+  on_stale:
+    max_age: 6h               # see the alerts guide; also declared in the exposure
+```
+
+The declared freshness (`alerts.on_stale`) appears as
+`meta.drt.freshness: {max_age_seconds, never_run}`. It is a **declaration, not a
+verdict**: whether the sync is fresh right now depends on the clock, which would make
+the output change between runs. For the verdict use `drt status --check`
+([alerts guide](alerts.md#staleness-a-sync-that-stopped-running-on_stale)). Unknown keys under
+`meta` are rejected. Editing `meta` changes the sync file, so it changes the sync's
+`config_hash` like any other edit (and invalidates a plan made before it).
+
+The same fields appear on each sync's page in `drt docs generate` (owner, maturity,
+the declared freshness, and the last applied plan when run history is included), and
+in the manifest (schema v5; `owner_email` only with `--full-labels`).
 
 The output is sorted by sync name and byte-identical for an unchanged project,
 so it can be regenerated and checked for drift in CI. See [CI/CD

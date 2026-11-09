@@ -40,6 +40,17 @@ class GCSObjectClient:
             self._injected_client = _gcs_client()
         return self._injected_client
 
+    def _require_bucket(self, not_found: type[BaseException]) -> None:
+        """Raise when the bucket itself is missing (a bucket also 404s on an object lookup).
+
+        Probed with a one-item object listing, which needs only ``storage.objects.list``
+        (part of the documented ``roles/storage.objectUser``), not ``storage.buckets.get``.
+        """
+        try:
+            next(iter(self._client().list_blobs(self._bucket_name, max_results=1)), None)
+        except not_found:
+            raise RuntimeError(f"GCS bucket '{self._bucket_name}' does not exist") from None
+
     def read_for_update(self, key: str) -> tuple[bytes | None, Token]:
         try:
             from google.cloud.exceptions import NotFound  # type: ignore[import-untyped]
@@ -53,7 +64,9 @@ class GCSObjectClient:
                 current.reload()
             except NotFound:
                 # A 404 at metadata lookup means there is no live object. GCS
-                # generation 0 is the create-only conditional-write token.
+                # generation 0 is the create-only conditional-write token. But a
+                # missing *bucket* also 404s, and must not read as empty state.
+                self._require_bucket(NotFound)
                 return None, 0
 
             generation = current.generation

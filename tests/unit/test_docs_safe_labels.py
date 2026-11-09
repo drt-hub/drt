@@ -52,6 +52,7 @@ from drt.config.models import (
     MySQLDestinationConfig,
     NotionDestinationConfig,
     ParquetDestinationConfig,
+    PipedriveDestinationConfig,
     PostgresDestinationConfig,
     RestApiDestinationConfig,
     SalesforceBulkDestinationConfig,
@@ -149,6 +150,7 @@ SAMPLES: dict[str, object] = {
     ),
     "notion": NotionDestinationConfig(type="notion", database_id=f"uuid-{S}", token_env="T"),
     "parquet": ParquetDestinationConfig(type="parquet", path=f"/home/{S}/out/users.parquet"),
+    "pipedrive": PipedriveDestinationConfig(type="pipedrive", api_token_env=f"{S}_TOKEN"),
     "postgres": PostgresDestinationConfig(
         type="postgres", host=f"{S}.corp", dbname="app", table="public.users", upsert_key=["id"]
     ),
@@ -226,6 +228,7 @@ EXPECTED_SAFE: dict[str, str] = {
     "mysql": "mysql (scores)",
     "notion": "notion (database)",  # database uuid dropped
     "parquet": "parquet (users.parquet)",  # directory dropped
+    "pipedrive": "pipedrive (person)",
     "postgres": "postgres (public.users)",
     "rest_api": "rest_api",  # full endpoint URL dropped
     "s3": "s3 (crm/)",  # bucket dropped, per-sync routing prefix kept

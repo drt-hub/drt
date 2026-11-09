@@ -1493,6 +1493,7 @@ class TestBigQueryMirrorMode:
             ) -> SnapshotDiffResult:
                 self.extract_calls += 1
                 return SnapshotDiffResult(
+                    snapshot_sample=iter(()),
                     added=iter(()),
                     changed=iter(()),
                     removed_keys=iter(({"id": 7},)),
@@ -1558,6 +1559,7 @@ class TestBigQueryMirrorMode:
                 query_tags: dict[str, str] | None = None,
             ) -> SnapshotDiffResult:
                 return SnapshotDiffResult(
+                    snapshot_sample=iter(()),
                     added=iter(()),
                     changed=iter(()),
                     removed_keys=iter(({"id": 7},)),

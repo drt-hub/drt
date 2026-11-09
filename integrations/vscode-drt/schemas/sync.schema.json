@@ -127,6 +127,17 @@
           "title": "On Failure",
           "type": "array"
         },
+        "on_stale": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnStaleConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "on_degraded": {
           "anyOf": [
             {
@@ -770,6 +781,49 @@
       "title": "ClickHouseDestinationConfig",
       "type": "object"
     },
+    "ColumnConfig": {
+      "additionalProperties": false,
+      "description": "One portable source column declared by a sync (#761).",
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "timestamp",
+            "date",
+            "json"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "ColumnConfig",
+      "type": "object"
+    },
     "ConditionThreshold": {
       "description": "One comparison for a degraded-sync condition (#784).\n\nExactly one operator is set \u2014 ``{gt: 1}``, ``{eq: 0}``, etc. The metric it\napplies to is the key it sits under in ``on_degraded.conditions``.",
       "properties": {
@@ -835,6 +889,44 @@
         }
       },
       "title": "ConditionThreshold",
+      "type": "object"
+    },
+    "ContractConfig": {
+      "additionalProperties": false,
+      "description": "Run-time enforcement policy for a sync's declared columns (#761).",
+      "properties": {
+        "enforced": {
+          "title": "Enforced",
+          "type": "boolean"
+        },
+        "on_extra_columns": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "ignore",
+            "drop"
+          ],
+          "title": "On Extra Columns",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "dbt",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        }
+      },
+      "required": [
+        "enforced"
+      ],
+      "title": "ContractConfig",
       "type": "object"
     },
     "CursorPaginationConfig": {
@@ -2093,6 +2185,185 @@
       "title": "JiraDestinationConfig",
       "type": "object"
     },
+    "KafkaAuthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "none",
+            "sasl_plain",
+            "sasl_scram",
+            "ssl"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "username_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Username Env"
+        },
+        "password_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password Env"
+        },
+        "scram_mechanism": {
+          "default": "SCRAM-SHA-512",
+          "enum": [
+            "SCRAM-SHA-256",
+            "SCRAM-SHA-512"
+          ],
+          "title": "Scram Mechanism",
+          "type": "string"
+        },
+        "ca_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ca Env"
+        },
+        "cert_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cert Env"
+        },
+        "key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Env"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "KafkaAuthConfig",
+      "type": "object"
+    },
+    "KafkaDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "kafka",
+          "title": "Type",
+          "type": "string"
+        },
+        "bootstrap_servers_env": {
+          "minLength": 1,
+          "title": "Bootstrap Servers Env",
+          "type": "string"
+        },
+        "topic": {
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        },
+        "key_field": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Field"
+        },
+        "value_format": {
+          "const": "json",
+          "default": "json",
+          "title": "Value Format",
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "auth": {
+          "$ref": "#/$defs/KafkaAuthConfig"
+        },
+        "delivery_timeout_s": {
+          "default": 30.0,
+          "maximum": 2147483.647,
+          "minimum": 0.001,
+          "title": "Delivery Timeout S",
+          "type": "number"
+        },
+        "enable_idempotence": {
+          "default": true,
+          "title": "Enable Idempotence",
+          "type": "boolean"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "bootstrap_servers_env",
+        "topic",
+        "auth"
+      ],
+      "title": "KafkaDestinationConfig",
+      "type": "object"
+    },
     "KlaviyoDestinationConfig": {
       "properties": {
         "type": {
@@ -3159,6 +3430,21 @@
           ],
           "default": null,
           "title": "Json Columns"
+        },
+        "manage_table": {
+          "default": false,
+          "title": "Manage Table",
+          "type": "boolean"
+        },
+        "on_schema_change": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "ignore",
+            "append_new_columns"
+          ],
+          "title": "On Schema Change",
+          "type": "string"
         }
       },
       "required": [
@@ -3359,6 +3645,51 @@
       "title": "OnDegradedConfig",
       "type": "object"
     },
+    "OnStaleConfig": {
+      "additionalProperties": false,
+      "description": "``alerts.on_stale`` (#1224) \u2014 sync-level freshness, judged from run history.\n\nUnlike ``on_failure`` / ``on_degraded`` this is not evaluated while a run is\nhappening: a sync that silently stopped running never fires those. It is\nevaluated by whoever calls ``drt status --check`` (cron, CI, ``drt serve``);\ndrt stays daemon-free (ADR 0004). It measures the *sync's* last successful\nrun, so it works for every destination, including SaaS and file ones.",
+      "properties": {
+        "max_age": {
+          "title": "Max Age",
+          "type": "string"
+        },
+        "never_run": {
+          "default": "warn",
+          "enum": [
+            "warn",
+            "error"
+          ],
+          "title": "Never Run",
+          "type": "string"
+        },
+        "channels": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "slack": "#/$defs/SlackAlertConfig",
+                "webhook": "#/$defs/WebhookAlertConfig"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/SlackAlertConfig"
+              },
+              {
+                "$ref": "#/$defs/WebhookAlertConfig"
+              }
+            ]
+          },
+          "title": "Channels",
+          "type": "array"
+        }
+      },
+      "required": [
+        "max_age"
+      ],
+      "title": "OnStaleConfig",
+      "type": "object"
+    },
     "ParquetDestinationConfig": {
       "properties": {
         "type": {
@@ -3402,6 +3733,95 @@
         "path"
       ],
       "title": "ParquetDestinationConfig",
+      "type": "object"
+    },
+    "PipedriveDestinationConfig": {
+      "description": "Pipedrive CRM destination: search by match_field, then create or update.",
+      "properties": {
+        "type": {
+          "const": "pipedrive",
+          "title": "Type",
+          "type": "string"
+        },
+        "api_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Token"
+        },
+        "api_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "PIPEDRIVE_API_TOKEN",
+          "title": "Api Token Env"
+        },
+        "base_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Url"
+        },
+        "object": {
+          "const": "person",
+          "default": "person",
+          "title": "Object",
+          "type": "string"
+        },
+        "match_field": {
+          "default": "email",
+          "enum": [
+            "email",
+            "name",
+            "phone"
+          ],
+          "title": "Match Field",
+          "type": "string"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "PipedriveDestinationConfig",
       "type": "object"
     },
     "PostgresDestinationConfig": {
@@ -3580,6 +4000,21 @@
           ],
           "default": null,
           "title": "Json Columns"
+        },
+        "manage_table": {
+          "default": false,
+          "title": "Manage Table",
+          "type": "boolean"
+        },
+        "on_schema_change": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "ignore",
+            "append_new_columns"
+          ],
+          "title": "On Schema Change",
+          "type": "string"
         }
       },
       "required": [
@@ -4883,6 +5318,48 @@
       "title": "StagedUploadPollConfig",
       "type": "object"
     },
+    "SyncMetaConfig": {
+      "additionalProperties": false,
+      "description": "``meta`` on a sync (#1226): who owns it and how much to trust it.\n\nCatalog metadata for ``drt docs`` and ``drt docs generate --format dbt-exposures``;\nit never changes how a sync runs. ``owner`` and ``maturity`` are authored for\ndisplay, so they appear in the default manifest; ``owner_email`` is personal data\nand is emitted only with ``--full-labels`` (#696).",
+      "properties": {
+        "owner": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner"
+        },
+        "owner_email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner Email"
+        },
+        "maturity": {
+          "default": "high",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ],
+          "title": "Maturity",
+          "type": "string"
+        }
+      },
+      "title": "SyncMetaConfig",
+      "type": "object"
+    },
     "SyncOptions": {
       "properties": {
         "mode": {
@@ -5755,6 +6232,25 @@
       "type": "object"
     }
   },
+  "if": {
+    "properties": {
+      "contract": {
+        "not": {
+          "properties": {
+            "source": {
+              "const": "dbt"
+            }
+          },
+          "required": [
+            "source"
+          ]
+        }
+      }
+    },
+    "required": [
+      "contract"
+    ]
+  },
   "properties": {
     "name": {
       "title": "Name",
@@ -5788,6 +6284,9 @@
           "$ref": "#/$defs/SQSDestinationConfig"
         },
         {
+          "$ref": "#/$defs/KafkaDestinationConfig"
+        },
+        {
           "$ref": "#/$defs/DiscordDestinationConfig"
         },
         {
@@ -5795,6 +6294,9 @@
         },
         {
           "$ref": "#/$defs/HubSpotDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/PipedriveDestinationConfig"
         },
         {
           "$ref": "#/$defs/ZendeskDestinationConfig"
@@ -5919,6 +6421,45 @@
         }
       ],
       "default": null
+    },
+    "meta": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SyncMetaConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "columns": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ColumnConfig"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Portable source columns. Names must be unique; JSON Schema cannot express property-level uniqueness, so drt validate enforces it.",
+      "title": "Columns"
+    },
+    "contract": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContractConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [
@@ -5926,6 +6467,17 @@
     "model",
     "destination"
   ],
+  "then": {
+    "properties": {
+      "columns": {
+        "minItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "columns"
+    ]
+  },
   "title": "SyncConfig",
   "type": "object",
   "$schema": "http://json-schema.org/draft-07/schema#"

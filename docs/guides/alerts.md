@@ -158,6 +158,102 @@ alerts:
 
 For URL-only secrets, prefer `webhook_url_env` / `url_env` to keep secrets out of the YAML and out of any logs that might echo it.
 
+## Staleness: a sync that stopped running (`on_stale`)
+
+`on_failure` and `on_degraded` fire while a run is happening, so they say nothing
+about a sync that **stopped running** (a deleted schedule, an expired credential on
+the scheduler, a runner that is down). `alerts.on_stale` covers that. It measures the
+sync, not the destination table, so it works for every destination, including SaaS
+and file ones:
+
+```yaml
+alerts:
+  on_stale:
+    max_age: 6h              # 30m, 6h, 2d, 1w (or "6 hours"); age of the last *successful* run
+    never_run: warn          # warn | error — a sync with no run on record at all
+    channels:                # same Slack/webhook items as on_failure; used with --notify
+      - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL, message: "drt sync `{sync_name}` is stale: {error}" }
+```
+
+```bash
+drt status --check                       # exit 1 if any sync is stale (or never_run: error)
+drt status --check --select tag:daily    # only some syncs
+drt status --check --output json         # {"ok": ..., "syncs": [{sync, state, severity, age_seconds, ...}]}
+drt status --check --notify              # also send each stale sync's alert to its channels
+```
+
+Rules:
+
+- **Read-only, evaluated by the caller.** drt has no daemon (ADR 0004): cron, CI or
+  any scheduler calls `drt status --check` on whatever cadence you choose.
+- **Only a `success` run resets the clock** (never a dry run). `partial` and `failed`
+  runs do not, because the destination did not receive the full data. The newest
+  success is picked by completion time, so overlapping runs are judged correctly.
+- **A sync that ran but has no success in its recent runs is `stale`**, not `never_run`.
+  `never_run` means no run is on record at all. A last success dated in the future
+  (a runner with a fast clock) is a `clock_skew` error, never "fresh".
+- **It fails closed.** If no selected sync configures `on_stale`, or there are no syncs,
+  the check exits 1 ("Nothing was checked") instead of reporting a meaningless green.
+  Selected syncs without `on_stale` are listed as *not monitored* (`unmonitored` in JSON).
+  While rolling the watchdog out before the syncs are configured, add `--allow-empty`:
+  "nothing monitored" then exits 0 with a warning (a stale sync still exits 1).
+- It reads run history (local, GCS/S3 or warehouse-backed); if history holds no
+  success it falls back to the sync's stored state, which records the run's *start*
+  time, so keep `max_age` longer than the run's duration if you disable history.
+- **Unreadable evidence fails the check.** The state and history stores normally skip a
+  corrupt record with a warning, which a watchdog must not read as "never ran". They now
+  also report it to a side channel that does not depend on logging configuration, and
+  `--check` exits 1 with the count (`unreadable_evidence` in JSON; MCP `ok` is false;
+  `--allow-empty` does not hide it). Covered: a corrupt or non-object `state.json`
+  (local and GCS/S3), malformed history lines (local and object-store), a success whose
+  completion or start timestamp cannot be parsed, and a missing GCS or S3 bucket (probed with
+  a one-item listing, so no extra IAM permission is needed). Warehouse-backed stores raise on
+  query or decode errors, so those fail the command outright. It cannot detect a record
+  that is well-formed but wrong.
+- Unknown keys under `on_stale` (for example `never_runs`) are rejected, so a typo cannot
+  quietly weaken the policy.
+- `--notify` is explicit so a local check never posts to Slack by surprise, and it posts
+  on **every** invocation for every non-OK sync: the watchdog's schedule is your alert
+  cadence (an hourly watchdog posts hourly throughout an outage). The default Slack
+  message reads "is stale". Custom messages can use the same variables as other alerts
+  (`{sync_name}`, `{error}`, `{started_at}`, ...).
+- `--check` cannot be combined with `--history`, `--sync` or `--verbose`.
+- MCP: `drt_get_status(check=True)` returns the same verdict (it never posts to a
+  channel).
+- **Known limit:** a run interrupted gracefully (SIGTERM) after part of the data is
+  recorded as `success` and counts as fresh; history does not yet record interruption.
+
+### A scheduled freshness watchdog (GitHub Actions)
+
+```yaml
+name: drt freshness watchdog
+on:
+  schedule:
+    - cron: "17 * * * *"   # hourly
+  workflow_dispatch:
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install drt-core
+      - name: Check freshness and alert
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # plus the credentials of your state backend (history must be readable here)
+        run: drt status --check --notify
+```
+
+`drt status --check` already exits 1 when nothing is monitored, so an empty or mistyped
+configuration fails the job instead of passing silently.
+
+History must be readable from the runner: use a remote state backend
+([remote state](remote-state.md), [warehouse-backed state](warehouse-state.md)); a fresh
+checkout has no local `.drt/history`.
+
 ## Out of scope (v0.7)
 
 - On-success notifications.

@@ -384,6 +384,39 @@ class TestSnapshotDiffSource:
         assert len(token) == 36
         assert stream.call_args.kwargs["expected_token"] == token
 
+    def test_snapshot_sample_uses_tabledata_list_without_query_job(
+        self, mocked_bigquery: Any
+    ) -> None:
+        client = mocked_bigquery([])
+        client.list_rows.return_value = [{"id": 1, "note": "ok"}]
+        source = BigQuerySource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_managed_table_columns", return_value=["id", "note"]),
+            patch.object(source, "_managed_table_exists_with_client", return_value=False),
+            patch.object(source, "_assert_snapshot_token") as check_token,
+            patch.object(source, "_stream_query", return_value=iter(())),
+        ):
+            result = source.extract_snapshot_diff(
+                "SELECT id, note FROM users",
+                _config(),
+                sync_name="daily-users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+            query_jobs_before_sample = client.query.call_count
+            sample = list(result.snapshot_sample)
+
+        assert sample == [{"id": 1, "note": "ok"}]
+        assert result.snapshot_columns == ["id", "note"]
+        assert query_jobs_before_sample == 1
+        assert client.query.call_count == query_jobs_before_sample
+        client.list_rows.assert_called_once_with(
+            "my-proj._drt._drt_snapshot_daily_users_4c0b66a8_scratch",
+            max_results=1,
+        )
+        assert check_token.call_count == 2
+
     def test_transient_setup_failure_retries_with_stable_token(self, mocked_bigquery: Any) -> None:
         client = mocked_bigquery([])
         source = BigQuerySource()

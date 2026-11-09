@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL as code — no UI, no lock-in, no per-row bill."
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v1.2.1
+- **Current version:** v1.3.0
 
 ## What drt is NOT
 
@@ -150,6 +150,10 @@ drt plan <sync> --out plan.json   # save the full, reviewable change set (read-o
 drt apply plan.json               # apply a plan only if recomputing it gives the same change set (#1217)
 drt plan --all --out-dir plans    # plan every sync (CI); `drt apply plans/` applies the directory (#1219)
 drt deploy github-actions --with-plan  # scaffold the PR plan comment + apply-on-merge workflows (#1219)
+drt plan <sync> --include-values --recipient age1...  # also write an age-encrypted payload next to the plan (opt-in, v1.3, #1221)
+drt apply plan.json --exact        # write exactly the staged rows (CLI only, not MCP); sidecar deleted after success
+drt status --check                 # exit 1 when a sync is stale or never ran (alerts.on_stale, v1.3, #1224)
+drt deploy cloud-run-job | k8s-cronjob  # scheduler scaffolds + docs/guides/scheduling.md (v1.3, #1225)
 drt run --verbose                 # show row-level error details on failure
 drt run --output json             # structured JSON output for CI/scripting
 drt run --log-format json         # structured JSON logging to stderr

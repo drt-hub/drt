@@ -4,6 +4,16 @@ All notable changes to the **drt — Reverse ETL** VS Code extension are documen
 here. This extension versions independently of `drt-core`; each release notes the
 drt-core version its bundled schemas were generated from.
 
+## [0.1.15] - 2026-11-06
+
+Bundled schemas match drt-core 1.3.0 ("Depth and durability").
+
+- Sync schema gains `columns` and `contract` (column contracts, drt-hub/drt#761, `contract.source: dbt` #896),
+  `meta` (owner / maturity, #1226), `alerts.on_stale` (#1224), the `manage_table` / `on_schema_change` keys on
+  the PostgreSQL and MySQL destinations (#760), and the new `pipedrive` destination (#1183).
+- `drt validate` still enforces what JSON Schema cannot express (unique column names, a dbt contract needing an
+  enforced dbt model).
+
 ## [0.1.14] - 2026-10-23
 
 Bundled schemas match drt-core 1.2.1 ("Reviewable syncs"; the 1.2.1 patch does not change the schemas).
@@ -124,6 +134,8 @@ match drt-core 1.1.0.
 
 ## [0.1.12] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: column contracts accept
+  `contract.source: dbt` without a hand-written `columns` block (drt-hub/drt#896).
 - Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` now validates a
   `sync.computed_fields` block (`{field_name: jinja_template}`) for declarative
   derived columns (drt-hub/drt#763).

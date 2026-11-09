@@ -71,6 +71,7 @@ def plan(
     redact_keys: bool = False,
     cursor_value: str | None = None,
     profile_name: str | None = None,
+    manifest_path: str | None = None,
     vars: dict[str, Any] | None = None,
     max_entries: int = 100,
 ) -> dict[str, Any]:
@@ -86,6 +87,7 @@ def plan(
             cursor_value=cursor_value,
             cli_vars=vars,
             profile_name=profile_name,
+            manifest_path=Path(manifest_path) if manifest_path is not None else None,
             project_dir=ctx.project_dir,
         ).plan
     except PlanCliError as e:
@@ -123,6 +125,7 @@ def plan(
         "has_changes": planned.has_changes,
         "summary": document["summary"],
         "guards": document["guards"],
+        "ddl": document.get("ddl", []),
         "destination": shorten(planned.destination, plan_key),
         "created_at": planned.created_at,
         "digest": planned.digest,

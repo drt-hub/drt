@@ -234,6 +234,10 @@ lookups:
 
 ## Complex types (JSON / JSONB / arrays)
 
+PostgreSQL is supported by [managed destination tables](../guides/managed-destination-tables.md):
+opt-in create-if-missing, pre-load drift checks, and nullable column appends. The guide lists the
+required `CREATE` / `ALTER` privileges and the non-atomic DDL boundary.
+
 `dict` and `list` values need different wire formats depending on the destination column: a `JSONB` column wants JSON, a native `ARRAY` column wants the list handed to the driver's array adapter. A bare Python `list` is ambiguous — it could mean either.
 
 **Schema-aware by default (`introspect_schema: true`).** At sync start drt reads `INFORMATION_SCHEMA.COLUMNS` for the target table once and routes each value by the column's real type:

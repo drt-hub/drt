@@ -531,11 +531,22 @@ class PostgresSource:
                 # can never be "changed" with nothing left to differ on.
                 changed = iter(())
 
+        def snapshot_sample() -> Iterator[dict[str, Any]]:
+            yield from self._stream_query(
+                config,
+                _pgsql.SQL("SELECT * FROM {} LIMIT 1").format(
+                    _pgsql.Identifier(config.managed_schema, scratch_table)
+                ),
+                sync_name=sync_name,
+            )
+
         return SnapshotDiffResult(
+            snapshot_sample=snapshot_sample(),
             added=added,
             changed=changed,
             removed_keys=removed_keys,
             is_first_run=is_first_run,
+            snapshot_columns=all_columns,
         )
 
     def _stream_query(

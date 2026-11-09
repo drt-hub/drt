@@ -269,8 +269,15 @@ class StatePersistingObserver:
             status = (
                 "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
             )
+            exact_replay = bool(getattr(result, "_exact_replay", False))
             persist_cursor_value = new_cursor_value if cursor_field else None
             try:
+                if exact_replay:
+                    # Exact replay has no source-derived cursor of its own.
+                    # It still records the run outcome, but carries the prior
+                    # cursor through unchanged.
+                    current = self._state_manager.get_last_sync(sync_name)
+                    persist_cursor_value = current.last_cursor_value if current else None
                 # Never regress an already-persisted watermark (#1074
                 # round 5, Codex review on #1083): a #1074 rollback can
                 # hand this observer an older (or, on a from-scratch
@@ -320,7 +327,12 @@ class StatePersistingObserver:
             except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
                 self._logger.warning("State persist failure for '%s': %s", sync_name, exc)
 
-        if self._watermark_storage is not None and cursor_field and new_cursor_value:
+        if (
+            self._watermark_storage is not None
+            and cursor_field
+            and new_cursor_value
+            and not getattr(result, "_exact_replay", False)
+        ):
             try:
                 # Same never-regress guard as the state_manager branch above
                 # — but only skip on a TRUE regression (current strictly

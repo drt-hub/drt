@@ -472,16 +472,13 @@ def test_write_is_atomic_no_partial_file_on_write_failure(
     touches the *temp* file, cleaned up on the way out (Codex review, #778
     PR round 5)."""
     final_path = project / "target" / "drt" / "run_results.json"
-    real_write_text = Path.write_text
+    from drt.cli.commands import run as run_module
 
-    def _flaky_write_text(self: Path, *args: object, **kwargs: object) -> int:
-        # Suffixed with a run_id (round 6) rather than a fixed name -- match
-        # by the stable prefix/suffix instead of the exact filename.
-        if self.name.startswith(".run_results.json.") and self.name.endswith(".tmp"):
-            raise OSError("simulated disk-full mid-write")
-        return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Path, "write_text", _flaky_write_text)
+    monkeypatch.setattr(
+        run_module.json,
+        "dump",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("simulated disk-full mid-write")),
+    )
 
     result = runner.invoke(app, ["run", "--select", "users"])
 

@@ -257,6 +257,61 @@ class TestEngineHistoryIntegration:
         assert (applied.plan_id, applied.approved_by) == ("sha256:abc", "alice")
         assert (plain.plan_id, plain.approved_by) == (None, None)
 
+    def test_executed_ddl_lands_on_history_and_is_omitted_otherwise(self, tmp_path: Path) -> None:
+        from drt.config.models import DestinationConfig, SyncOptions
+        from drt.destinations.base import SyncResult, TablePreparation
+        from drt.engine.sync import run_sync
+
+        source, _dest, sync, profile = self._setup_sync()
+
+        class ManagedFakeDestination:
+            def prepare_table(
+                self,
+                records: list[dict],
+                config: DestinationConfig,
+                sync_options: SyncOptions,
+                *,
+                dry_run: bool,
+            ) -> TablePreparation:
+                assert sync_options._source_column_types == {}
+                statement = "ALTER TABLE users ADD COLUMN score TEXT NULL"
+                if not dry_run and not sync_options._executed_ddl:
+                    sync_options._executed_ddl.append(statement)
+                    return TablePreparation(
+                        records,
+                        ddl=[statement],
+                        warnings=["managed table warning"],
+                    )
+                return TablePreparation(records)
+
+            def reset_write_state(
+                self, config: DestinationConfig, sync_options: SyncOptions
+            ) -> None:
+                pass
+
+            def load(
+                self,
+                records: list[dict],
+                config: DestinationConfig,
+                sync_options: SyncOptions,
+            ) -> SyncResult:
+                return SyncResult(success=len(records))
+
+        mgr = HistoryManager(tmp_path)
+        run_sync(
+            sync,
+            source,
+            ManagedFakeDestination(),
+            profile,
+            tmp_path,
+            history_manager=mgr,
+        )
+
+        entry = mgr.read(sync_name="history_demo")[0]
+        assert entry.ddl == ["ALTER TABLE users ADD COLUMN score TEXT NULL"]
+        raw = json.loads((tmp_path / ".drt" / "history" / "history_demo.jsonl").read_text())
+        assert raw["ddl"] == entry.ddl
+
     def test_history_skipped_on_dry_run(self, tmp_path: Path) -> None:
         from drt.engine.sync import run_sync
 
@@ -368,6 +423,7 @@ class TestHistoryEntryCorrelationIds:
 
     def test_plan_lineage_round_trips_and_defaults_to_none(self, tmp_path: Path) -> None:
         assert _entry().plan_id is None and _entry().approved_by is None
+        assert _entry().exact is None
         mgr = HistoryManager(tmp_path)
         entry = HistoryEntry(
             sync_name="s",
@@ -379,11 +435,13 @@ class TestHistoryEntryCorrelationIds:
             records_failed=0,
             plan_id="sha256:abc",
             approved_by="alice",
+            exact=True,
         )
         mgr.append(entry)
 
         [loaded] = mgr.read(sync_name="s")
         assert (loaded.plan_id, loaded.approved_by) == ("sha256:abc", "alice")
+        assert loaded.exact is True
 
     def test_absent_optional_fields_are_left_out_of_the_serialized_line(
         self, tmp_path: Path
@@ -396,7 +454,7 @@ class TestHistoryEntryCorrelationIds:
             (tmp_path / ".drt" / "history" / f"{entry.sync_name}.jsonl").read_text().splitlines()
         )
 
-        assert not {"guards", "plan_id", "approved_by"} & set(json.loads(line))
+        assert not {"guards", "plan_id", "approved_by", "exact"} & set(json.loads(line))
 
     def test_a_pre_762_jsonl_line_still_loads(self, tmp_path: Path) -> None:
         """The reader unpacks each line via HistoryEntry(**data); a line

@@ -194,6 +194,26 @@ def test_already_delivered_records_are_filtered_before_load(tmp_path: Path) -> N
     assert dest.calls == [[{"id": 2}]]
 
 
+def test_exact_replay_bypasses_the_idempotency_ledger(tmp_path: Path) -> None:
+    ledger = FakeLedger(pre_delivered={"1"})
+    destination = FakeDestination()
+
+    result = run_sync(
+        _make_sync(idempotency_key="{{ row.id }}"),
+        FakeSource([{"id": 1}]),
+        destination,
+        _make_profile(),
+        tmp_path,
+        idempotency_ledger=ledger,
+        exact=True,
+    )
+
+    assert result.success == 1
+    assert result.skipped_duplicate == 0
+    assert destination.calls == [[{"id": 1}]]
+    assert ledger.calls == []
+
+
 def test_whole_batch_of_duplicates_never_reaches_the_destination(tmp_path: Path) -> None:
     """Every record in the batch already delivered -- the filtered
     record_batch is empty, so the batch loop must `continue` without

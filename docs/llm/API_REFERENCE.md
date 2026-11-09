@@ -42,7 +42,7 @@ query_tagging:            # optional: cost-attribution query tagging (#768)
 ```
 
 With the local backend, history is stored under `.drt/history/<sync_name>.jsonl` (one file per sync, JSONL format).
-Inspect via `drt status --history` or the `drt_get_history` MCP tool.
+Inspect via `drt status --history` or the `drt_get_history` MCP tool. `drt status --check` (or `drt_get_status(check=True)`) judges freshness against `alerts.on_stale` and exits 1 when a sync is stale.
 State backend selection is documented in `docs/guides/remote-state.md`; it is independent of `sync.watermark.storage`.
 
 ### Query tagging (#768)
@@ -444,6 +444,49 @@ sync:
     lifecycle_stage: overwrite
 ```
 
+### Column contracts (`columns:` / `contract:`, v1.3, #761/#896)
+
+```yaml
+columns:                          # optional; presence declares the model's output
+  - {name: email, type: string, description: Primary identifier}
+  - {name: lifetime_value, type: number}   # string|number|integer|boolean|timestamp|date|json
+contract:
+  enforced: true                  # fail the run before anything is loaded
+  on_extra_columns: fail          # fail (default) | ignore | drop
+  # source: dbt                   # derive columns from an ENFORCED dbt model contract
+```
+
+The first extracted batch is checked before the first destination write; a violation is an
+ordinary failed run (and a failed `drt plan`). `source: dbt` resolves an unqualified
+`ref('model')` through `target/manifest.json` once at load time (`--manifest-path` on
+`validate`/`run`/`plan`/`apply`/`docs generate`); a hand-written `columns:` block wins; a model
+without an enforced dbt contract, a missing manifest, an ambiguous ref or an unmappable type is a
+validation error. Guide: `docs/guides/column-contracts.md`.
+
+### Managed destination tables (`manage_table` / `on_schema_change`, v1.3, #760)
+
+PostgreSQL and MySQL destinations only (other destinations reject the keys at validation):
+
+```yaml
+destination:
+  type: postgres
+  table: public.users_enriched
+  upsert_key: [id]
+  manage_table: true              # CREATE TABLE if missing (default false)
+  on_schema_change: fail          # fail (default) | ignore | append_new_columns
+```
+
+Checked after the first batch (and per batch) before the write. Created columns take their type from
+the declared `columns:` (else `TEXT`); added columns are nullable; drt never drops, renames or
+retypes. `drt plan` and `--dry-run` report the DDL without running it; executed DDL is recorded in
+run history. Guide: `docs/guides/managed-destination-tables.md`.
+
+### Catalog metadata (`meta:`, v1.3, #1226)
+
+`meta: {owner, owner_email, maturity: high|medium|low}` has no runtime effect; it feeds the docs
+site, the manifest (schema v5; `owner_email` only with `--full-labels`) and dbt exposures (never the
+e-mail). Freshness is *declared* via `alerts.on_stale` and checked with `drt status --check`.
+
 ### Change guards (`sync.guards`, #1218)
 
 Limits on how much one run may change. They are evaluated against the change set
@@ -789,6 +832,10 @@ alerts:
   on_failure:                      # hard failure (#414) — fires when the sync errors out
     - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL }
     - { type: webhook, url_env: PAGERDUTY_URL }   # webhook covers PagerDuty etc.
+  on_stale:                        # sync-level freshness (#1224) — evaluated by `drt status --check`
+    max_age: 6h                    # age of the last successful run (30m, 6h, 2d, 1w)
+    never_run: warn                # warn | error — no run on record at all
+    channels: []                   # used by `drt status --check --notify`
   on_degraded:                     # partial degradation (#784) — thresholds on post-sync metrics
     channels:                      # same channel types as on_failure; empty => JSON-only (CI)
       - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL }
@@ -1263,6 +1310,38 @@ when one vendor quota spans regional hosts or independent accounts share a
 host. Configs with the same explicit key share one limiter bucket.
 
 ---
+
+### `type: pipedrive`
+
+No extra package is needed.
+
+```yaml
+destination:
+  type: pipedrive
+  api_token_env: PIPEDRIVE_API_TOKEN     # default; or api_token (prefer the env var)
+  base_url: https://api.pipedrive.com/api/v2   # optional, https only: this is the default
+  object: person                         # only person is supported for now
+  match_field: email                     # email | name | phone: column for the exact search
+  retry:                                 # optional: overrides sync.retry as a whole
+    max_attempts: 3
+    initial_backoff: 1.0
+  rate_limit:                            # optional: overrides sync.rate_limit as a whole
+    requests_per_second: 5
+sync:
+  mode: full                             # full/incremental/upsert; replace/mirror rejected
+  match_policy: upsert                   # upsert | update_only | create_only
+  field_mappings:
+    customer_tier: 9d5bd2d0f3a3c5ee1b2c3d4e5f60718293a4b5c6   # Pipedrive custom-field key
+```
+
+Each row is looked up with an exact search on `match_field`; one match is updated
+(`PATCH`), no match is created (`POST`), and more than one match is a RowError with
+nothing written. `name`, `owner_id`, `org_id`, `visible_to` and `label_ids` pass
+through, `email`/`phone` become `emails`/`phones` lists (sent only when a person is created), and every other column goes to
+`custom_fields`, so `field_mappings` must rename it to Pipedrive's 40-character key (an
+unknown key is rejected by Pipedrive and becomes a per-row error). The token is sent in
+the `x-api-token` header. Each row costs about 25 API tokens (search 20 + write 5). See
+[Pipedrive connector docs](../connectors/pipedrive.md).
 
 ### `type: sqs`
 

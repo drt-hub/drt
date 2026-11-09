@@ -124,6 +124,45 @@ async def test_validate_returns_valid_syncs(server: FastMCP) -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_preserves_computed_field_brackets(tmp_path: Path) -> None:
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "computed.yml").write_text(
+        "name: computed\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/api\n"
+        "sync:\n"
+        "  computed_fields:\n"
+        "    'amount[usd]': '{{'\n"
+    )
+
+    result = await call(create_server(tmp_path), "drt_validate")
+
+    assert any("computed_fields['amount[usd]']" in error for error in result["errors"]["computed"])
+
+
+def test_validate_only_strips_controls_from_ordinary_errors(tmp_path: Path) -> None:
+    from drt.config.parser import SyncLoadResult
+    from drt.mcp.tools.validate import validate as validate_tool
+
+    ordinary_error = "amount[usd] " + "x" * 1600 + "\nnext"
+
+    class _Context:
+        project_dir = tmp_path
+
+        @staticmethod
+        def load_syncs_safe(manifest_path: str | None = None) -> SyncLoadResult:
+            return SyncLoadResult(errors={"computed": [ordinary_error]})
+
+    response = validate_tool(_Context())
+
+    assert response["errors"]["computed"] == [ordinary_error.replace("\n", "?")]
+
+
+@pytest.mark.asyncio
 async def test_validate_warns_on_hardcoded_secret(tmp_path: Path) -> None:
     """Matches ``drt validate``'s non-strict behaviour: a hardcoded secret is
     a warning, not an error — the sync stays valid (#870)."""
@@ -890,6 +929,14 @@ async def test_get_schema_sync(server: FastMCP) -> None:
     schema = await call(server, "drt_get_schema", schema_type="sync")
     assert isinstance(schema, dict)
     assert "$defs" in schema or "properties" in schema
+    assert "columns" in schema["properties"]
+    assert "contract" in schema["properties"]
+    assert schema["then"] == {
+        "properties": {"columns": {"type": "array", "minItems": 1}},
+        "required": ["columns"],
+    }
+    assert schema["$defs"]["ColumnConfig"]["properties"]["name"]["minLength"] == 1
+    assert schema["$defs"]["ColumnConfig"]["properties"]["name"]["pattern"] == r"\S"
 
 
 @pytest.mark.asyncio
@@ -995,6 +1042,7 @@ async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
         result = SyncResult()
         result.success = 1
         result.guards = {"tripped": [{"guard": "max_deletes"}], "forced": True}
+        result.ddl = ["ALTER TABLE users ADD COLUMN score BIGINT"]
         return result
 
     monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
@@ -1009,6 +1057,7 @@ async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
     assert result["dry_run"] is True
     assert result["success"] == 1
     assert result["guards"]["forced"] is True
+    assert result["ddl"] == ["ALTER TABLE users ADD COLUMN score BIGINT"]
 
 
 # ---------------------------------------------------------------------------

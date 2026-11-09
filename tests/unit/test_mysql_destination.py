@@ -145,6 +145,47 @@ class TestUpsertSql:
             "SELECT 1 FROM `mydb`.`scores` WHERE `user_id` = %s AND `company_id` = %s LIMIT 1"
         )
 
+    def test_upsert_quotes_embedded_backticks_everywhere(self) -> None:
+        hostile = "profile.name`; DROP TABLE audit; --"
+        other = "note`field"
+        quoted = "`profile.name``; DROP TABLE audit; --`"
+        sql = MySQLDestination._build_upsert_sql(
+            table="app.users",
+            columns=["id`key", hostile, other],
+            update_cols=[hostile, other],
+            fill_cols={hostile},
+        )
+        assert f"(`id``key`, {quoted}, `note``field`)" in sql
+        assert (
+            f"{quoted} = IF({quoted} IS NULL OR TRIM(CAST({quoted} AS CHAR)) = '', "
+            f"VALUES({quoted}), {quoted})"
+        ) in sql
+        assert "`note``field` = VALUES(`note``field`)" in sql
+        assert "`profile.name`; DROP TABLE" not in sql
+
+    def test_update_only_quotes_embedded_backticks_in_set_and_key_predicates(self) -> None:
+        hostile = "profile.name`; DROP TABLE audit; --"
+        sql = MySQLDestination._build_update_only_sql(
+            table="app.users",
+            update_cols=[hostile],
+            upsert_key=["id`key"],
+            fill_cols={hostile},
+        )
+        quoted = "`profile.name``; DROP TABLE audit; --`"
+        assert sql == (
+            f"UPDATE `app`.`users` SET {quoted} = IF({quoted} IS NULL OR "
+            f"TRIM(CAST({quoted} AS CHAR)) = '', %s, {quoted}) WHERE `id``key` = %s"
+        )
+
+    def test_match_exists_quotes_embedded_backticks_in_key_predicates(self) -> None:
+        sql = MySQLDestination._build_match_exists_sql(
+            table="app.users",
+            upsert_key=["tenant`id", "user`id"],
+        )
+        assert sql == (
+            "SELECT 1 FROM `app`.`users` WHERE `tenant``id` = %s AND `user``id` = %s LIMIT 1"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Match policy (#757)
@@ -771,6 +812,16 @@ class TestInsertSql:
         )
         assert "INSERT INTO `mydb`.`scores`" in sql
         assert "`mydb.scores`" not in sql
+
+    def test_insert_quotes_embedded_backticks_in_columns(self) -> None:
+        sql = MySQLDestination._build_insert_sql(
+            table="app.users",
+            columns=["id", "profile.name`; DROP TABLE audit; --"],
+        )
+        assert sql == (
+            "INSERT INTO `app`.`users` (`id`, `profile.name``; DROP TABLE audit; --`) "
+            "VALUES (%s, %s)"
+        )
 
 
 class TestMySQLReplaceMode:

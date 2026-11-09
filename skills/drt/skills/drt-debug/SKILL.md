@@ -135,3 +135,9 @@ drt ships anonymous opt-in telemetry (PostHog Cloud EU, off by default, v0.7.2+)
 - `docs/llm/CONTEXT.md` for architecture and key concepts.
 - `docs/llm/API_REFERENCE.md` for all config fields.
 - `docs/connectors/` for per-connector details (auth, sync modes, gotchas).
+
+## v1.3 errors and checks
+
+- **`Column contract violation: ...`**: the model's output no longer matches the sync's `columns:` (missing, extra or retyped column). Fix the model or the declaration; with `contract.source: dbt` the manifest may be stale (`dbt build`), or the dbt model has no *enforced* contract.
+- **`on_schema_change` / managed-table errors**: with `on_schema_change: fail` a new source column is refused before any write; use `append_new_columns` to add it (nullable), or add the column yourself. A missing `CREATE`/`ALTER` privilege is named in the message. drt never drops or retypes a column.
+- **`drt status --check`**: exit 1 means a sync is stale (older than `alerts.on_stale.max_age`) or has never run; read the per-sync lines before re-running anything. An unreadable state or history store is reported, not hidden.

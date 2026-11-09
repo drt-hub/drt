@@ -39,6 +39,35 @@ when absent:
 - ``guards``: the run-time guard outcome, ``{"tripped": [...], "forced": bool}``.
 - ``approved_by``: who approved the apply. A person's name, so — like the other
   labels redacted by default (#696) — it is emitted only with ``--full-labels``.
+
+Schema v5 (#1226, ADR 0015) is a pure superset of v4 — two optional keys on each
+sync, omitted (never ``null``) when absent:
+
+- ``meta``: ``{owner, owner_email, maturity}`` from the sync's ``meta`` block.
+  ``owner_email`` is personal data and appears only with ``--full-labels``.
+- ``freshness``: the *declared* ``alerts.on_stale`` contract
+  (``{max_age_seconds, never_run}``). Deliberately not a verdict: a fresh/stale
+  judgement depends on the clock and would make regeneration non-deterministic (#697).
+
+Schema v6 (#761, ADR 0017) is a pure superset of v5 — one optional key on each
+sync, omitted when absent:
+
+- ``columns``: the model-output declaration as ``{name, type, description?}``.
+  This is repository configuration, not run state, so regeneration remains
+  byte-identical. Manifests from v1-v5 continue to load with no columns.
+
+Schema v7 (ADR 0019) is a pure superset of v6. All additions are optional and
+omitted when absent, so manifests from v1-v6 continue to load unchanged:
+
+- ``runs[].exact`` records exact-replay applies.
+- ``destinations[].plan`` carries the deterministic declaration from
+  :mod:`drt.engine.plan_coverage`.
+- ``syncs[].plan`` applies sync-level planner blockers to that destination
+  declaration.
+- ``syncs[].columns_source`` distinguishes dbt-derived and hand-written
+  column declarations.
+- ``syncs[].manage_table`` / ``on_schema_change`` carry explicitly
+  authored managed-table settings.
 """
 
 from __future__ import annotations
@@ -46,9 +75,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 
 EdgeKind = Literal["source_to_sync", "sync_to_destination", "lookup"]
+PlanStatus = Literal["available", "partial", "api-reads", "needs-api-diff", "unavailable"]
+ColumnsSource = Literal["dbt", "declared"]
+SchemaChangePolicy = Literal["fail", "ignore", "append_new_columns"]
 
 
 @dataclass(frozen=True)
@@ -64,10 +96,19 @@ class Source:
 
 
 @dataclass(frozen=True)
+class DestinationPlan:
+    """Declared ``drt plan`` coverage for a built-in destination (schema v7)."""
+
+    status: PlanStatus
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class Destination:
     name: str  # synthesized node id (stable across runs)
     type: str
     label: str  # human-readable describe(), e.g. "slack (#alerts)"
+    plan: DestinationPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +149,24 @@ class SyncRun:
     plan_id: str | None = None
     guards: dict[str, Any] | None = None
     approved_by: str | None = None  # only populated with --full-labels
+    exact: bool | None = None  # schema v7; omitted for ordinary runs
+
+
+@dataclass(frozen=True)
+class SyncMeta:
+    """Catalog metadata from a sync's ``meta`` block (schema v5, #1226)."""
+
+    owner: str | None = None
+    owner_email: str | None = None  # only populated with --full-labels
+    maturity: str = "high"  # "high" | "medium" | "low"
+
+
+@dataclass(frozen=True)
+class SyncFreshness:
+    """The declared ``alerts.on_stale`` contract (schema v5, #1226): not a verdict."""
+
+    max_age_seconds: int
+    never_run: str = "warn"  # "warn" | "error"
 
 
 @dataclass(frozen=True)
@@ -126,6 +185,15 @@ class SyncField:
 
 
 @dataclass(frozen=True)
+class SyncColumn:
+    """A portable model-output column declaration (schema v6, #761)."""
+
+    name: str
+    type: str
+    description: str | None = None
+
+
+@dataclass(frozen=True)
 class Sync:
     name: str
     source: str  # Source.name
@@ -139,6 +207,13 @@ class Sync:
     dlq_depth: int | None = None  # None when state excluded
     # Defensive None: normal filesystem-backed syncs have a fingerprint.
     config_hash: str | None = None
+    meta: SyncMeta | None = None  # schema v5
+    freshness: SyncFreshness | None = None  # schema v5
+    columns: tuple[SyncColumn, ...] = ()  # schema v6; declaration order
+    columns_source: ColumnsSource | None = None  # schema v7; only with columns
+    plan: DestinationPlan | None = None  # schema v7; destination coverage + sync blockers
+    manage_table: bool | None = None  # schema v7; explicitly authored only
+    on_schema_change: SchemaChangePolicy | None = None  # schema v7; explicitly authored only
 
 
 @dataclass(frozen=True)
@@ -172,9 +247,7 @@ class Manifest:
             ),
             "syncs": [_sync_to_dict(s) for s in self.syncs],
             "sources": [{"name": s.name, "type": s.type} for s in self.sources],
-            "destinations": [
-                {"name": d.name, "type": d.type, "label": d.label} for d in self.destinations
-            ],
+            "destinations": [_destination_to_dict(d) for d in self.destinations],
             "edges": [{"kind": e.kind, "from": e.from_, "to": e.to} for e in self.edges],
         }
 
@@ -190,7 +263,7 @@ class Manifest:
             project=project,
             syncs=[_sync_from_dict(s) for s in data.get("syncs", [])],
             sources=[Source(**s) for s in data.get("sources", [])],
-            destinations=[Destination(**d) for d in data.get("destinations", [])],
+            destinations=[_destination_from_dict(d) for d in data.get("destinations", [])],
             edges=[
                 Edge(kind=e["kind"], from_=e["from"], to=e["to"]) for e in data.get("edges", [])
             ],
@@ -224,6 +297,42 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
         ]
     if s.dlq_depth is not None:
         d["dlq_depth"] = s.dlq_depth
+    if s.meta is not None:
+        d["meta"] = {
+            key: value
+            for key, value in (
+                ("owner", s.meta.owner),
+                ("owner_email", s.meta.owner_email),
+                ("maturity", s.meta.maturity),
+            )
+            if value is not None
+        }
+    if s.freshness is not None:
+        d["freshness"] = {
+            "max_age_seconds": s.freshness.max_age_seconds,
+            "never_run": s.freshness.never_run,
+        }
+    if s.columns:
+        d["columns"] = [
+            {
+                key: value
+                for key, value in (
+                    ("name", column.name),
+                    ("type", column.type),
+                    ("description", column.description),
+                )
+                if value is not None
+            }
+            for column in s.columns
+        ]
+    if s.columns_source is not None:
+        d["columns_source"] = s.columns_source
+    if s.plan is not None:
+        d["plan"] = {"status": s.plan.status, "reason": s.plan.reason}
+    if s.manage_table is not None:
+        d["manage_table"] = s.manage_table
+    if s.on_schema_change is not None:
+        d["on_schema_change"] = s.on_schema_change
     return d
 
 
@@ -246,12 +355,119 @@ def _run_to_dict(r: SyncRun) -> dict[str, Any]:
         d["guards"] = r.guards
     if r.approved_by is not None:
         d["approved_by"] = r.approved_by
+    if r.exact is not None:
+        d["exact"] = r.exact
     return d
+
+
+def _destination_to_dict(destination: Destination) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "name": destination.name,
+        "type": destination.type,
+        "label": destination.label,
+    }
+    if destination.plan is not None:
+        data["plan"] = {
+            "status": destination.plan.status,
+            "reason": destination.plan.reason,
+        }
+    return data
+
+
+def _destination_from_dict(data: dict[str, Any]) -> Destination:
+    unknown = set(data) - {
+        "name",
+        "type",
+        "label",
+        "plan",
+    }
+    if unknown:
+        raise ValueError(f"manifest destinations[] has unknown key(s): {sorted(unknown)}")
+    plan_data = data.get("plan")
+    if plan_data is not None:
+        if (
+            not isinstance(plan_data, dict)
+            or set(plan_data) != {"status", "reason"}
+            or plan_data.get("status")
+            not in {"available", "partial", "api-reads", "needs-api-diff", "unavailable"}
+            or not isinstance(plan_data.get("reason"), str)
+        ):
+            raise ValueError("manifest destinations[].plan is malformed")
+        plan = DestinationPlan(**plan_data)
+    else:
+        plan = None
+    return Destination(
+        name=data["name"],
+        type=data["type"],
+        label=data["label"],
+        plan=plan,
+    )
+
+
+def _meta_from_dict(data: Any) -> SyncMeta | None:
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ValueError("manifest syncs[].meta must be an object")
+    unknown = set(data) - {"owner", "owner_email", "maturity"}
+    if unknown:
+        raise ValueError(f"manifest syncs[].meta has unknown key(s): {sorted(unknown)}")
+    for key in ("owner", "owner_email"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            raise ValueError(f"manifest syncs[].meta.{key} must be a string")
+    if data.get("maturity", "high") not in {"high", "medium", "low"}:
+        raise ValueError("manifest syncs[].meta.maturity must be high, medium or low")
+    return SyncMeta(**data)
+
+
+def _freshness_from_dict(data: Any) -> SyncFreshness | None:
+    if data is None:
+        return None
+    if (
+        not isinstance(data, dict)
+        or set(data) - {"max_age_seconds", "never_run"}
+        or not isinstance(data.get("max_age_seconds"), int)
+        or isinstance(data.get("max_age_seconds"), bool)
+        or data.get("never_run", "warn") not in {"warn", "error"}
+    ):
+        raise ValueError("manifest syncs[].freshness is malformed")
+    return SyncFreshness(**data)
 
 
 def _sync_from_dict(d: dict[str, Any]) -> Sync:
     state_data = d.get("state")
     state = SyncStateSnapshot(**state_data) if state_data else None
+    columns_source = d.get("columns_source")
+    if columns_source is not None and columns_source not in {"dbt", "declared"}:
+        raise ValueError("manifest syncs[].columns_source must be dbt or declared")
+    plan_data = d.get("plan")
+    if plan_data is not None:
+        if (
+            not isinstance(plan_data, dict)
+            or set(plan_data) != {"status", "reason"}
+            or plan_data.get("status")
+            not in {"available", "partial", "api-reads", "needs-api-diff", "unavailable"}
+            or not isinstance(plan_data.get("reason"), str)
+        ):
+            raise ValueError("manifest syncs[].plan is malformed")
+        plan = DestinationPlan(**plan_data)
+    else:
+        plan = None
+    manage_table = d.get("manage_table")
+    if manage_table is not None and not isinstance(manage_table, bool):
+        raise ValueError("manifest syncs[].manage_table must be a boolean")
+    on_schema_change = d.get("on_schema_change")
+    if on_schema_change is not None and on_schema_change not in {
+        "fail",
+        "ignore",
+        "append_new_columns",
+    }:
+        raise ValueError("manifest syncs[].on_schema_change is malformed")
+    runs: list[SyncRun] = []
+    for run_data in d.get("runs", []):
+        if "exact" in run_data and not isinstance(run_data["exact"], bool):
+            raise ValueError("manifest syncs[].runs[].exact must be a boolean")
+        runs.append(SyncRun(**{**run_data, "errors": tuple(run_data.get("errors", []))}))
     return Sync(
         name=d["name"],
         source=d["source"],
@@ -260,10 +476,15 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         description=d.get("description", ""),
         tags=tuple(d.get("tags", [])),
         state=state,
-        runs=tuple(
-            SyncRun(**{**r, "errors": tuple(r.get("errors", []))}) for r in d.get("runs", [])
-        ),
+        runs=tuple(runs),
         fields=tuple(SyncField(**f) for f in d.get("fields", [])),
         dlq_depth=d.get("dlq_depth"),
         config_hash=d.get("config_hash"),
+        meta=_meta_from_dict(d.get("meta")),
+        freshness=_freshness_from_dict(d.get("freshness")),
+        columns=tuple(SyncColumn(**column) for column in d.get("columns", [])),
+        columns_source=columns_source,
+        plan=plan,
+        manage_table=manage_table,
+        on_schema_change=on_schema_change,
     )

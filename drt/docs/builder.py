@@ -6,24 +6,34 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 from drt import __version__
 from drt._redaction import redact_error_text as _redact_error_text
-from drt.config.fingerprint import sync_fingerprints
+from drt.config.duration import parse_max_age
+from drt.config.fingerprint import resolved_sync_fingerprint
 from drt.config.models import SyncConfig
 from drt.config.parser import load_project, load_syncs_safe
 from drt.docs.manifest import (
     SCHEMA_VERSION,
+    ColumnsSource,
     Destination,
+    DestinationPlan,
     Edge,
     Manifest,
     Project,
+    SchemaChangePolicy,
     Source,
     Sync,
+    SyncColumn,
     SyncField,
+    SyncFreshness,
+    SyncMeta,
     SyncRun,
     SyncStateSnapshot,
 )
+from drt.engine.plan import unsupported_reason
+from drt.engine.plan_coverage import plan_coverage
 from drt.state.factory import build_state_bundle
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import SyncState
@@ -177,9 +187,33 @@ def _sync_runs(entries: list[HistoryEntry], redact: bool) -> tuple[SyncRun, ...]
                 guards=e.guards,
                 # A person's name: same opt-in as the other redacted labels (#696).
                 approved_by=None if redact else e.approved_by,
+                exact=e.exact,
             )
         )
     return tuple(runs)
+
+
+def _sync_meta(sync_cfg: SyncConfig, full_labels: bool) -> SyncMeta | None:
+    """The sync's ``meta`` block; ``owner_email`` is personal data (--full-labels only)."""
+    meta = sync_cfg.meta
+    if meta is None:
+        return None
+    return SyncMeta(
+        owner=meta.owner,
+        owner_email=meta.owner_email if full_labels else None,
+        maturity=meta.maturity,
+    )
+
+
+def _sync_freshness(sync_cfg: SyncConfig) -> SyncFreshness | None:
+    """The declared ``alerts.on_stale`` contract. A declaration, never a time-dependent verdict."""
+    on_stale = sync_cfg.alerts.on_stale if sync_cfg.alerts is not None else None
+    if on_stale is None:
+        return None
+    return SyncFreshness(
+        max_age_seconds=int(parse_max_age(on_stale.max_age).total_seconds()),
+        never_run=on_stale.never_run,
+    )
 
 
 def _declared_fields(sync_cfg: SyncConfig) -> tuple[SyncField, ...]:
@@ -206,7 +240,41 @@ def _declared_fields(sync_cfg: SyncConfig) -> tuple[SyncField, ...]:
     return tuple(sorted(by_name.values(), key=lambda f: f.name))
 
 
-def collect_dbt_exposure_inputs(project_dir: Path = Path(".")) -> DbtExposureInputs:
+def _declared_columns(sync_cfg: SyncConfig) -> tuple[SyncColumn, ...]:
+    """Portable model-output columns in authored order (schema v6, #761)."""
+    return tuple(
+        SyncColumn(name=column.name, type=column.type, description=column.description)
+        for column in (sync_cfg.columns or [])
+    )
+
+
+def _columns_source(sync_cfg: SyncConfig) -> ColumnsSource | None:
+    """Where the effective column declaration came from (schema v7)."""
+    if not sync_cfg.columns:
+        return None
+    return sync_cfg._columns_source or "declared"
+
+
+def _managed_table_declaration(
+    sync_cfg: SyncConfig,
+) -> tuple[bool | None, SchemaChangePolicy | None]:
+    """Explicitly authored managed-table settings, never Pydantic defaults."""
+    destination = sync_cfg.destination
+    fields_set: set[str] = getattr(destination, "model_fields_set", set())
+    manage_table = (
+        bool(getattr(destination, "manage_table")) if "manage_table" in fields_set else None
+    )
+    on_schema_change = (
+        cast(SchemaChangePolicy, getattr(destination, "on_schema_change"))
+        if "on_schema_change" in fields_set
+        else None
+    )
+    return manage_table, on_schema_change
+
+
+def collect_dbt_exposure_inputs(
+    project_dir: Path = Path("."), manifest_path: Path | None = None
+) -> DbtExposureInputs:
     """Collect deterministic, ref-only inputs for dbt exposure generation.
 
     ``Sync.model`` is intentionally absent from the public docs manifest: raw
@@ -219,7 +287,11 @@ def collect_dbt_exposure_inputs(project_dir: Path = Path(".")) -> DbtExposureInp
 
     model_refs: dict[str, str] = {}
     skipped: dict[str, str] = {}
-    result = load_syncs_safe(project_dir)
+    result = (
+        load_syncs_safe(project_dir)
+        if manifest_path is None
+        else load_syncs_safe(project_dir, manifest_path=manifest_path)
+    )
     for sync in sorted(result.syncs, key=lambda item: item.name):
         model_ref = parse_ref(sync.model)
         if model_ref is None:
@@ -240,6 +312,7 @@ def build_manifest(
     include_state: bool = False,
     full_labels: bool = False,
     history_depth: int = 10,
+    manifest_path: Path | None = None,
 ) -> Manifest:
     """Build a `Manifest` from sync YAMLs + project config under *project_dir*.
 
@@ -260,8 +333,14 @@ def build_manifest(
     repo like the rest of the catalog, so they are always emitted.
     """
     project = load_project(project_dir)
-    syncs_result = load_syncs_safe(project_dir)
-    fingerprints = sync_fingerprints(project_dir)
+    syncs_result = (
+        load_syncs_safe(project_dir)
+        if manifest_path is None
+        else load_syncs_safe(project_dir, manifest_path=manifest_path)
+    )
+    fingerprints = {
+        sync.name: resolved_sync_fingerprint(sync, project_dir) for sync in syncs_result.syncs
+    }
 
     states: dict[str, SyncState] = {}
     dlq_depths: dict[str, int] = {}
@@ -286,14 +365,23 @@ def build_manifest(
     for sync_cfg in syncs_result.syncs:
         dest = sync_cfg.destination
         dest_id = dest_ids[f"{dest.type}|{dest.describe()}"]
+        coverage = plan_coverage(sync_cfg.destination.type)
+        destination_plan = (
+            DestinationPlan(status=coverage.status, reason=coverage.reason)
+            if coverage is not None
+            else None
+        )
         if dest_id not in destinations:
             destinations[dest_id] = Destination(
                 name=dest_id,
                 type=sync_cfg.destination.type,
                 label=_destination_label(sync_cfg, full_labels),
+                plan=destination_plan,
             )
 
         sync_state = states.get(sync_cfg.name)
+        blocker = unsupported_reason(sync_cfg)
+        manage_table, on_schema_change = _managed_table_declaration(sync_cfg)
         syncs.append(
             Sync(
                 name=sync_cfg.name,
@@ -311,6 +399,17 @@ def build_manifest(
                 fields=_declared_fields(sync_cfg),
                 dlq_depth=dlq_depths.get(sync_cfg.name, 0) if include_state else None,
                 config_hash=fingerprints.get(sync_cfg.name),
+                meta=_sync_meta(sync_cfg, full_labels),
+                freshness=_sync_freshness(sync_cfg),
+                columns=_declared_columns(sync_cfg),
+                columns_source=_columns_source(sync_cfg),
+                plan=(
+                    DestinationPlan(status="unavailable", reason=blocker)
+                    if blocker is not None
+                    else destination_plan
+                ),
+                manage_table=manage_table,
+                on_schema_change=on_schema_change,
             )
         )
 
@@ -381,7 +480,16 @@ _SENSITIVE_KEY_RE = re.compile(
 # scalar on the same line (block scalars / nested maps have no inline value).
 _YAML_KV_RE = re.compile(r"^(\s*(?:-\s+)?)([A-Za-z0-9_.\-]+)(\s*:\s+)(\S.*)$")
 _REDACTION = "'« redacted »'"
+# `key: value` pairs inside a one-line flow mapping, e.g. `meta: {owner: A, owner_email: b@c}`.
+_FLOW_PAIR_RE = re.compile(r"([A-Za-z0-9_.\-]+)(\s*:\s*)([^,{}\[\]]+)")
 _MAX_YAML_BYTES = 64 * 1024  # a sync definition beyond this is pathological
+
+
+def _mask_flow_pair(match: re.Match[str]) -> str:
+    key, sep, _value = match.groups()
+    if key.endswith("_env") or not _SENSITIVE_KEY_RE.search(key):
+        return match.group(0)
+    return f"{key}{sep}{_REDACTION}"
 
 
 def _redact_sensitive_yaml(raw: str) -> tuple[str, bool]:
@@ -399,7 +507,14 @@ def _redact_sensitive_yaml(raw: str) -> tuple[str, bool]:
         if m:
             prefix, key, sep, value = m.groups()
             block_or_anchor = value[:1] in {"|", ">", "&", "*", "#"}
-            if key.endswith("_env") or block_or_anchor or not _SENSITIVE_KEY_RE.search(key):
+            if value[:1] in {"{", "["} and not (
+                _SENSITIVE_KEY_RE.search(key) and not key.endswith("_env")
+            ):
+                # A flow collection hides its own keys from the line rule above.
+                masked = _FLOW_PAIR_RE.sub(_mask_flow_pair, value)
+                redacted = redacted or masked != value
+                out.append(f"{prefix}{key}{sep}{masked}")
+            elif key.endswith("_env") or block_or_anchor or not _SENSITIVE_KEY_RE.search(key):
                 out.append(line)
             else:
                 out.append(f"{prefix}{key}{sep}{_REDACTION}")
@@ -456,6 +571,13 @@ def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, tuple[st
             display = encoded[:_MAX_YAML_BYTES].decode("utf-8", "ignore").rstrip()
             display += f"\n# … truncated by drt docs (file exceeds {_MAX_YAML_BYTES // 1024} KiB)"
         display, redacted = _redact_sensitive_yaml(display)
+        # Belt and braces: the line rules cannot see every YAML shape (anchors, block
+        # scalars, odd flow layouts), so the owner's e-mail address is also removed by value.
+        meta_block = parsed.get("meta")
+        email = meta_block.get("owner_email") if isinstance(meta_block, dict) else None
+        if isinstance(email, str) and email and email in display:
+            display = display.replace(email, "« redacted »")
+            redacted = True
         if redacted:
             display = (
                 "# drt docs: inline secrets / PII masked — prefer *_env references\n" + display

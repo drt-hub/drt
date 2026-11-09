@@ -42,13 +42,17 @@ class PlanContext:
     # In-memory only (never written to plan.json): the window the plan was
     # computed over, so `drt apply` can run the same window.
     cursor_value_used: str | None = None
+    # In-memory only and populated solely for ``plan --include-values``.
+    # Rows are already through all destination-facing transforms, including
+    # run-specific metadata columns from the plan run.
+    payload_records: list[dict[str, Any]] | None = None
 
 
 def sync_fingerprint(sync: SyncConfig, project_dir: Path = Path(".")) -> str:
     """Hash of the sync file *and* the model SQL it references (#772's fingerprint)."""
-    from drt.config.fingerprint import sync_fingerprints
+    from drt.config.fingerprint import resolved_sync_fingerprint
 
-    from_files = sync_fingerprints(project_dir).get(sync.name)
+    from_files = resolved_sync_fingerprint(sync, project_dir)
     return f"sha256:{from_files}" if from_files else config_hash(sync)
 
 
@@ -130,8 +134,10 @@ def compute_plan(
     cursor_value: str | None = None,
     cli_vars: dict[str, Any] | None = None,
     profile_name: str | None = None,
+    manifest_path: Path | None = None,
     project_dir: Path = Path("."),
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
+    include_values: bool = False,
 ) -> PlanContext:
     """Plan one sync, read-only. Raises :class:`PlanCliError` when it cannot run at all.
 
@@ -160,7 +166,11 @@ def compute_plan(
 
     try:
         project_vars = resolve_vars(project.vars, cli_vars)
-        syncs = load_syncs(project_dir, vars=project_vars)
+        syncs = (
+            load_syncs(project_dir, vars=project_vars)
+            if manifest_path is None
+            else load_syncs(project_dir, vars=project_vars, manifest_path=manifest_path)
+        )
     except (VarError, ValueError) as e:
         raise PlanCliError(str(e)) from e
 
@@ -180,27 +190,35 @@ def compute_plan(
         # unavailable and carries on, and MCP answers `available: false`.
         diff = DiffResult(supported=False, fallback_reason=blocker)
         cursor_value_used = None
+        planned_ddl: list[str] = []
     else:
         if preflight is not None:
             # Cheap checks that must run before the (possibly expensive) extraction.
             preflight(project, state_bundle, sync)
         try:
-            result = run_sync(
-                sync,
-                get_source(profile),
-                get_destination(sync),
-                profile,
-                project_dir,
-                True,
-                state_bundle.state,
-                watermark_storage=get_watermark_storage(sync, project_dir),
-                cursor_value_override=cursor_value if sync.sync.mode == "incremental" else None,
-                compute_diff=True,
-                # Not a sample: a plan needs every changed key.
-                diff_limit=sys.maxsize,
-                vars=project_vars,
-                query_tagging=project.query_tagging,
-            )
+            sync.sync._capture_plan_payload = include_values
+            sync.sync._planning = True
+            try:
+                result = run_sync(
+                    sync,
+                    get_source(profile),
+                    get_destination(sync),
+                    profile,
+                    project_dir,
+                    True,
+                    state_bundle.state,
+                    watermark_storage=get_watermark_storage(sync, project_dir),
+                    cursor_value_override=(
+                        cursor_value if sync.sync.mode == "incremental" else None
+                    ),
+                    compute_diff=True,
+                    # Not a sample: a plan needs every changed key.
+                    diff_limit=sys.maxsize,
+                    vars=project_vars,
+                    query_tagging=project.query_tagging,
+                )
+            finally:
+                sync.sync._planning = False
         except Exception as e:
             raise PlanCliError(f"Could not compute a plan for '{sync_name}': {e}") from e
 
@@ -208,13 +226,23 @@ def compute_plan(
             raise PlanCliError(f"No diff was produced for '{sync_name}'.")
         if result.failed or result.interrupted:
             # A diff over a partial extraction would read as "nothing else changes".
+            errors = getattr(result, "errors", [])
+            if errors and errors[0].startswith("Column contract violation:"):
+                raise PlanCliError(f"Plan unavailable for '{sync_name}': {errors[0]}")
+            detail = f": {errors[0].rstrip('.')}" if errors else ""
             raise PlanCliError(
                 f"Plan unavailable for '{sync_name}': extraction did not complete "
                 f"({result.failed} failed row(s)"
-                f"{', interrupted' if result.interrupted else ''})."
+                f"{', interrupted' if result.interrupted else ''}){detail}."
             )
         diff = result.diff
         cursor_value_used = result.cursor_value_used
+        planned_ddl = list(getattr(result, "ddl", []))
+    payload_records = (
+        getattr(result, "_plan_payload_records", None)
+        if blocker is None and include_values
+        else None
+    )
 
     plan_key = load_plan_key(project_dir)
     destination = sync.destination
@@ -234,8 +262,123 @@ def compute_plan(
         exclude_columns=_engine_written_columns(sync),
         guards=sync.sync.guards,
         cursor_value=cursor_value_used,
+        ddl=planned_ddl,
     )
-    return PlanContext(plan, sync, project, profile, state_bundle, project_vars, cursor_value_used)
+    return PlanContext(
+        plan,
+        sync,
+        project,
+        profile,
+        state_bundle,
+        project_vars,
+        cursor_value_used,
+        payload_records,
+    )
+
+
+def compute_plan_from_records(
+    sync_name: str,
+    records: list[dict[str, Any]],
+    *,
+    redact_keys: bool = False,
+    cli_vars: dict[str, Any] | None = None,
+    profile_name: str | None = None,
+    manifest_path: Path | None = None,
+    project_dir: Path = Path("."),
+    preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
+) -> PlanContext:
+    """Recompute a plan from decrypted destination-facing rows without reading the source."""
+    from drt.config.credentials import load_profile
+    from drt.config.parser import load_project, load_syncs
+    from drt.config.vars import VarError, resolve_vars
+    from drt.engine.diff import compute_diff
+    from drt.state.factory import build_state_bundle
+
+    try:
+        project = load_project(project_dir)
+    except FileNotFoundError as e:
+        raise PlanCliError(str(e)) from e
+    try:
+        profile = load_profile(resolve_profile_name(profile_name, project.profile))
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        raise PlanCliError(str(e)) from e
+    try:
+        project_vars = resolve_vars(project.vars, cli_vars)
+        syncs = (
+            load_syncs(project_dir, vars=project_vars)
+            if manifest_path is None
+            else load_syncs(project_dir, vars=project_vars, manifest_path=manifest_path)
+        )
+    except (VarError, ValueError) as e:
+        raise PlanCliError(str(e)) from e
+
+    matches = [sync for sync in syncs if sync.name == sync_name]
+    if not matches:
+        raise PlanCliError(f"Sync '{sync_name}' not found in syncs/.")
+    if len(matches) > 1:
+        raise PlanCliError(
+            f"Sync name '{sync_name}' is defined more than once; sync names must be unique."
+        )
+    sync = matches[0]
+    from drt.engine.contract import declared_destination_types
+
+    sync.sync._source_column_types = declared_destination_types(
+        sync.columns, sync.sync.field_mappings, sync.sync.mask
+    )
+    state_bundle = build_state_bundle(project, project_dir)
+    blocker = unsupported_reason(sync)
+    planned_ddl: list[str] = []
+    if blocker is not None:
+        diff = DiffResult(supported=False, fallback_reason=blocker)
+    else:
+        if preflight is not None:
+            preflight(project, state_bundle, sync)
+        from drt.destinations.base import ManagedDestinationTableCapable
+
+        destination_impl: Any = None
+        try:
+            destination_impl = get_destination(sync)
+            sync.sync._planning = True
+            if isinstance(destination_impl, ManagedDestinationTableCapable):
+                prepared_records: list[dict[str, Any]] = []
+                for offset in range(0, len(records), sync.sync.batch_size):
+                    preparation = destination_impl.prepare_table(
+                        records[offset : offset + sync.sync.batch_size],
+                        sync.destination,
+                        sync.sync,
+                        dry_run=True,
+                    )
+                    prepared_records.extend(preparation.records)
+                    planned_ddl.extend(preparation.ddl)
+                records = prepared_records
+            diff = compute_diff(records, sync.destination, sync.sync, limit=sys.maxsize)
+        except Exception as e:
+            raise PlanCliError(f"Could not verify exact replay for '{sync_name}': {e}") from e
+        finally:
+            if isinstance(destination_impl, ManagedDestinationTableCapable):
+                destination_impl.reset_write_state(sync.destination, sync.sync)
+            sync.sync._planning = False
+
+    plan_key = load_plan_key(project_dir)
+    destination = sync.destination
+    plan = build_plan(
+        diff,
+        sync_name=sync.name,
+        sync_mode=sync.sync.mode,
+        match_policy=sync.sync.match_policy,
+        destination=getattr(destination, "describe_safe", lambda: str(destination.type))(),
+        config_fingerprint=sync_fingerprint(sync, project_dir),
+        environment_fingerprint=environment_fingerprint(sync, project_vars, profile, plan_key),
+        plan_key=plan_key,
+        drt_version=__version__,
+        key_columns=list(getattr(destination, "upsert_key", None) or []),
+        mask_columns=set(sync.sync.mask or {}),
+        redact_keys=redact_keys,
+        exclude_columns=_engine_written_columns(sync),
+        guards=sync.sync.guards,
+        ddl=planned_ddl,
+    )
+    return PlanContext(plan, sync, project, profile, state_bundle, project_vars)
 
 
 def parse_vars_option(vars_raw: str | None) -> dict[str, Any] | None:

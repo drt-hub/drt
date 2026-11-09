@@ -44,6 +44,7 @@ class KafkaDestination:
         The engine and DLQ replay mark ledger entries after load() returns;
         queued messages alone must never be reported as delivered.
         """
+        assert isinstance(config, KafkaDestinationConfig)
         # Client def for the first time.
         if self._client is None:
             servers = resolve_env(None, config.bootstrap_servers_env)
@@ -168,6 +169,8 @@ class KafkaDestination:
     def _close(self) -> None:
         """Close client connection."""
         producer = self._client
+        if producer is None:
+            return
         remaining = len(producer)
         try:
             if remaining:
@@ -241,33 +244,9 @@ class KafkaDestination:
                 value = resolve_env(None, reference)
                 if value is None or not value.strip():
                     raise ValueError(f"Kafka auth.{field} must resolve to a non-empty value.")
-            settings[setting] = value
+                settings[setting] = value
         try:
             from confluent_kafka import Producer  # type: ignore[import-untyped]
         except ImportError as exc:
             raise ImportError("Kafka destination requires: pip install drt-core[kafka]") from exc
         return Producer(settings)
-
-    def _close(self) -> None:
-        """Close client connection."""
-        producer = self._client
-        remaining = len(producer)
-        try:
-            if remaining:
-                producer.flush(self._delivery_timeout_s)
-        finally:
-            if len(producer):
-                producer.purge()
-                producer.flush(0)
-            if len(producer):
-                raise RuntimeError("Kafka producer still has undelivered messages after cleanup.")
-            if not producer.close():
-                raise RuntimeError("Kafka producer close failed.")
-            self._client = None
-            self._bootstrap_servers = ""
-        if remaining:
-            raise RuntimeError(
-                "Kafka safety drain found unconfirmed messages after load(); "
-                "the sync must not be reported as successful."
-            )
-        

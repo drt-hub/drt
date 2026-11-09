@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from drt.cli._selection import SelectionError
-from drt.config.fingerprint import sync_fingerprints
+from drt.config.fingerprint import resolved_sync_fingerprint
 from drt.docs.manifest import Manifest
 
 if TYPE_CHECKING:
@@ -73,7 +73,9 @@ def load_state_diff(
         )
 
     baseline_hashes = {sync.name: sync.config_hash for sync in manifest.syncs}
-    current_hashes = sync_fingerprints(project_dir)
+    current_hashes = {
+        sync.name: resolved_sync_fingerprint(sync, project_dir) for sync in current_syncs
+    }
     new: set[str] = set()
     modified: set[str] = set()
 

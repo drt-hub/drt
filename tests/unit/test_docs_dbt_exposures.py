@@ -236,3 +236,107 @@ def test_page_slug_collisions_omit_only_affected_urls(tmp_path: Path, monkeypatc
         "drt_a_b",
         "drt_a_b_2",
     }
+
+
+def _write_sync_with(project_dir: Path, name: str, extra: dict[str, object]) -> None:
+    syncs_dir = project_dir / "syncs"
+    syncs_dir.mkdir(exist_ok=True)
+    (syncs_dir / f"{name}.yml").write_text(
+        yaml.safe_dump(
+            {
+                "name": name,
+                "model": "ref('mart_users')",
+                "destination": {"type": "hubspot", "object_type": "contacts"},
+                "sync": {"mode": "upsert"},
+                **extra,
+            },
+            sort_keys=False,
+        )
+    )
+
+
+def test_owner_maturity_and_declared_freshness_flow_into_the_exposure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    _write_sync_with(
+        tmp_path,
+        "users_to_hubspot",
+        {
+            "meta": {
+                "owner": "Growth team",
+                "owner_email": "growth@example.com",
+                "maturity": "low",
+            },
+            "alerts": {"on_stale": {"max_age": "6h", "never_run": "error"}},
+        },
+    )
+
+    result = runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"])
+
+    assert result.exit_code == 0
+    [exposure] = yaml.safe_load(result.output)["exposures"]
+    assert exposure["owner"] == {"name": "Growth team"}  # no email in a dbt-bound artifact
+    assert "growth@example.com" not in result.output
+    assert exposure["maturity"] == "low"
+    assert exposure["meta"]["drt"]["freshness"] == {"max_age_seconds": 21600, "never_run": "error"}
+
+
+def test_a_sync_without_meta_keeps_the_previous_defaults(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    _write_sync_with(tmp_path, "users_to_hubspot", {})
+
+    [exposure] = yaml.safe_load(
+        runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"]).output
+    )["exposures"]
+
+    assert exposure["owner"] == {"name": "drt"} and exposure["maturity"] == "high"
+    assert "freshness" not in exposure["meta"]["drt"]
+
+
+def test_regeneration_with_meta_and_freshness_is_byte_identical(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    _write_sync_with(
+        tmp_path,
+        "users_to_hubspot",
+        {"meta": {"owner": "Growth"}, "alerts": {"on_stale": {"max_age": "1d"}}},
+    )
+
+    first = runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"]).output
+    second = runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"]).output
+
+    assert first == second
+
+
+def test_unknown_meta_keys_are_rejected(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    _write_sync_with(tmp_path, "users_to_hubspot", {"meta": {"ownr": "typo"}})
+
+    result = runner.invoke(app, ["validate"])
+
+    assert result.exit_code != 0
+
+
+def test_the_public_renderer_never_emits_an_email_even_for_a_full_labels_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from drt.docs.builder import build_manifest
+    from drt.docs.dbt_exposures import render_dbt_exposures
+
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    _write_sync_with(
+        tmp_path, "users_to_hubspot", {"meta": {"owner": "G", "owner_email": "g@example.com"}}
+    )
+    manifest = build_manifest(Path("."), full_labels=True)
+    assert manifest.syncs[0].meta is not None and manifest.syncs[0].meta.owner_email
+
+    out = render_dbt_exposures(manifest, {"users_to_hubspot": "mart_users"})
+
+    assert "g@example.com" not in out and "email" not in out

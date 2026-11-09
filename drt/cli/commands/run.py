@@ -162,6 +162,8 @@ class _RunContext:
     # history entry. Ordinary ``drt run`` leaves both unset.
     plan_id: str | None = None
     approved_by: str | None = None
+    # Exact replay (#1221): omit from ordinary apply/run artifacts and history.
+    exact: bool | None = None
     # Where the project lives. ``drt run`` is always invoked from it; the MCP
     # server may not be, so ``drt apply`` passes it explicitly.
     project_dir: Path = Path(".")
@@ -175,7 +177,8 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
     state directly (#548); the CLI wires this up here. Dead Letter Queue
     (#278) is opt-in per sync, adding a ``DlqObserver`` that persists failed
     records to ``.drt/dlq/<sync>.jsonl`` for ``drt retry`` — skipped on dry
-    runs, since nothing is actually sent, so nothing can fail.
+    runs, since nothing is actually sent, and exact replay, since persisting
+    a failed row would write the decrypted payload back to durable storage.
     """
     from drt.engine.observer import (
         CompositeObserver,
@@ -189,7 +192,7 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
         LoggingObserver(),
         StatePersistingObserver(ctx.state_mgr, wm_storage),
     ]
-    if not ctx.dry_run and sync.sync.dlq is not None and sync.sync.dlq.enabled:
+    if not ctx.dry_run and not ctx.exact and sync.sync.dlq is not None and sync.sync.dlq.enabled:
         observers.append(DlqObserver(ctx.dlq_store, max_records=sync.sync.dlq.max_records))
     # Enterprise extension point (#299, ADR 0008) — an audit-log observer
     # registered via drt.engine.observer.register_extra_observer sees
@@ -270,6 +273,7 @@ def _run_one(
                 reviewed_guard_baseline=ctx.reviewed_guard_baseline,
                 plan_id=ctx.plan_id,
                 approved_by=ctx.approved_by,
+                exact=ctx.exact,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -364,6 +368,9 @@ def _run_one(
         guards_outcome = getattr(result, "guards", None)
         if guards_outcome is not None:
             entry["guards"] = guards_outcome
+        result_ddl = list(getattr(result, "ddl", []))
+        if result_ddl:
+            entry["ddl"] = result_ddl
         if ctx.log_json:
             logging.info(
                 "sync_complete",
@@ -379,6 +386,10 @@ def _run_one(
         if not ctx.json_mode and not ctx.quiet:
             if ctx.dry_run:
                 print_dry_run_summary(sync, profile, result.success, dest)
+                if result_ddl:
+                    from drt.cli.output import print_ddl_preview
+
+                    print_ddl_preview(result_ddl)
             else:
                 print_sync_result(sync.name, result, elapsed)
         if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:
@@ -656,7 +667,12 @@ def _write_run_results(
         # `Path.replace()` is an atomic same-filesystem rename (os.replace),
         # so the final path only ever holds a complete write or its
         # previous (possibly absent) content.
-        tmp_path.write_text(json.dumps(run_results, indent=2, default=str))
+        # Create privately and exclusively, then write through that same file
+        # descriptor. This cannot inherit a permissive umask-derived mode or
+        # follow a symlink swapped into the pathname after creation.
+        fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(run_results, handle, indent=2, default=str)
         tmp_path.replace(final_path)
     except OSError as e:
         logging.getLogger(__name__).warning("Failed to write run_results.json: %s", e)
@@ -797,6 +813,11 @@ def run(
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
+    manifest_path: Path | None = typer.Option(
+        None,
+        "--manifest-path",
+        help="dbt manifest for contract.source: dbt (default: target/manifest.json).",
+    ),
     log_format: LogFormat = typer.Option(
         LogFormat.TEXT,
         "--log-format",
@@ -922,7 +943,7 @@ def run(
     try:
         cli_vars = parse_cli_vars(vars_raw) if vars_raw else None
         project_vars = resolve_vars(project.vars, cli_vars)
-    except VarError as e:
+    except (VarError, ValueError) as e:
         print_error(str(e))
         raise typer.Exit(1)
 
@@ -936,8 +957,11 @@ def run(
         )
 
     try:
-        syncs = load_syncs(Path("."), vars=project_vars)
-    except VarError as e:
+        if manifest_path is None:
+            syncs = load_syncs(Path("."), vars=project_vars)
+        else:
+            syncs = load_syncs(Path("."), vars=project_vars, manifest_path=manifest_path)
+    except (VarError, ValueError) as e:
         print_error(str(e))
         raise typer.Exit(1)
 

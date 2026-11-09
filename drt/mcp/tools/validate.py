@@ -12,10 +12,16 @@ if TYPE_CHECKING:
     from drt.mcp._context import McpContext
 
 
+def _strip_control_characters(value: object) -> str:
+    """Keep structured MCP diagnostics intact while removing terminal controls."""
+    return "".join(character if character.isprintable() else "?" for character in str(value))
+
+
 def validate(
     ctx: McpContext,
     check_connection: bool = False,
     strict: bool = False,
+    manifest_path: str | None = None,
 ) -> dict[str, Any]:
     """Mirrors ``drt validate``'s secret-scan + strict + connection-test
     behaviour (#870) — the pre-#870 version only re-ran schema parsing,
@@ -30,7 +36,7 @@ def validate(
     )
     from drt.config.secrets import find_hardcoded_secrets
 
-    result = ctx.load_syncs_safe()
+    result = ctx.load_syncs_safe(manifest_path=manifest_path)
     secret_findings = find_hardcoded_secrets(ctx.project_dir)
     secret_warnings_by_sync = _group_secret_findings(secret_findings)
     idempotency_findings = _find_ineffective_native_idempotency_keys(result.syncs)
@@ -38,13 +44,19 @@ def validate(
     for f in idempotency_findings:
         idempotency_warnings_by_sync.setdefault(f.sync_name, []).append(f.message)
 
-    errors = dict(result.errors)
+    errors = {
+        name: [_strip_control_characters(error) for error in messages]
+        for name, messages in result.errors.items()
+    }
     warnings: dict[str, list[str]] = {}
     idempotency_warnings: dict[str, list[str]] = {}
     valid: list[str] = []
 
     for s in result.syncs:
         sync_warnings = [f.message for f in secret_warnings_by_sync.get(s.name, [])]
+        sync_warnings.extend(
+            _strip_control_characters(warning) for warning in result.warnings.get(s.name, [])
+        )
         if sync_warnings:
             warnings[s.name] = sync_warnings
         if s.name in idempotency_warnings_by_sync:

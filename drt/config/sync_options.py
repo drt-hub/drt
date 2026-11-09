@@ -17,6 +17,7 @@ from pydantic import (
     PrivateAttr,
     SerializeAsAny,
     Tag,
+    field_validator,
     model_validator,
 )
 
@@ -49,6 +50,7 @@ from drt.config.destinations_saas import (
     MetaConversionsDestinationConfig,
     MixpanelDestinationConfig,
     NotionDestinationConfig,
+    PipedriveDestinationConfig,
     RestApiDestinationConfig,
     SalesforceBulkDestinationConfig,
     SendGridDestinationConfig,
@@ -172,6 +174,37 @@ class MaskRule(BaseModel):
 
 
 MaskSpec = Literal["hash", "redact"] | MaskRule
+
+
+class ColumnConfig(BaseModel):
+    """One portable source column declared by a sync (#761)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, json_schema_extra={"pattern": r"\S"})
+    type: Literal["string", "number", "integer", "boolean", "timestamp", "date", "json"]
+    description: str | None = None
+    _diagnostic_name: str | None = PrivateAttr(default=None)
+
+    @field_validator("name")
+    @classmethod
+    def _non_empty_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("columns[].name must be a non-empty column name.")
+        return value
+
+
+class ContractConfig(BaseModel):
+    """Run-time enforcement policy for a sync's declared columns (#761)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enforced: bool
+    on_extra_columns: Literal["fail", "ignore", "drop"] = "fail"
+    # Omit for the existing hand-written ``columns:`` behavior. ``dbt`` is
+    # resolved by the config loader into that same columns structure before
+    # the engine sees the sync (#896).
+    source: Literal["dbt"] | None = None
 
 
 class GuardsConfig(BaseModel):
@@ -469,6 +502,20 @@ class SyncOptions(BaseModel):
     _reviewed_forced_guards: set[str] | None = PrivateAttr(default=None)
     _reviewed_guard_deletes: int | None = PrivateAttr(default=None)
     _reviewed_guard_baseline: int | None = PrivateAttr(default=None)
+    # CLI planner-only signal: retain the fully destination-facing row
+    # snapshot (including metadata_columns) in memory so it can be encrypted
+    # directly into an exact-replay sidecar (#1221).
+    _capture_plan_payload: bool = PrivateAttr(default=False)
+    # Managed destination table preview/execution state (#760). These are
+    # per-run signals shared with the diff/plan path without widening the
+    # frozen Destination Protocol.
+    _planning: bool = PrivateAttr(default=False)
+    _managed_table_missing: bool = PrivateAttr(default=False)
+    _managed_new_columns: set[str] = PrivateAttr(default_factory=set)
+    _managed_table_unavailable_reason: str | None = PrivateAttr(default=None)
+    _executed_ddl: list[str] = PrivateAttr(default_factory=list)
+    _source_column_types: dict[str, str] = PrivateAttr(default_factory=dict)
+    _source_column_metadata_loaded: bool = PrivateAttr(default=False)
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
@@ -815,8 +862,39 @@ class OnDegradedConfig(BaseModel):
     conditions: DegradedConditions = Field(default_factory=DegradedConditions)
 
 
+class OnStaleConfig(BaseModel):
+    """``alerts.on_stale`` (#1224) — sync-level freshness, judged from run history.
+
+    Unlike ``on_failure`` / ``on_degraded`` this is not evaluated while a run is
+    happening: a sync that silently stopped running never fires those. It is
+    evaluated by whoever calls ``drt status --check`` (cron, CI, ``drt serve``);
+    drt stays daemon-free (ADR 0004). It measures the *sync's* last successful
+    run, so it works for every destination, including SaaS and file ones.
+    """
+
+    # A typo in this safety policy (``never_runs: error``) must not silently fall back
+    # to the lenient default, so unknown keys are rejected.
+    model_config = ConfigDict(extra="forbid")
+
+    max_age: str  # "6h", "30m", "2d", "1w" or "6 hours"
+    never_run: Literal["warn", "error"] = "warn"  # a sync with no run on record at all
+    channels: list[AlertItem] = Field(default_factory=list)
+
+    # A field validator (not an after-model one) so a validation error carries only
+    # the offending value, never the whole block with its channel webhook URLs.
+    @field_validator("max_age")
+    @classmethod
+    def _validate_max_age(cls, value: str) -> str:
+        from drt.config.duration import parse_max_age
+
+        parse_max_age(value, field_name="alerts.on_stale.max_age")
+        return value
+
+
 class AlertsConfig(BaseModel):
     on_failure: list[AlertItem] = Field(default_factory=list)
+    # Sync-level freshness (#1224) — see OnStaleConfig.
+    on_stale: OnStaleConfig | None = None
     # Partial-degradation thresholds (#784) — see OnDegradedConfig. on_failure
     # (hard failure) is untouched.
     on_degraded: OnDegradedConfig | None = None
@@ -892,6 +970,7 @@ DestinationConfig = Annotated[
     | Annotated[DiscordDestinationConfig, Tag("discord")]
     | Annotated[GitHubActionsDestinationConfig, Tag("github_actions")]
     | Annotated[HubSpotDestinationConfig, Tag("hubspot")]
+    | Annotated[PipedriveDestinationConfig, Tag("pipedrive")]
     | Annotated[ZendeskDestinationConfig, Tag("zendesk")]
     | Annotated[AmplitudeDestinationConfig, Tag("amplitude")]
     | Annotated[MixpanelDestinationConfig, Tag("mixpanel")]
@@ -948,7 +1027,43 @@ _WRITE_POLICY_SQL_DESTINATION_TYPES = frozenset(
 )
 
 
+class SyncMetaConfig(BaseModel):
+    """``meta`` on a sync (#1226): who owns it and how much to trust it.
+
+    Catalog metadata for ``drt docs`` and ``drt docs generate --format dbt-exposures``;
+    it never changes how a sync runs. ``owner`` and ``maturity`` are authored for
+    display, so they appear in the default manifest; ``owner_email`` is personal data
+    and is emitted only with ``--full-labels`` (#696).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner: str | None = None
+    owner_email: str | None = None
+    maturity: Literal["high", "medium", "low"] = "high"
+
+
 class SyncConfig(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "if": {
+                "properties": {
+                    "contract": {
+                        "not": {
+                            "properties": {"source": {"const": "dbt"}},
+                            "required": ["source"],
+                        }
+                    }
+                },
+                "required": ["contract"],
+            },
+            "then": {
+                "properties": {"columns": {"type": "array", "minItems": 1}},
+                "required": ["columns"],
+            },
+        }
+    )
+
     name: str
     description: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -960,6 +1075,70 @@ class SyncConfig(BaseModel):
     # queries the real destination after a sync has run.
     unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
+    meta: SyncMetaConfig | None = None  # catalog metadata (#1226); no runtime effect
+    # Portable model-output declaration (#761). Keeping this at the sync root
+    # matches dbt's schema shape and separates it from destination-facing
+    # transforms under ``sync:``. A declaration may be documentation-only;
+    # run-time checking is explicit through ``contract.enforced``.
+    columns: list[ColumnConfig] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Portable source columns. Names must be unique; JSON Schema cannot express "
+            "property-level uniqueness, so drt validate enforces it."
+        ),
+    )
+    contract: ContractConfig | None = None
+
+    # Snapshot of the dbt resolution performed by config loading. It prevents
+    # ``run``/``plan`` from re-reading a manifest that changes after the sync
+    # was loaded, while keeping derived data out of the public YAML model.
+    _dbt_relation_name: str | None = PrivateAttr(default=None)
+    _dbt_contract_resolved: bool = PrivateAttr(default=False)
+    # Documentation provenance for the resolved ``columns`` list. A dbt-source
+    # contract can still have an authored ``columns:`` block, which wins; the
+    # public catalog must describe the columns that actually won resolution.
+    _columns_source: Literal["dbt", "declared"] | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def _check_column_contract(self) -> SyncConfig:
+        if self.contract is not None and self.contract.source != "dbt" and self.columns is None:
+            raise ValueError("contract requires a non-empty columns declaration.")
+        if self.columns is not None:
+            names = [column.name for column in self.columns]
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                raise ValueError(
+                    "columns contains duplicate name(s): " + ", ".join(repr(n) for n in duplicates)
+                )
+        return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unsupported_managed_table_keys(cls, value: Any) -> Any:
+        """Reserve #760's DDL keys for the two dialects that implement them.
+
+        Most destination models intentionally predate strict-extra validation.
+        A root validator is therefore the one place that can prevent a SaaS or
+        not-yet-supported warehouse destination from silently discarding a
+        schema policy. Third-party destinations are rejected too: support must
+        be explicit rather than inferred from a similarly named plugin field.
+        """
+        if not isinstance(value, dict):
+            return value
+        destination = value.get("destination")
+        if not isinstance(destination, dict):
+            return value
+        reserved = sorted({"manage_table", "on_schema_change"} & destination.keys())
+        destination_type = destination.get("type")
+        if reserved and destination_type not in {"postgres", "mysql"}:
+            keys = ", ".join(reserved)
+            raise ValueError(
+                f"destination key(s) {keys} are supported only for postgres and mysql "
+                "in the first managed-tables release; remove them for destination "
+                f"type {destination_type!r}."
+            )
+        return value
 
     @model_validator(mode="after")
     def _check_write_policy_destination_mode(self) -> SyncConfig:
