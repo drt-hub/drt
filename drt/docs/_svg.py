@@ -19,23 +19,23 @@ def _slug(value: str) -> str:
 
 
 def _slug_map(names: list[str], kind: str) -> dict[str, str]:
-    """Map each name to a stable slug, failing fast on a collision.
+    """Map each name to a stable, collision-free page slug.
 
     ``_slug`` collapses runs of non-alphanumerics, so punctuation-only-distinct
-    names (``a_b`` vs ``a__b``) can slugify to the same file — which would
-    silently overwrite a page and break cross-links. Detect that and raise.
+    names can slugify to the same file. Allocate a deterministic suffix in
+    name-sorted order rather than silently overwriting a page or requiring the
+    project author to rename a valid physical relation.
     """
-    out: dict[str, str] = {}
-    seen: dict[str, str] = {}
+    del kind  # Kept in the public helper signature for existing callers.
+
+    groups: dict[str, list[str]] = {}
     for name in names:
-        slug = _slug(name)
-        if slug in seen and seen[slug] != name:
-            raise ValueError(
-                f"Two {kind} names slugify to the same page {slug!r}: "
-                f"{seen[slug]!r} and {name!r}. Rename one so their pages don't collide."
-            )
-        seen[slug] = name
-        out[name] = slug
+        groups.setdefault(_slug(name), []).append(name)
+
+    out: dict[str, str] = {}
+    for base, members in groups.items():
+        for index, name in enumerate(sorted(members), start=1):
+            out[name] = base if index == 1 else f"{base}-{index}"
     return out
 
 

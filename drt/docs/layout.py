@@ -85,25 +85,49 @@ class LayoutConfig:
 # --------------------------------------------------------------------------- #
 
 
+def node_id(kind: str, name: str) -> str:
+    """Internal layout identity, namespaced so graph kinds cannot collide."""
+    return f"{kind}:{name}"
+
+
+def node_name(identity: str) -> str:
+    """Recover the manifest name from an internal :func:`node_id`."""
+    return identity.split(":", maxsplit=1)[1]
+
+
 def _ranks(manifest: Manifest) -> dict[int, list[str]]:
     """Node ids per rank, each seeded in a stable (name-sorted) order."""
     return {
-        0: sorted(s.name for s in manifest.sources),
-        1: sorted(s.name for s in manifest.syncs),
-        2: sorted(d.name for d in manifest.destinations),
+        0: sorted(node_id("source", source.name) for source in manifest.sources),
+        1: sorted(node_id("sync", sync.name) for sync in manifest.syncs),
+        2: sorted(
+            node_id("destination", destination.name) for destination in manifest.destinations
+        ),
     }
 
 
 def _forward_edges(manifest: Manifest) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Forward edges split by rank-pair: (source->sync, sync->destination)."""
-    src_sync = [(e.from_, e.to) for e in manifest.edges if e.kind == "source_to_sync"]
-    sync_dst = [(e.from_, e.to) for e in manifest.edges if e.kind == "sync_to_destination"]
+    src_sync = [
+        (node_id("source", edge.from_), node_id("sync", edge.to))
+        for edge in manifest.edges
+        if edge.kind == "source_to_sync"
+    ]
+    sync_dst = [
+        (node_id("sync", edge.from_), node_id("destination", edge.to))
+        for edge in manifest.edges
+        if edge.kind == "sync_to_destination"
+    ]
     return src_sync, sync_dst
 
 
 def _lookup_edges(manifest: Manifest) -> list[tuple[str, str]]:
     """Lookup back-edges (producer sync -> consumer sync), stably ordered."""
-    return sorted((e.from_, e.to) for e in manifest.edges if e.kind == "lookup")
+    return sorted(
+        (node_id("sync", edge.from_), node_id("sync", edge.to))
+        for edge in manifest.edges
+        if edge.kind == "lookup"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -388,11 +412,11 @@ def compute_layout(
 
     kinds: dict[str, str] = {}
     for src in manifest.sources:
-        kinds[src.name] = "source"
+        kinds[node_id("source", src.name)] = "source"
     for syn in manifest.syncs:
-        kinds[syn.name] = "sync"
+        kinds[node_id("sync", syn.name)] = "sync"
     for dst in manifest.destinations:
-        kinds[dst.name] = "destination"
+        kinds[node_id("destination", dst.name)] = "destination"
 
     ranks = _ranks(manifest)
     src_sync, sync_dst = _forward_edges(manifest)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from html import escape
 
 from drt.docs.manifest import Manifest
 
@@ -13,9 +14,22 @@ def _node_id(prefix: str, name: str) -> str:
     return f"{prefix}_{_SLUG_RE.sub('_', name).strip('_') or 'x'}"
 
 
+def _node_ids(prefix: str, names: list[str]) -> dict[str, str]:
+    """Allocate collision-free Mermaid ids within one node kind."""
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        groups.setdefault(_node_id(prefix, name), []).append(name)
+
+    ids: dict[str, str] = {}
+    for base, members in groups.items():
+        for index, name in enumerate(sorted(members), start=1):
+            ids[name] = base if index == 1 else f"{base}_{index}"
+    return ids
+
+
 def _escape_label(text: str) -> str:
-    """Mermaid label-safe — wrap in quotes and escape inner quotes."""
-    return text.replace('"', "&quot;")
+    """Escape every Mermaid/HTML label delimiter before quoted emission."""
+    return escape(text, quote=True)
 
 
 def render_mermaid(manifest: Manifest) -> str:
@@ -33,10 +47,14 @@ def render_mermaid(manifest: Manifest) -> str:
         lines.append('    empty["No syncs found"]')
         return "\n".join(lines)
 
+    source_ids = _node_ids("src", [src.name for src in manifest.sources])
+    sync_ids = _node_ids("sync", [sync.name for sync in manifest.syncs])
+    destination_ids = _node_ids("dst", [dst.name for dst in manifest.destinations])
+
     # Sources subgraph
     lines.append("    subgraph Sources")
     for src in manifest.sources:
-        nid = _node_id("src", src.name)
+        nid = source_ids[src.name]
         label = f"{_escape_label(src.name)}<br/><i>{_escape_label(src.type)}</i>"
         lines.append(f'        {nid}["{label}"]')
     lines.append("    end")
@@ -44,7 +62,7 @@ def render_mermaid(manifest: Manifest) -> str:
     # Syncs subgraph (hexagon shape with mode label)
     lines.append("    subgraph Syncs")
     for sync in manifest.syncs:
-        nid = _node_id("sync", sync.name)
+        nid = sync_ids[sync.name]
         label = f"{_escape_label(sync.name)}<br/><i>{_escape_label(sync.mode)}</i>"
         lines.append(f'        {nid}{{{{"{label}"}}}}')
     lines.append("    end")
@@ -52,26 +70,24 @@ def render_mermaid(manifest: Manifest) -> str:
     # Destinations subgraph
     lines.append("    subgraph Destinations")
     for dst in manifest.destinations:
-        nid = _node_id("dst", dst.label)
+        nid = destination_ids[dst.name]
         label = f"{_escape_label(dst.label)}<br/><i>{_escape_label(dst.type)}</i>"
         lines.append(f'        {nid}["{label}"]')
     lines.append("    end")
 
     # Edges
-    dst_by_id = {d.name: d for d in manifest.destinations}
     for edge in manifest.edges:
         if edge.kind == "source_to_sync":
-            from_id = _node_id("src", edge.from_)
-            to_id = _node_id("sync", edge.to)
+            from_id = source_ids.get(edge.from_, _node_id("src", edge.from_))
+            to_id = sync_ids.get(edge.to, _node_id("sync", edge.to))
             lines.append(f"    {from_id} -->|extract| {to_id}")
         elif edge.kind == "sync_to_destination":
-            from_id = _node_id("sync", edge.from_)
-            dst_match = dst_by_id.get(edge.to)
-            to_id = _node_id("dst", dst_match.label) if dst_match else _node_id("dst", edge.to)
+            from_id = sync_ids.get(edge.from_, _node_id("sync", edge.from_))
+            to_id = destination_ids.get(edge.to, _node_id("dst", edge.to))
             lines.append(f"    {from_id} -->|load| {to_id}")
         elif edge.kind == "lookup":
-            from_id = _node_id("sync", edge.from_)
-            to_id = _node_id("sync", edge.to)
+            from_id = sync_ids.get(edge.from_, _node_id("sync", edge.from_))
+            to_id = sync_ids.get(edge.to, _node_id("sync", edge.to))
             lines.append(f"    {from_id} -.lookup.-> {to_id}")
 
     return "\n".join(lines)

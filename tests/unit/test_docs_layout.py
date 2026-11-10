@@ -80,9 +80,33 @@ def _crossed() -> Manifest:
 def test_rank_is_node_kind() -> None:
     lay = compute_layout(_linear())
     by_id = {n.id: n for n in lay.nodes}
-    assert by_id["warehouse"].rank == 0 and by_id["warehouse"].kind == "source"
-    assert by_id["s1"].rank == 1 and by_id["s1"].kind == "sync"
-    assert by_id["d1"].rank == 2 and by_id["d1"].kind == "destination"
+    assert by_id["source:warehouse"].rank == 0 and by_id["source:warehouse"].kind == "source"
+    assert by_id["sync:s1"].rank == 1 and by_id["sync:s1"].kind == "sync"
+    assert by_id["destination:d1"].rank == 2 and by_id["destination:d1"].kind == "destination"
+
+
+def test_node_ids_are_namespaced_by_kind() -> None:
+    manifest = _manifest(
+        sources=[Source(name="users", type="postgres")],
+        syncs=[Sync(name="users", source="users", destination="users", mode="upsert")],
+        destinations=[Destination(name="users", type="postgres", label="users")],
+        edges=[
+            Edge(kind="source_to_sync", from_="users", to="users"),
+            Edge(kind="sync_to_destination", from_="users", to="users"),
+        ],
+    )
+
+    layout = compute_layout(manifest)
+
+    assert {node.id for node in layout.nodes} == {
+        "source:users",
+        "sync:users",
+        "destination:users",
+    }
+    assert [(edge.src, edge.dst) for edge in layout.edges] == [
+        ("source:users", "sync:users"),
+        ("sync:users", "destination:users"),
+    ]
 
 
 def test_output_is_deterministic() -> None:
