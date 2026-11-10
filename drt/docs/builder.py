@@ -6,11 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
-
-from sqlglot import exp, parse
-from sqlglot.errors import SqlglotError
-from sqlglot.optimizer.scope import traverse_scope
+from typing import Any, cast
 
 from drt import __version__
 from drt._redaction import redact_error_text as _redact_error_text
@@ -44,6 +40,7 @@ from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import SyncState
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_]+")
+_UNRENDERED_VAR_RE = re.compile(r"\bvar\s*\(", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -177,38 +174,108 @@ def _raw_model_sql(sync_cfg: SyncConfig, project_dir: Path) -> str | None:
         return None
 
 
+def _postgres_relation_name(table: Any, exp: Any) -> str | None:
+    """Return a table identity from identifiers only, never SQL comments.
+
+    SQLGlot keeps trailing comments on the ``Table`` expression, so rendering
+    the table expression itself can accidentally publish text from the model.
+    Rebuild the catalog/database/name path from fresh identifier expressions
+    instead. Quoting is preserved, comments and aliases are not.
+    """
+    identifiers = [
+        table.args[key] for key in ("catalog", "db", "this") if table.args.get(key) is not None
+    ]
+    if not identifiers or not all(
+        isinstance(identifier, exp.Identifier) for identifier in identifiers
+    ):
+        return None
+    return ".".join(
+        exp.Identifier(
+            this=identifier.this,
+            quoted=bool(identifier.args.get("quoted")),
+        ).sql(dialect="postgres")
+        for identifier in identifiers
+    )
+
+
+def _is_read_only_query(statement: Any, exp: Any) -> bool:
+    """Accept one query only when its complete expression tree is read-only."""
+    if not isinstance(statement, exp.Query):
+        return False
+    write_types = tuple(
+        getattr(exp, name)
+        for name in (
+            "Into",
+            "Insert",
+            "Update",
+            "Delete",
+            "Merge",
+            "Create",
+            "Drop",
+            "Alter",
+            "Copy",
+            "Transaction",
+            "TruncateTable",
+        )
+        if hasattr(exp, name)
+    )
+    return not any(isinstance(node, write_types) for node in statement.walk())
+
+
 def _postgres_source_relations(sql: str | None) -> tuple[str, ...]:
     """Extract physical Postgres relations from one read-only SQL statement.
 
     SQLGlot's scope walker, rather than a regex over ``FROM``/``JOIN``, keeps
     nested queries and CTE references straight: CTEs become nested ``Scope``
     objects while only real tables remain :class:`~sqlglot.exp.Table` sources.
-    Parser failure, an empty model, or multiple statements produces no partial
-    lineage — callers retain the established generic profile source instead.
+    Parser failure, unavailable optional parser support, unrendered ``var()``
+    calls, a non-read-only query, an empty model, or multiple statements
+    produces no partial lineage — callers retain the established generic
+    profile source instead.
     """
-    if not sql:
+    if not sql or _UNRENDERED_VAR_RE.search(sql):
         return ()
+
+    # SQL parsing is an optional docs enhancement. A regular drt installation
+    # still generates the pre-#1045 profile-level lineage when it is absent.
+    try:
+        from sqlglot import exp, parse
+        from sqlglot.errors import SqlglotError
+        from sqlglot.optimizer.scope import traverse_scope
+    except ModuleNotFoundError:
+        return ()
+
     try:
         statements = [
             statement for statement in parse(sql, read="postgres") if statement is not None
         ]
-    except SqlglotError:
-        return ()
-    if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+        if len(statements) != 1 or not _is_read_only_query(statements[0], exp):
+            return ()
+
+        relations: set[str] = set()
+        for scope in traverse_scope(statements[0]):
+            for source in scope.sources.values():
+                # CTEs and derived tables are scopes, not physical source tables.
+                # Table-valued functions do not carry an Identifier and are not
+                # relations that the manifest can name truthfully.
+                if not isinstance(source, exp.Table):
+                    continue
+                relation = _postgres_relation_name(source, exp)
+                if relation is not None:
+                    relations.add(relation)
+        return tuple(sorted(relations))
+    except (SqlglotError, RecursionError):
         return ()
 
-    relations: set[str] = set()
-    for scope in traverse_scope(statements[0]):
-        for source in scope.sources.values():
-            # CTEs and derived tables are scopes, not physical source tables.
-            # Table-valued functions do not carry an Identifier and are not
-            # relations that the manifest can name truthfully.
-            if not isinstance(source, exp.Table) or not isinstance(source.this, exp.Identifier):
-                continue
-            relation = source.copy()
-            relation.set("alias", None)
-            relations.add(relation.sql(dialect="postgres"))
-    return tuple(sorted(relations))
+
+def _profile_source_name(profile: str, relation_names: set[str]) -> str:
+    """Keep a profile source distinct when a physical relation has its name."""
+    if profile not in relation_names:
+        return profile
+    # A colon cannot occur in an unquoted Postgres identifier, and quoted
+    # identifiers retain quotes, so this namespace cannot collide with the
+    # canonical relation names emitted by ``_postgres_relation_name``.
+    return f"profile:{profile}"
 
 
 def _state_snapshot(state: SyncState, redact: bool) -> SyncStateSnapshot:
@@ -417,7 +484,25 @@ def build_manifest(
     # Source: project.profile is authoritative; type from inline ProjectConfig.source if present,
     # else "configured" because profiles.yml resolves the concrete type later.
     source_type = project.source.type if project.source else "configured"
-    source = Source(name=project.profile, type=source_type)
+
+    # Parse before allocating source nodes so a generic profile source cannot
+    # overwrite a physical relation with the same name (for example profile
+    # ``users`` and a raw ``FROM users`` model in the same catalog).
+    relations_by_sync = {
+        sync_cfg.name: (
+            _postgres_source_relations(_raw_model_sql(sync_cfg, project_dir))
+            if source_type == "postgres"
+            else ()
+        )
+        for sync_cfg in syncs_result.syncs
+    }
+    relation_names = {
+        relation for relations in relations_by_sync.values() for relation in relations
+    }
+    source = Source(
+        name=_profile_source_name(project.profile, relation_names),
+        type=source_type,
+    )
 
     sources: dict[str, Source] = {}
     destinations: dict[str, Destination] = {}
@@ -426,15 +511,7 @@ def build_manifest(
     dest_ids = _allocate_destination_ids(syncs_result.syncs)
 
     for sync_cfg in syncs_result.syncs:
-        # #1045 deliberately starts with the one dialect we can exercise in
-        # this repository. ``profiles.yml`` is private machine configuration,
-        # so an explicit project-level source declaration is the only safe
-        # signal that raw SQL should be parsed as Postgres.
-        relations = (
-            _postgres_source_relations(_raw_model_sql(sync_cfg, project_dir))
-            if source_type == "postgres"
-            else ()
-        )
+        relations = relations_by_sync[sync_cfg.name]
         input_sources = relations or (source.name,)
         for source_name in input_sources:
             sources.setdefault(

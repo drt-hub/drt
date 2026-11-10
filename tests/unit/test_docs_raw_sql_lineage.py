@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,20 +10,29 @@ import pytest
 import yaml
 
 from drt.config.parser import load_syncs_safe
-from drt.docs.builder import _postgres_source_relations, _raw_model_sql, build_manifest
+from drt.docs.builder import (
+    _postgres_relation_name,
+    _postgres_source_relations,
+    _raw_model_sql,
+    build_manifest,
+)
 from drt.docs.dag import render_dag_svg
 from drt.docs.html import render_html
 from drt.docs.manifest import Manifest, Sync
 from drt.docs.mermaid import render_mermaid
 
 
-def _write_project(project_dir: Path, source_type: str = "postgres") -> None:
+def _write_project(
+    project_dir: Path,
+    source_type: str = "postgres",
+    profile: str = "warehouse",
+) -> None:
     (project_dir / "drt_project.yml").write_text(
         yaml.safe_dump(
             {
                 "name": "raw-lineage",
                 "version": "0.1",
-                "profile": "warehouse",
+                "profile": profile,
                 "source": {"type": source_type},
             }
         )
@@ -129,6 +139,99 @@ def test_raw_sql_lineage_falls_back_when_the_local_ref_cannot_be_read(tmp_path: 
         assert _raw_model_sql(sync, tmp_path) is None
 
     assert _postgres_source_relations(None) == ()
+
+
+def test_raw_sql_relation_names_exclude_comments_and_model_text(tmp_path: Path) -> None:
+    _write_project(tmp_path)
+    _write_sync(tmp_path, "SELECT * FROM public.customers /* api_key=not-for-docs */")
+
+    manifest = build_manifest(tmp_path)
+
+    assert manifest.syncs[0].sources == ("public.customers",)
+    assert "api_key" not in str(manifest.to_dict())
+    assert "not-for-docs" not in str(manifest.to_dict())
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "SELECT * INTO archive.customers FROM public.customers",
+        "WITH changed AS (DELETE FROM public.customers RETURNING *) SELECT * FROM changed",
+        "DELETE FROM public.customers",
+        "SELECT * FROM {{ var('source_relation') }}",
+    ],
+)
+def test_non_read_only_or_unrendered_raw_sql_keeps_the_generic_source(
+    tmp_path: Path, model: str
+) -> None:
+    _write_project(tmp_path)
+    if "var(" in model:
+        _write_sync(tmp_path, "ref('templated')")
+        model_dir = tmp_path / "syncs" / "models"
+        model_dir.mkdir()
+        (model_dir / "templated.sql").write_text(model)
+    else:
+        _write_sync(tmp_path, model)
+
+    manifest = build_manifest(tmp_path)
+
+    assert manifest.syncs[0].source == "warehouse"
+    assert manifest.syncs[0].sources == ()
+
+
+def test_non_identifier_table_expressions_are_not_relations() -> None:
+    from sqlglot import exp
+
+    table = exp.Table(this=exp.Anonymous(this="table_function"))
+
+    assert _postgres_relation_name(table, exp) is None
+
+
+def test_parser_recursion_or_absence_keeps_the_generic_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlglot.optimizer.scope
+
+    def _raise_recursion(*_args: object, **_kwargs: object) -> None:
+        raise RecursionError("nested query too deep")
+
+    monkeypatch.setattr(sqlglot.optimizer.scope, "traverse_scope", _raise_recursion)
+    assert _postgres_source_relations("SELECT * FROM public.customers") == ()
+
+    monkeypatch.setitem(sys.modules, "sqlglot", None)
+    assert _postgres_source_relations("SELECT * FROM public.customers") == ()
+
+
+def test_profile_and_relation_sources_with_the_same_name_stay_distinct(tmp_path: Path) -> None:
+    _write_project(tmp_path, profile="users")
+    _write_sync(tmp_path, "SELECT * FROM users")
+    (tmp_path / "syncs" / "fallback.yml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "fallback_to_warehouse",
+                "model": "ref('unresolved')",
+                "destination": {
+                    "type": "postgres",
+                    "host": "localhost",
+                    "dbname": "warehouse",
+                    "table": "analytics.fallback",
+                    "upsert_key": ["id"],
+                },
+                "sync": {"mode": "upsert"},
+            }
+        )
+    )
+
+    manifest = build_manifest(tmp_path)
+
+    assert [(source.name, source.type) for source in manifest.sources] == [
+        ("profile:users", "postgres"),
+        ("users", "postgres"),
+    ]
+    assert {(edge.from_, edge.to) for edge in manifest.edges if edge.kind == "source_to_sync"} == {
+        ("users", "orders_to_warehouse"),
+        ("profile:users", "fallback_to_warehouse"),
+    }
 
 
 def test_unsupported_or_ambiguous_models_keep_the_generic_source(tmp_path: Path) -> None:

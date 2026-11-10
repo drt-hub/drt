@@ -33,12 +33,14 @@ or private profile and could claim a relation that was never inspected.
 
 Extraction uses SQLGlot with the `postgres` dialect and its scope walker. Only
 physical `Table` sources with identifier names are emitted; CTEs, derived
-subqueries, and table-valued functions are excluded. The manifest records the
-canonical relation identifier, never the SQL text.
+subqueries, and table-valued functions are excluded. The manifest records only
+the canonical relation identifier, reconstructed from the catalog/database/name
+identifiers; it never records model SQL or SQL comments.
 
-Failure is intentionally conservative. Empty SQL, a parser failure, a
-non-query statement, or multiple statements emits no partial lineage and keeps
-the existing generic profile source/edge. Other source types retain the same
+Failure is intentionally conservative. Empty SQL, unrendered `var()` calls,
+unavailable parser support, a parser failure, a non-read-only/non-query
+statement, or multiple statements emits no partial lineage and keeps the
+existing generic profile source/edge. Other source types retain the same
 behavior without invoking the parser.
 
 The HTML catalog, Mermaid output, and static DAG consume the complete source
