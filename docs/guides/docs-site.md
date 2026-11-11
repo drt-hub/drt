@@ -31,6 +31,13 @@ the same client-side filtering behavior.
 - when state is included, latest state plus bounded per-sync run history,
   including plan ids, guard outcomes and exact-replay lineage.
 
+The Overview also lists every sync with its docs-safe destination label, latest
+status, persisted last-run date/time and effective plan coverage. Last-run
+values come directly from the manifest and are never rendered as relative time;
+a sync with no run state shows an em dash. On screens up to 860px wide, the same
+table rows become stacked cards so every sync remains reachable without the
+desktop sidebar.
+
 Run history is newest-first and bounded by `--history-depth` (default 10). Use
 `--no-state` for a repository-only artifact; this omits latest state, history and
 DLQ depth while retaining config hashes and other declarations.
@@ -65,14 +72,14 @@ Do not use that flag for a public bucket or committed artifact.
 
 ## Large catalogs
 
-At eight syncs, the overview search gains owner, maturity and tag facets. Text
-search covers sync name, description, destination, tags and owner. Filtering is
-progressive enhancement: with JavaScript disabled every sync remains visible,
-and the controls work in both multi-file and `--inline` hash navigation. Escape
-closes the facet panel from the search field, a select, or the Clear button.
-Filter metadata exists only on the overview page, so multi-file output grows
-linearly with the catalog; tags are encoded individually, including tags that
-contain `|`.
+At eight syncs, a search with owner, maturity and tag facets appears directly
+above the Overview's Syncs table. Text search covers sync name, description,
+destination, tags and owner, and filters the table rows. Filtering is progressive
+enhancement: with JavaScript disabled every sync remains visible, and the controls
+work in both multi-file and `--inline` hash navigation. Escape closes the facet
+panel from the search field, a select, or the Clear button. Filter metadata exists
+only on the overview page, so multi-file output grows linearly with the catalog;
+tags are encoded individually, including tags that contain `|`.
 
 Destination pages report connector-level `drt plan` coverage. A sync page
 reports the effective result after sync-level planner blockers and is the only

@@ -119,6 +119,54 @@ def test_sync_page_has_highlighted_yaml_and_state(site: Path) -> None:
     assert "<code>number</code>" in html
 
 
+def test_overview_sync_table_lists_every_sync_with_deterministic_operational_fields(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from drt.docs.manifest import DestinationPlan
+
+    manifest = _manifest()
+    manifest.syncs[0] = replace(
+        manifest.syncs[0], plan=DestinationPlan(status="available", reason="")
+    )
+    manifest.destinations[1] = replace(
+        manifest.destinations[1],
+        plan=DestinationPlan(status="partial", reason="Append-only planning."),
+    )
+    out = tmp_path / "docs"
+    render_html(manifest, out)
+
+    html = (out / "index.html").read_text(encoding="utf-8")
+    table = re.search(r'<table class="overview-sync-table">(.*?)</table>', html, re.S).group(1)
+    rows = re.findall(r'<tr class="overview-sync-row".*?</tr>', table, re.S)
+
+    assert len(rows) == len(manifest.syncs) == 2
+    for column in ("Name", "Destination", "Status", "Last run", "Plan coverage"):
+        assert f"<th>{column}</th>" in table
+    assert 'href="sync/customers-to-discord.html"' in rows[0]
+    assert "discord (webhook)" in rows[0]
+    assert "success" in rows[0]
+    assert "2026-06-27T06:47:32Z" in rows[0]
+    assert "available" in rows[0]
+    assert 'href="sync/users-to-pg.html"' in rows[1]
+    assert "postgres (public.users)" in rows[1]
+    assert rows[1].count("—") >= 2  # no state: status and last run
+    assert "partial" in rows[1]  # destination coverage is the fallback
+    assert not re.search(r"\b(?:ago|just now|yesterday)\b", table, re.I)
+
+
+def test_overview_sync_table_has_one_responsive_dom_shape(site: Path) -> None:
+    html = (site / "index.html").read_text(encoding="utf-8")
+    css = (site / "assets/style.css").read_text(encoding="utf-8")
+
+    assert html.count('class="overview-sync-row"') == 2
+    assert html.count('data-label="Name"') == 2
+    assert ".overview-sync-table tr" in css
+    assert "content:attr(data-label)" in css
+    assert ".overview-sync-table tr[hidden]" in css
+
+
 def test_dag_is_static_svg(site: Path) -> None:
     """The DAG page inlines the layout-engine SVG (#701) — no Mermaid, no CDN."""
     html = (site / "dag.html").read_text(encoding="utf-8")
@@ -738,15 +786,26 @@ def test_scale_mode_threshold_and_facets(tmp_path: Path) -> None:
     inline_html = (inline / "index.html").read_text(encoding="utf-8")
     assert "data-scale-filter-root" not in small_html
     assert "data-scale-sync" not in small_html
+    assert small_html.count('class="overview-sync-row"') == SCALE_MODE_SYNC_THRESHOLD - 1
     assert "data-scale-filter-root" in large_html
-    assert "data-scale-sync" in large_html
+    assert large_html.count("data-scale-sync") == SCALE_MODE_SYNC_THRESHOLD
+    assert large_html.count('class="overview-sync-row"') == SCALE_MODE_SYNC_THRESHOLD
     assert 'id="drt-scale-filters" hidden' in large_html
     assert "All owners" in large_html
     assert "All maturities" in large_html
     assert "All tags" in large_html
     assert 'data-search="sync_0 description 0 discord (webhook) growth growth"' in large_html
+    assert large_html.index("data-scale-filter-root") < large_html.index(
+        'class="overview-sync-table"'
+    )
+    topbar = large_html[large_html.index('<header class="topbar">') : large_html.index("</header>")]
+    sidebar = large_html[large_html.index('<aside class="sidebar">') : large_html.index("</aside>")]
+    assert "data-scale-filter-root" not in topbar
+    assert "data-scale-sync" not in sidebar
     assert "applyScaleFilters" in (large / "assets/app.js").read_text(encoding="utf-8")
     assert "data-scale-filter-root" in inline_html and "applyScaleFilters" in inline_html
+    assert inline_html.count('class="overview-sync-row"') == SCALE_MODE_SYNC_THRESHOLD
+    assert 'href="#sync-sync-0"' in inline_html
 
 
 def test_scale_metadata_stays_on_overview_and_output_does_not_grow_quadratically(
@@ -776,7 +835,24 @@ def test_scale_filter_tags_are_json_arrays_and_preserve_pipe_characters(tmp_path
 
     assert "customer|vip" in overview
     assert 'data-tags="[&#34;customer|vip&#34;]"' in overview
-    assert 'JSON.parse(li.getAttribute("data-tags") || "[]")' in app_js
+    assert 'JSON.parse(row.getAttribute("data-tags") || "[]")' in app_js
+
+
+def test_overview_sync_name_and_scale_filter_tag_are_escaped(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    manifest = _scale_manifest(8)
+    manifest.syncs[0] = replace(manifest.syncs[0], name="<sync_0>", tags=("<customer>",))
+    out = tmp_path / "escaped"
+    render_html(manifest, out)
+
+    overview = (out / "index.html").read_text(encoding="utf-8")
+
+    assert "<sync_0>" not in overview
+    assert "<customer>" not in overview
+    assert "&lt;sync_0&gt;" in overview
+    assert "&lt;customer&gt;" in overview
+    assert 'data-tags="[&#34;&lt;customer&gt;&#34;]"' in overview
 
 
 def test_escape_focus_guard_prevents_the_facet_panel_from_reopening(site: Path) -> None:

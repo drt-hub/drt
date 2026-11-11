@@ -64,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (v1.3.2)
+
+- **`drt docs` Overview sync catalog:** the Overview now lists every sync with
+  its docs-safe destination label, status, persisted last-run date/time and
+  effective `drt plan` coverage. The scale-mode search and owner/maturity/tag
+  facets move from the top bar to directly above this table and filter its rows;
+  below 860px the same rows become stacked cards, keeping every sync reachable
+  when the sidebar is hidden. Last-run values remain manifest-derived (never
+  clock-relative), multi-file and `--inline` output stay equivalent, and the
+  manifest schema remains v7 with no new dependency.
+
 ## [1.3.1] - 2026-11-08
 
 **A richer `drt docs` catalog.** The generated catalog now shows what v1.3 records: run history with plan, guard and exact-replay lineage, per-destination and per-sync `drt plan` coverage, where a column contract came from, and a filter for projects with many syncs. Drop-in upgrade from v1.3.0; the docs manifest moves to schema v7 (additive, v1-v6 still load).

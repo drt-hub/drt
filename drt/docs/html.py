@@ -202,31 +202,13 @@ _BASE = """\
        href="{{ root }}index.html">Overview</a>
     <a class="navbtn {{ 'active' if active=='dag' }}" href="{{ root }}dag.html">DAG</a>
   </nav>
-  {% if scale_mode and active == 'overview' %}
-  <span class="search scale-search" data-scale-filter-root>
-    <input id="drt-search" type="search" placeholder="Filter…" autocomplete="off"
-      aria-label="Search syncs" aria-controls="drt-scale-filters" aria-expanded="false">
-    <span class="scale-filter-panel" id="drt-scale-filters" hidden>
-      <label>Owner
-        <select data-scale-owner><option value="">All owners</option>{% for value in scale_owners %}<option value="{{ value }}">{{ value }}</option>{% endfor %}</select>
-      </label>
-      <label>Maturity
-        <select data-scale-maturity><option value="">All maturities</option>{% for value in scale_maturities %}<option value="{{ value }}">{{ value }}</option>{% endfor %}</select>
-      </label>
-      <label>Tag
-        <select data-scale-tag><option value="">All tags</option>{% for value in scale_tags %}<option value="{{ value }}">#{{ value }}</option>{% endfor %}</select>
-      </label>
-      <button type="button" class="scale-filter-clear">Clear</button>
-      <span class="scale-filter-result" role="status" aria-live="polite"></span>
-    </span>
-  </span>
-  {% else %}<span class="search"><input id="drt-search" type="search" placeholder="Filter…" autocomplete="off"></span>{% endif %}
+  {% if active != 'overview' %}<span class="search"><input id="drt-search" type="search" placeholder="Filter…" autocomplete="off"></span>{% endif %}
 </header>
 <div class="shell">
   <aside class="sidebar">
     <details class="group" data-group="syncs" open>
       <summary>Syncs <span class="count">{{ nav.syncs|length }}</span></summary>
-      <ul>{% for s in nav.syncs %}<li{% if scale_mode and active == 'overview' %}{% set scale = scale_syncs[s.name] %} data-scale-sync data-search="{{ scale.search_text }}" data-owner="{{ scale.owner }}" data-maturity="{{ scale.maturity }}" data-tags="{{ scale.tags_json }}"{% endif %}><a href="{{ root }}sync/{{ s.slug }}.html"
+      <ul>{% for s in nav.syncs %}<li><a href="{{ root }}sync/{{ s.slug }}.html"
         {{ 'class=current' if s.slug==current_slug and active=='sync' }}>{{ s.name }}</a></li>
       {% endfor %}</ul>
     </details>
@@ -309,6 +291,41 @@ drt docs generate # rebuild this site</pre>
   <div class="card"><div class="num">{{ nav.sources|length }}</div><div class="lbl">Sources</div></div>
   <div class="card"><div class="num">{{ nav.destinations|length }}</div><div class="lbl">Destinations</div></div>
 </div>
+<h2>Syncs</h2>
+{% if scale_mode %}
+<div class="overview-sync-filter" data-scale-filter-root>
+  <input id="drt-search" type="search" placeholder="Filter syncs…" autocomplete="off"
+    aria-label="Search syncs" aria-controls="drt-scale-filters" aria-expanded="false">
+  <div class="scale-filter-panel" id="drt-scale-filters" hidden>
+    <label>Owner
+      <select data-scale-owner><option value="">All owners</option>{% for value in scale_owners %}<option value="{{ value }}">{{ value }}</option>{% endfor %}</select>
+    </label>
+    <label>Maturity
+      <select data-scale-maturity><option value="">All maturities</option>{% for value in scale_maturities %}<option value="{{ value }}">{{ value }}</option>{% endfor %}</select>
+    </label>
+    <label>Tag
+      <select data-scale-tag><option value="">All tags</option>{% for value in scale_tags %}<option value="{{ value }}">#{{ value }}</option>{% endfor %}</select>
+    </label>
+    <button type="button" class="scale-filter-clear">Clear</button>
+    <span class="scale-filter-result" role="status" aria-live="polite"></span>
+  </div>
+</div>
+{% endif %}
+<table class="overview-sync-table">
+  <thead><tr><th>Name</th><th>Destination</th><th>Status</th><th>Last run</th><th>Plan coverage</th></tr></thead>
+  <tbody>
+  {% for s in overview_syncs %}
+  <tr class="overview-sync-row"{% if scale_mode %} data-scale-sync data-search="{{ s.search_text }}" data-owner="{{ s.owner }}" data-maturity="{{ s.maturity }}" data-tags="{{ s.tags_json }}"{% endif %}>
+    <td data-label="Name"><a href="sync/{{ s.slug }}.html">{{ s.name }}</a></td>
+    <td data-label="Destination">{{ s.destination_label }}</td>
+    <td data-label="Status">{% if s.status %}<span><span class="dot" style="background:var(--{{ s.status_var }})"></span><span class="status-{{ s.status }}">{{ s.status }}</span></span>{% else %}<span class="font-mono">—</span>{% endif %}</td>
+    <td data-label="Last run" class="font-mono">{{ s.last_run or "—" }}</td>
+    <td data-label="Plan coverage"><span class="font-mono">{{ s.plan_status or "—" }}</span></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if scale_mode %}<div class="empty overview-sync-empty" data-scale-empty hidden>No matching syncs.</div>{% endif %}
 <div class="two-col">
   <div>
     <h2>Source types</h2>
@@ -676,7 +693,6 @@ def render_html(
         "schema_version": manifest.schema_version,
         "profile": manifest.project.profile if manifest.project else "",
         "nav": nav,
-        "scale_syncs": scale_syncs,
         "scale_mode": len(manifest.syncs) >= SCALE_MODE_SYNC_THRESHOLD,
         "scale_owners": sorted(
             {s.meta.owner for s in manifest.syncs if s.meta is not None and s.meta.owner}
@@ -767,7 +783,7 @@ def render_html(
             .replace("&", "\\u0026")
         )
 
-    # index.html — overview with type-distribution bars + recent runs.
+    # index.html — overview with sync catalog, type-distribution bars + recent runs.
     # Bars count *syncs* by the type of their source / destination (how many
     # syncs read from bigquery, write to postgres, …) — more telling than the
     # bare node count, and matches the ADR #500 mockup.
@@ -792,6 +808,22 @@ def render_html(
         }
         for s in runs_with_state[:10]
     ]
+    overview_syncs = []
+    for s in manifest.syncs:
+        destination = dest_by_id.get(s.destination)
+        scale = scale_syncs[s.name]
+        plan = s.plan if s.plan is not None else (destination.plan if destination else None)
+        overview_syncs.append(
+            {
+                "name": s.name,
+                "slug": sync_slugs[s.name],
+                "destination_label": destination.label if destination else s.destination,
+                "last_run": s.state.last_sync_at if s.state else None,
+                "plan_status": plan.status if plan else None,
+                **_status_fields(s),
+                **scale,
+            }
+        )
     emit(
         "index.html",
         env.get_template("index").render(
@@ -802,6 +834,7 @@ def render_html(
             source_type_counts=source_type_counts,
             destination_type_counts=destination_type_counts,
             recent_runs=recent_runs,
+            overview_syncs=overview_syncs,
             data_json=dumps(
                 {
                     "project": common["project_name"],

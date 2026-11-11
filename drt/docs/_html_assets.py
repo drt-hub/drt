@@ -75,9 +75,14 @@ code,pre,.mono { font-family:var(--mono); }
   border:1px solid var(--line); background:var(--surface); color:var(--fg);
   border-radius:6px; padding:5px 10px; font-size:13px; width:240px;
 }
-.scale-search { position:relative; }
+.overview-sync-filter { position:relative; margin:0 0 12px; width:min(100%, 320px); }
+.overview-sync-filter > input {
+  border:1px solid var(--line); background:var(--surface); color:var(--fg);
+  border-radius:6px; padding:7px 10px; font-size:13px; width:100%;
+}
 .scale-filter-panel {
-  position:absolute; right:0; top:calc(100% + 8px); width:min(680px, calc(100vw - 32px));
+  position:absolute; left:0; top:calc(100% + 8px); z-index:5;
+  width:min(680px, calc(100vw - 32px));
   display:flex; align-items:end; gap:10px; padding:12px; border:1px solid var(--line);
   border-radius:var(--radius); background:var(--surface); box-shadow:0 10px 30px rgba(15,17,21,.12);
 }
@@ -172,6 +177,14 @@ td.right, th.right { text-align:right; }
 .provenance { font-size:10px; text-transform:none; letter-spacing:0; color:var(--brand-700);
   background:var(--brand-50); border-radius:999px; padding:2px 7px; vertical-align:1px; }
 .plan-coverage, .managed-table { color:var(--muted); font-size:12.5px; }
+.overview-sync-table { table-layout:fixed; }
+.overview-sync-table th:nth-child(1) { width:23%; }
+.overview-sync-table th:nth-child(2) { width:25%; }
+.overview-sync-table th:nth-child(3) { width:14%; }
+.overview-sync-table th:nth-child(4) { width:23%; }
+.overview-sync-table td { overflow-wrap:anywhere; }
+.overview-sync-row[hidden] { display:none; }
+.overview-sync-empty { padding:18px; }
 
 /* code block chrome — header bar + line numbers + collapse */
 .codeblock { border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; position:relative; }
@@ -236,6 +249,27 @@ td.right, th.right { text-align:right; }
   .search { display:none; }  /* filters the sidebar, which is hidden here — restore with the real search UX */
   .main { padding:20px 14px; }
   table { display:block; overflow-x:auto; white-space:nowrap; }
+  .overview-sync-filter { width:100%; }
+  .scale-filter-panel { align-items:stretch; flex-direction:column; width:100%; }
+  .scale-filter-panel label { width:100%; }
+  .scale-filter-result { margin-left:0; align-self:auto; }
+  .overview-sync-table { display:block; white-space:normal; overflow:visible; }
+  .overview-sync-table thead { display:none; }
+  .overview-sync-table tbody { display:grid; gap:10px; }
+  .overview-sync-table tr {
+    display:block; border:1px solid var(--line); border-radius:var(--radius);
+    padding:6px 12px; background:var(--surface);
+  }
+  .overview-sync-table tr[hidden] { display:none; }
+  .overview-sync-table td {
+    display:grid; grid-template-columns:108px minmax(0, 1fr); gap:10px;
+    padding:7px 0; border-bottom:1px solid var(--line); min-width:0;
+  }
+  .overview-sync-table td:last-child { border-bottom:0; }
+  .overview-sync-table td::before {
+    content:attr(data-label); color:var(--muted); font-weight:600;
+  }
+  .overview-sync-table a { overflow-wrap:anywhere; }
   .kv { grid-template-columns:120px 1fr; }
 }
 """
@@ -264,21 +298,14 @@ APP_JS = """\
     });
   }
 
-  // Filter sidebar links by text.
+  // Filter the overview sync table in scale mode; elsewhere filter sidebar links.
   function wireSearch() {
     var input = document.getElementById("drt-search");
     if (!input) return;
     var scaleRoot = input.closest("[data-scale-filter-root]");
     var sidebar = document.querySelector(".sidebar");
-    var emptyMsg = null;
-    if (sidebar) {
-      emptyMsg = document.createElement("div");
-      emptyMsg.className = "search-empty";
-      emptyMsg.textContent = "No matches";
-      emptyMsg.hidden = true;
-      sidebar.appendChild(emptyMsg);
-    }
     if (scaleRoot) {
+      var emptyMsg = document.querySelector("[data-scale-empty]");
       var panel = scaleRoot.querySelector(".scale-filter-panel");
       var owner = scaleRoot.querySelector("[data-scale-owner]");
       var maturity = scaleRoot.querySelector("[data-scale-maturity]");
@@ -298,13 +325,13 @@ APP_JS = """\
         var maturityValue = maturity.value;
         var tagValue = tag.value;
         var visible = 0;
-        document.querySelectorAll("[data-scale-sync]").forEach(function (li) {
-          var tags = JSON.parse(li.getAttribute("data-tags") || "[]");
-          var hit = (!q || (li.getAttribute("data-search") || "").indexOf(q) !== -1) &&
-            (!ownerValue || li.getAttribute("data-owner") === ownerValue) &&
-            (!maturityValue || li.getAttribute("data-maturity") === maturityValue) &&
+        document.querySelectorAll(".overview-sync-table [data-scale-sync]").forEach(function (row) {
+          var tags = JSON.parse(row.getAttribute("data-tags") || "[]");
+          var hit = (!q || (row.getAttribute("data-search") || "").indexOf(q) !== -1) &&
+            (!ownerValue || row.getAttribute("data-owner") === ownerValue) &&
+            (!maturityValue || row.getAttribute("data-maturity") === maturityValue) &&
             (!tagValue || tags.indexOf(tagValue) !== -1);
-          li.hidden = !hit;
+          row.hidden = !hit;
           if (hit) visible += 1;
         });
         result.textContent = visible + (visible === 1 ? " sync" : " syncs");
@@ -341,6 +368,14 @@ APP_JS = """\
       });
       applyScaleFilters();
       return;
+    }
+    var emptyMsg = null;
+    if (sidebar) {
+      emptyMsg = document.createElement("div");
+      emptyMsg.className = "search-empty";
+      emptyMsg.textContent = "No matches";
+      emptyMsg.hidden = true;
+      sidebar.appendChild(emptyMsg);
     }
     input.addEventListener("input", function () {
       var q = input.value.trim().toLowerCase();
