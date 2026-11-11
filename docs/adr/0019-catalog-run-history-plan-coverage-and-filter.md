@@ -90,3 +90,16 @@ manifest/config data. No runtime dependency is added.
   that pin a schema version can deliberately add v7 support.
 - The catalog does not answer “is this sync stale now?”; that remains
   `drt status --check`.
+
+## Amendment 2026-11
+
+The Overview now includes a five-column Syncs table (name, docs-safe destination,
+status, persisted last run and effective plan coverage). At 860px and below, CSS
+restyles those same rows as cards; no duplicate mobile DOM is emitted. This closes
+the navigation gap created when the desktop sidebar is hidden.
+
+Scale-mode search and facets move from the top bar to directly above that table
+and filter its rows. The threshold, search corpus, ARIA behavior and Escape fix
+remain unchanged. Last-run text is copied from manifest state (or shown as an em
+dash), never computed relative to the generation clock. Multi-file and `--inline`
+output continue to share the same rendered content and deterministic bytes.

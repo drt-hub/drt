@@ -18,6 +18,7 @@ from drt.docs.manifest import (
     Source,
     Sync,
     SyncColumn,
+    SyncRun,
     SyncStateSnapshot,
 )
 
@@ -117,6 +118,179 @@ def test_sync_page_has_highlighted_yaml_and_state(site: Path) -> None:
     assert "Primary identifier" in html
     assert "<code>score</code>" in html
     assert "<code>number</code>" in html
+
+
+def test_overview_sync_table_lists_every_sync_with_deterministic_operational_fields(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from drt.docs.manifest import DestinationPlan
+
+    manifest = _manifest()
+    manifest.syncs[0] = replace(
+        manifest.syncs[0], plan=DestinationPlan(status="available", reason="")
+    )
+    manifest.destinations[1] = replace(
+        manifest.destinations[1],
+        plan=DestinationPlan(status="partial", reason="Append-only planning."),
+    )
+    out = tmp_path / "docs"
+    render_html(manifest, out)
+
+    html = (out / "index.html").read_text(encoding="utf-8")
+    table = re.search(r'<table class="overview-sync-table"[^>]*>(.*?)</table>', html, re.S).group(1)
+    rows = re.findall(r'<tr class="overview-sync-row".*?</tr>', table, re.S)
+
+    assert len(rows) == len(manifest.syncs) == 2
+    for column in ("Name", "Destination", "Status", "Last run", "Plan coverage"):
+        assert f'<th scope="col" role="columnheader">{column}</th>' in table
+    assert 'href="sync/customers-to-discord.html"' in rows[0]
+    assert "discord (webhook)" in rows[0]
+    assert "success" in rows[0]
+    assert "2026-06-27T06:47:32Z" in rows[0]
+    assert "available" in rows[0]
+    assert 'href="sync/users-to-pg.html"' in rows[1]
+    assert "postgres (public.users)" in rows[1]
+    assert rows[1].count("—") >= 2  # no state: status and last run
+    assert "partial" in rows[1]  # destination coverage is the fallback
+    assert not re.search(r"\b(?:ago|just now|yesterday)\b", table, re.I)
+
+
+def _first_overview_row(manifest: Manifest, tmp_path: Path) -> str:
+    out = tmp_path / "docs"
+    render_html(manifest, out)
+    html = (out / "index.html").read_text(encoding="utf-8")
+    return re.search(r'<tr class="overview-sync-row".*?</tr>', html, re.S).group(0)
+
+
+def test_overview_sync_table_prefers_newer_failed_history_over_state(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    run = SyncRun(
+        started_at="2026-11-07T01:00:04Z",
+        completed_at="2026-11-07T01:00:05Z",
+        duration_seconds=1.0,
+        status="failed",
+        records_synced=0,
+        records_failed=1,
+    )
+    old_state = SyncStateSnapshot(
+        # Same instant as 01:00 UTC, in a different valid ISO form. Comparison
+        # must use parsed UTC datetimes while preserving the chosen run string.
+        last_sync_at="2026-11-07T10:00:00+09:00",
+        last_cursor_value=None,
+        rows_synced=3,
+        last_status="success",
+        last_error=None,
+    )
+    manifest = _manifest()
+    manifest.syncs[0] = replace(manifest.syncs[0], state=old_state, runs=(run,))
+
+    row = _first_overview_row(manifest, tmp_path)
+
+    assert "2026-11-07T01:00:05Z" in row
+    assert "2026-11-07T10:00:00+09:00" not in row
+    assert "status-failed" in row
+    assert "status-success" not in row
+
+
+def test_overview_sync_table_uses_state_when_history_is_absent(tmp_path: Path) -> None:
+    row = _first_overview_row(_manifest(), tmp_path)
+
+    assert "2026-06-27T06:47:32Z" in row
+    assert "status-success" in row
+
+
+def test_overview_sync_table_uses_history_when_state_is_absent(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    run = SyncRun(
+        started_at="2026-11-07 01:00:00+00:00",
+        completed_at="2026-11-07 01:00:03+00:00",
+        duration_seconds=3.0,
+        status="partial",
+        records_synced=2,
+        records_failed=1,
+    )
+    manifest = _manifest()
+    manifest.syncs[0] = replace(manifest.syncs[0], state=None, runs=(run,))
+
+    row = _first_overview_row(manifest, tmp_path)
+
+    assert "2026-11-07 01:00:03+00:00" in row
+    assert "status-partial" in row
+
+
+def test_overview_sync_table_uses_em_dash_without_state_or_history(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    manifest = _manifest()
+    manifest.syncs[0] = replace(manifest.syncs[0], state=None, runs=())
+
+    row = _first_overview_row(manifest, tmp_path)
+
+    assert re.search(r'data-label="Status">.*?—.*?</td>', row, re.S)
+    assert re.search(r'data-label="Last run"[^>]*>—</td>', row)
+
+
+def test_overview_sync_table_has_one_responsive_dom_shape(site: Path) -> None:
+    html = (site / "index.html").read_text(encoding="utf-8")
+    css = (site / "assets/style.css").read_text(encoding="utf-8")
+
+    assert html.count('class="overview-sync-row"') == 2
+    assert html.count('data-label="Name"') == 2
+    assert '<table class="overview-sync-table" role="table">' in html
+    assert '<thead role="rowgroup"><tr role="row">' in html
+    assert '<tbody role="rowgroup">' in html
+    assert html.count('role="columnheader"') >= 5
+    assert '<th scope="col" role="columnheader">Name</th>' in html
+    assert html.count('class="overview-sync-row" role="row"') == 2
+    assert html.count('role="cell" data-label=') == 10
+    assert ".overview-sync-table tr" in css
+    assert "content:attr(data-label)" in css
+    assert ".overview-sync-table tr[hidden]" in css
+    assert ".overview-sync-table thead {\n    position:absolute" in css
+    assert ".overview-sync-table thead { display:none; }" not in css
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    def luminance(value: str) -> float:
+        channels = [int(value[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [
+            channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        ]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    lighter, darker = sorted((luminance(foreground), luminance(background)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def test_overview_sync_links_meet_dark_theme_contrast(site: Path) -> None:
+    css = (site / "assets/style.css").read_text(encoding="utf-8")
+
+    assert css.count(".overview-sync-table a { color:var(--brand-400); }") == 2
+    assert ':root[data-theme="dark"] .overview-sync-table a' in css
+    brand = re.search(r"--brand-400:(#[0-9a-f]{6})", css).group(1)
+    page = re.search(r"--ink-900:(#[0-9a-f]{6})", css).group(1)
+    card = re.search(r"--ink-800:(#[0-9a-f]{6})", css).group(1)
+
+    assert _contrast_ratio(brand, page) >= 4.5
+    assert _contrast_ratio(brand, card) >= 4.5
+
+
+def test_overview_sync_responsive_cards_are_screen_only_and_filter_does_not_print(
+    site: Path,
+) -> None:
+    css = (site / "assets/style.css").read_text(encoding="utf-8")
+    print_rules = re.search(r"@media print \{(.*?)\n\}", css, re.S).group(1)
+
+    assert "@media screen and (max-width:860px)" in css
+    assert "@media (max-width:860px)" not in css
+    assert ".overview-sync-filter" in print_rules
 
 
 def test_dag_is_static_svg(site: Path) -> None:
@@ -738,15 +912,26 @@ def test_scale_mode_threshold_and_facets(tmp_path: Path) -> None:
     inline_html = (inline / "index.html").read_text(encoding="utf-8")
     assert "data-scale-filter-root" not in small_html
     assert "data-scale-sync" not in small_html
+    assert small_html.count('class="overview-sync-row"') == SCALE_MODE_SYNC_THRESHOLD - 1
     assert "data-scale-filter-root" in large_html
-    assert "data-scale-sync" in large_html
+    assert large_html.count("data-scale-sync") == SCALE_MODE_SYNC_THRESHOLD
+    assert large_html.count('class="overview-sync-row"') == SCALE_MODE_SYNC_THRESHOLD
     assert 'id="drt-scale-filters" hidden' in large_html
     assert "All owners" in large_html
     assert "All maturities" in large_html
     assert "All tags" in large_html
     assert 'data-search="sync_0 description 0 discord (webhook) growth growth"' in large_html
+    assert large_html.index("data-scale-filter-root") < large_html.index(
+        'class="overview-sync-table"'
+    )
+    topbar = large_html[large_html.index('<header class="topbar">') : large_html.index("</header>")]
+    sidebar = large_html[large_html.index('<aside class="sidebar">') : large_html.index("</aside>")]
+    assert "data-scale-filter-root" not in topbar
+    assert "data-scale-sync" not in sidebar
     assert "applyScaleFilters" in (large / "assets/app.js").read_text(encoding="utf-8")
     assert "data-scale-filter-root" in inline_html and "applyScaleFilters" in inline_html
+    assert inline_html.count('class="overview-sync-row"') == SCALE_MODE_SYNC_THRESHOLD
+    assert 'href="#sync-sync-0"' in inline_html
 
 
 def test_scale_metadata_stays_on_overview_and_output_does_not_grow_quadratically(
@@ -776,7 +961,24 @@ def test_scale_filter_tags_are_json_arrays_and_preserve_pipe_characters(tmp_path
 
     assert "customer|vip" in overview
     assert 'data-tags="[&#34;customer|vip&#34;]"' in overview
-    assert 'JSON.parse(li.getAttribute("data-tags") || "[]")' in app_js
+    assert 'JSON.parse(row.getAttribute("data-tags") || "[]")' in app_js
+
+
+def test_overview_sync_name_and_scale_filter_tag_are_escaped(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    manifest = _scale_manifest(8)
+    manifest.syncs[0] = replace(manifest.syncs[0], name="<sync_0>", tags=("<customer>",))
+    out = tmp_path / "escaped"
+    render_html(manifest, out)
+
+    overview = (out / "index.html").read_text(encoding="utf-8")
+
+    assert "<sync_0>" not in overview
+    assert "<customer>" not in overview
+    assert "&lt;sync_0&gt;" in overview
+    assert "&lt;customer&gt;" in overview
+    assert 'data-tags="[&#34;&lt;customer&gt;&#34;]"' in overview
 
 
 def test_escape_focus_guard_prevents_the_facet_panel_from_reopening(site: Path) -> None:

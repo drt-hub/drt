@@ -68,6 +68,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`drt retry` now releases the destination's write state** ([#1323](https://github.com/drt-hub/drt/issues/1323)): `replay_dead_letters()` (CLI and MCP `drt_retry`) called `destination.load()` but never the `reset_write_state` hook that `run_sync()` calls from its `finally`, so a destination holding a client across `load()` calls was never released by a retry. The hook now runs best-effort on every exit path; `finalize_sync` is deliberately not called (it performs mirror deletes, swap cutover and managed-table DDL).
 
+### Changed (v1.3.2)
+
+- **`drt docs` Overview sync catalog:** the Overview now lists every sync with
+  its docs-safe destination label, status, persisted last-run date/time and
+  effective `drt plan` coverage. The scale-mode search and owner/maturity/tag
+  facets move from the top bar to directly above this table and filter its rows;
+  below 860px the same rows become stacked cards, keeping every sync reachable
+  when the sidebar is hidden. The table picks status and timestamp together from
+  the newest state snapshot or run-history entry, retains accessible table
+  semantics in the card layout, meets dark-theme link contrast, and prints as a
+  compact table without its filter. Last-run values remain manifest-derived
+  (never clock-relative), multi-file and `--inline` output stay equivalent, and
+  the manifest schema remains v7 with no new dependency.
+
 ## [1.3.1] - 2026-11-08
 
 **A richer `drt docs` catalog.** The generated catalog now shows what v1.3 records: run history with plan, guard and exact-replay lineage, per-destination and per-sync `drt plan` coverage, where a column contract came from, and a filter for projects with many syncs. Drop-in upgrade from v1.3.0; the docs manifest moves to schema v7 (additive, v1-v6 still load).
