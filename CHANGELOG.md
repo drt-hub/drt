@@ -71,9 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   effective `drt plan` coverage. The scale-mode search and owner/maturity/tag
   facets move from the top bar to directly above this table and filter its rows;
   below 860px the same rows become stacked cards, keeping every sync reachable
-  when the sidebar is hidden. Last-run values remain manifest-derived (never
-  clock-relative), multi-file and `--inline` output stay equivalent, and the
-  manifest schema remains v7 with no new dependency.
+  when the sidebar is hidden. The table picks status and timestamp together from
+  the newest state snapshot or run-history entry, retains accessible table
+  semantics in the card layout, meets dark-theme link contrast, and prints as a
+  compact table without its filter. Last-run values remain manifest-derived
+  (never clock-relative), multi-file and `--inline` output stay equivalent, and
+  the manifest schema remains v7 with no new dependency.
 
 ## [1.3.1] - 2026-11-08
 

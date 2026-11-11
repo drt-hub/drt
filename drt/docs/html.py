@@ -16,6 +16,7 @@ import json
 import re
 import shutil
 from collections import Counter
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
@@ -311,16 +312,16 @@ drt docs generate # rebuild this site</pre>
   </div>
 </div>
 {% endif %}
-<table class="overview-sync-table">
-  <thead><tr><th>Name</th><th>Destination</th><th>Status</th><th>Last run</th><th>Plan coverage</th></tr></thead>
-  <tbody>
+<table class="overview-sync-table" role="table">
+  <thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Name</th><th scope="col" role="columnheader">Destination</th><th scope="col" role="columnheader">Status</th><th scope="col" role="columnheader">Last run</th><th scope="col" role="columnheader">Plan coverage</th></tr></thead>
+  <tbody role="rowgroup">
   {% for s in overview_syncs %}
-  <tr class="overview-sync-row"{% if scale_mode %} data-scale-sync data-search="{{ s.search_text }}" data-owner="{{ s.owner }}" data-maturity="{{ s.maturity }}" data-tags="{{ s.tags_json }}"{% endif %}>
-    <td data-label="Name"><a href="sync/{{ s.slug }}.html">{{ s.name }}</a></td>
-    <td data-label="Destination">{{ s.destination_label }}</td>
-    <td data-label="Status">{% if s.status %}<span><span class="dot" style="background:var(--{{ s.status_var }})"></span><span class="status-{{ s.status }}">{{ s.status }}</span></span>{% else %}<span class="font-mono">—</span>{% endif %}</td>
-    <td data-label="Last run" class="font-mono">{{ s.last_run or "—" }}</td>
-    <td data-label="Plan coverage"><span class="font-mono">{{ s.plan_status or "—" }}</span></td>
+  <tr class="overview-sync-row" role="row"{% if scale_mode %} data-scale-sync data-search="{{ s.search_text }}" data-owner="{{ s.owner }}" data-maturity="{{ s.maturity }}" data-tags="{{ s.tags_json }}"{% endif %}>
+    <td role="cell" data-label="Name"><a href="sync/{{ s.slug }}.html">{{ s.name }}</a></td>
+    <td role="cell" data-label="Destination">{{ s.destination_label }}</td>
+    <td role="cell" data-label="Status">{% if s.status %}<span><span class="dot" style="background:var(--{{ s.status_var }})"></span><span class="status-{{ s.status }}">{{ s.status }}</span></span>{% else %}<span class="font-mono">—</span>{% endif %}</td>
+    <td role="cell" data-label="Last run" class="font-mono">{{ s.last_run or "—" }}</td>
+    <td role="cell" data-label="Plan coverage"><span class="font-mono">{{ s.plan_status or "—" }}</span></td>
   </tr>
   {% endfor %}
   </tbody>
@@ -627,8 +628,54 @@ def render_html(
     def _status_fields(s: Sync) -> dict[str, str | None]:
         if s.state is None:
             return {"status": None, "status_var": None}
-        st = s.state.last_status
-        return {"status": st, "status_var": _status_vars.get(st, "muted")}
+        status = s.state.last_status
+        return {"status": status, "status_var": _status_vars.get(status, "muted")}
+
+    def _parse_utc(value: str | None) -> datetime | None:
+        """Parse common ISO-8601 forms for comparison without rewriting output."""
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _overview_run_fields(s: Sync) -> dict[str, str | None]:
+        state_timestamp = s.state.last_sync_at if s.state else None
+        state_parsed = _parse_utc(state_timestamp)
+
+        run = s.runs[0] if s.runs else None
+        run_timestamps = (run.started_at, run.completed_at) if run else ()
+        parsed_run_timestamps = [
+            (parsed, timestamp)
+            for timestamp in run_timestamps
+            if (parsed := _parse_utc(timestamp)) is not None
+        ]
+        run_parsed, run_timestamp = (
+            max(parsed_run_timestamps, key=lambda item: item[0])
+            if parsed_run_timestamps
+            else (None, run.completed_at or run.started_at)
+            if run
+            else (None, None)
+        )
+
+        # A history entry wins ties: unlike state, it is also persisted when a
+        # failed run exits before the state observer can update its snapshot.
+        use_run = run is not None and (
+            state_timestamp is None
+            or state_parsed is None
+            or (run_parsed is not None and run_parsed >= state_parsed)
+        )
+        status = run.status if use_run and run else s.state.last_status if s.state else None
+        timestamp = run_timestamp if use_run else state_timestamp
+        return {
+            "last_run": timestamp,
+            "status": status,
+            "status_var": _status_vars.get(status, "muted") if status else None,
+        }
 
     def _badge_dict(conn_type: str) -> dict[str, str]:
         initials, bg, fg = _badge(conn_type)
@@ -818,9 +865,8 @@ def render_html(
                 "name": s.name,
                 "slug": sync_slugs[s.name],
                 "destination_label": destination.label if destination else s.destination,
-                "last_run": s.state.last_sync_at if s.state else None,
                 "plan_status": plan.status if plan else None,
-                **_status_fields(s),
+                **_overview_run_fields(s),
                 **scale,
             }
         )

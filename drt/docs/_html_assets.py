@@ -145,7 +145,7 @@ pre.code { background:var(--surface); border:1px solid var(--line); border-radiu
 .search-empty { color:var(--muted); font-size:12.5px; font-style:italic; padding:2px 4px; }
 
 @media print {
-  .topbar, .sidebar, .skip, .copy-btn, .expand-btn, .tabs { display:none !important; }
+  .topbar, .sidebar, .skip, .copy-btn, .expand-btn, .tabs, .overview-sync-filter { display:none !important; }
   .js .tab-panel:not(.active) { display:block !important; }
   .js .collapsible:not(.open) .codebody { max-height:none !important; }
   .js .collapsible:not(.open) .codebody::after { display:none !important; }
@@ -185,6 +185,10 @@ td.right, th.right { text-align:right; }
 .overview-sync-table td { overflow-wrap:anywhere; }
 .overview-sync-row[hidden] { display:none; }
 .overview-sync-empty { padding:18px; }
+@media (prefers-color-scheme: dark) {
+  .overview-sync-table a { color:var(--brand-400); }
+}
+:root[data-theme="dark"] .overview-sync-table a { color:var(--brand-400); }
 
 /* code block chrome — header bar + line numbers + collapse */
 .codeblock { border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; position:relative; }
@@ -241,7 +245,7 @@ td.right, th.right { text-align:right; }
 .dag svg .mono { font-family:var(--mono); }
 .group a .count { float:right; }
 
-@media (max-width:860px) {
+@media screen and (max-width:860px) {
   .cards, .two-col { grid-template-columns:1fr; }
   .sidebar { display:none; }
   .topbar { flex-wrap:wrap; row-gap:6px; padding:10px 12px; }
@@ -254,7 +258,10 @@ td.right, th.right { text-align:right; }
   .scale-filter-panel label { width:100%; }
   .scale-filter-result { margin-left:0; align-self:auto; }
   .overview-sync-table { display:block; white-space:normal; overflow:visible; }
-  .overview-sync-table thead { display:none; }
+  .overview-sync-table thead {
+    position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0;
+  }
   .overview-sync-table tbody { display:grid; gap:10px; }
   .overview-sync-table tr {
     display:block; border:1px solid var(--line); border-radius:var(--radius);
