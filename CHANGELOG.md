@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`drt retry` now releases the destination's write state** ([#1323](https://github.com/drt-hub/drt/issues/1323)): `replay_dead_letters()` (CLI and MCP `drt_retry`) called `destination.load()` but never the `reset_write_state` hook that `run_sync()` calls from its `finally`, so a destination holding a client across `load()` calls was never released by a retry. The hook now runs best-effort on every exit path; `finalize_sync` is deliberately not called (it performs mirror deletes, swap cutover and managed-table DDL).
+
 ## [1.3.1] - 2026-11-08
 
 **A richer `drt docs` catalog.** The generated catalog now shows what v1.3 records: run history with plan, guard and exact-replay lineage, per-destination and per-sync `drt plan` coverage, where a column contract came from, and a filter for projects with many syncs. Drop-in upgrade from v1.3.0; the docs manifest moves to schema v7 (additive, v1-v6 still load).
