@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`drt retry` now releases the destination's write state** ([#1323](https://github.com/drt-hub/drt/issues/1323)): `replay_dead_letters()` (CLI and MCP `drt_retry`) called `destination.load()` but never the `reset_write_state` hook that `run_sync()` calls from its `finally`, so a destination holding a client across `load()` calls was never released by a retry. The hook now runs best-effort on every exit path; `finalize_sync` is deliberately not called (it performs mirror deletes, swap cutover and managed-table DDL).
+
 ### Changed (v1.3.2)
 
 - **`drt docs` Overview sync catalog:** the Overview now lists every sync with
