@@ -64,11 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [1.3.2] - 2026-11-12
 
-- **`drt retry` now releases the destination's write state** ([#1323](https://github.com/drt-hub/drt/issues/1323)): `replay_dead_letters()` (CLI and MCP `drt_retry`) called `destination.load()` but never the `reset_write_state` hook that `run_sync()` calls from its `finally`, so a destination holding a client across `load()` calls was never released by a retry. The hook now runs best-effort on every exit path; `finalize_sync` is deliberately not called (it performs mirror deletes, swap cutover and managed-table DDL).
+**Every sync, one click from the Overview — and a retry fix.** The `drt docs` Overview now lists all syncs in a table (cards on narrow screens, so nothing is unreachable when the sidebar is hidden) with the large-project filter directly above it, and `drt retry` releases the destination's write state like `drt run` does. Drop-in upgrade from v1.3.1; no manifest or config changes.
 
-### Changed (v1.3.2)
+### Changed
 
 - **`drt docs` Overview sync catalog:** the Overview now lists every sync with
   its docs-safe destination label, status, persisted last-run date/time and
@@ -81,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compact table without its filter. Last-run values remain manifest-derived
   (never clock-relative), multi-file and `--inline` output stay equivalent, and
   the manifest schema remains v7 with no new dependency.
+
+### Fixed
+
+- **`drt retry` now releases the destination's write state** ([#1323](https://github.com/drt-hub/drt/issues/1323)): `replay_dead_letters()` (CLI and MCP `drt_retry`) called `destination.load()` but never the `reset_write_state` hook that `run_sync()` calls from its `finally`, so a destination holding a client across `load()` calls was never released by a retry. The hook now runs best-effort on every exit path; `finalize_sync` is deliberately not called (it performs mirror deletes, swap cutover and managed-table DDL).
 
 ## [1.3.1] - 2026-11-08
 
