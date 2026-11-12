@@ -484,7 +484,7 @@ run history. Guide: `docs/guides/managed-destination-tables.md`.
 ### Catalog metadata (`meta:`, v1.3, #1226)
 
 `meta: {owner, owner_email, maturity: high|medium|low}` has no runtime effect; it feeds the docs
-site, the manifest (schema v5; `owner_email` only with `--full-labels`) and dbt exposures (never the
+site, the manifest (schema v7; `owner_email` only with `--full-labels`) and dbt exposures (never the
 e-mail). Freshness is *declared* via `alerts.on_stale` and checked with `drt status --check`.
 
 ### Change guards (`sync.guards`, #1218)

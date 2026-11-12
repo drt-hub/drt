@@ -51,6 +51,9 @@ async function expectStableScreenshot(
 
 test("overview page @desktop", async ({ page }) => {
   await openDocsPage(page, "/index.html");
+  await expect(page.locator("header [data-scale-filter-root]")).toHaveCount(0);
+  await expect(page.locator("main [data-scale-filter-root]")).toBeVisible();
+  await expect(page.locator(".overview-sync-row")).toHaveCount(10);
   await expectStableScreenshot(page, "overview.png");
 });
 
@@ -73,6 +76,13 @@ test("sync definition and lineage tabs @desktop", async ({ page }) => {
 
 test("overview page @mobile", async ({ page }) => {
   await openDocsPage(page, "/index.html");
+  const table = page.locator(".overview-sync-table");
+  await expect(table.locator("a")).toHaveCount(10);
+  await table.scrollIntoViewIfNeeded();
+  await expect(table.locator(".overview-sync-row").first()).toHaveCSS(
+    "display",
+    "block",
+  );
   await expectStableScreenshot(page, "overview.png", false);
 });
 

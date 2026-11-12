@@ -10,6 +10,7 @@ refactor).
 from __future__ import annotations
 
 import logging
+import re
 
 from typer.testing import CliRunner
 
@@ -41,4 +42,7 @@ def test_run_rejects_invalid_log_format() -> None:
     """Choice derived from the LogFormat Enum rejects unknown values."""
     result = runner.invoke(app, ["run", "--log-format", "invalid"])
     assert result.exit_code == 2
-    assert "'invalid' is not one of 'text', 'json'" in result.output
+    # Newer Typer/Click render the error inside a Rich box and wrap it at the
+    # terminal width, so compare the message with the box and line breaks removed.
+    flat = " ".join(re.sub(r"\x1b\[[0-9;]*m|[│╭╮╰╯─]", " ", result.output).split())
+    assert "'invalid' is not one of 'text', 'json'" in flat

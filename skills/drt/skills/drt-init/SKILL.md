@@ -124,6 +124,6 @@ Guide the user through initializing a new drt project.
 - `drt status` shows recent run results; `drt status --output json` is the CI-friendly form.
 - Every `drt run` that resolves syncs also writes `target/drt/run_results.json`; `--target-path` relocates it for CI artifact upload.
 - PR CI can generate a schema-v3 manifest and run only changed definitions with `--select state:modified --state <manifest.json>` (also valid on build/test/validate).
-- `drt docs generate` (v0.7.11+) renders a static HTML catalog of your project — every sync, its model, destination, and a lineage DAG — to `target/docs/`. Labels are docs-safe by default (endpoints/emails/phones stripped, #696); add `--format mermaid` or `--format json` for other outputs.
+- `drt docs generate` (v0.7.11+) renders a static HTML catalog of your project — every sync, its model, destination, and a lineage DAG — to `target/docs/`. Labels are docs-safe by default (endpoints/emails/phones stripped, #696); add `--format mermaid` or `--format json` for other outputs. Since v1.3.1 each sync page also shows recent run history, `drt plan` coverage and whether its column contract is hand-written or dbt-derived; large projects get an owner/maturity/tag filter.
 - For non-US BigQuery datasets, set `location` in `profiles.yml` (e.g. `"EU"`, `"asia-northeast1"`).
 - Want to try drt without installing locally? Open the repo in GitHub Codespaces — the devcontainer ships drt + a seeded DuckDB warehouse + the `duckdb_to_rest` template pre-scaffolded.
