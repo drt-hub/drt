@@ -28,14 +28,22 @@ def _slug_map(names: list[str], kind: str) -> dict[str, str]:
     """
     del kind  # Kept in the public helper signature for existing callers.
 
-    groups: dict[str, list[str]] = {}
-    for name in names:
-        groups.setdefault(_slug(name), []).append(name)
-
+    bases = {name: _slug(name) for name in names}
+    # Reserve all natural slugs before allocating suffixes.  A generated
+    # ``sales-data-2`` must not steal the natural slug for an actual
+    # ``sales-data-2`` node.
+    reserved = set(bases.values())
+    taken: set[str] = set()
     out: dict[str, str] = {}
-    for base, members in groups.items():
-        for index, name in enumerate(sorted(members), start=1):
-            out[name] = base if index == 1 else f"{base}-{index}"
+    for name in sorted(names):
+        base = bases[name]
+        candidate = base
+        suffix = 2
+        while candidate in taken or (candidate != base and candidate in reserved):
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        out[name] = candidate
+        taken.add(candidate)
     return out
 
 

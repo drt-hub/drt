@@ -236,6 +236,7 @@ def test_slug_collision_gets_stable_suffixes(tmp_path: Path) -> None:
         syncs=[
             Sync(name="sales-data", source="default", destination="d", mode="full"),
             Sync(name="sales_data", source="default", destination="d", mode="full"),
+            Sync(name="sales-data-2", source="default", destination="d", mode="full"),
         ],
     )
     output = tmp_path / "docs"
@@ -243,6 +244,7 @@ def test_slug_collision_gets_stable_suffixes(tmp_path: Path) -> None:
 
     assert (output / "sync/sales-data.html").exists()
     assert (output / "sync/sales-data-2.html").exists()
+    assert (output / "sync/sales-data-3.html").exists()
 
 
 def test_rmtree_guard_refuses_non_docs_directory(tmp_path: Path) -> None:

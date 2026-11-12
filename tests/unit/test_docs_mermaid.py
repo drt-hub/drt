@@ -18,7 +18,7 @@ from drt.docs.manifest import (
     Source,
     Sync,
 )
-from drt.docs.mermaid import render_mermaid
+from drt.docs.mermaid import _node_ids, render_mermaid
 
 runner = CliRunner()
 
@@ -76,6 +76,13 @@ def _postgres_sync(
 
 
 class TestRenderMermaid:
+    def test_node_ids_reserve_naturally_suffixed_names(self) -> None:
+        assert _node_ids("src", ["sales-data", "sales_data", "sales_data_2"]) == {
+            "sales-data": "src_sales_data",
+            "sales_data": "src_sales_data_3",
+            "sales_data_2": "src_sales_data_2",
+        }
+
     def test_empty_project_renders_placeholder(self) -> None:
         out = render_mermaid(_manifest())
         assert out.startswith("graph LR")

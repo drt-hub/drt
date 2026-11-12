@@ -16,14 +16,22 @@ def _node_id(prefix: str, name: str) -> str:
 
 def _node_ids(prefix: str, names: list[str]) -> dict[str, str]:
     """Allocate collision-free Mermaid ids within one node kind."""
-    groups: dict[str, list[str]] = {}
-    for name in names:
-        groups.setdefault(_node_id(prefix, name), []).append(name)
-
+    bases = {name: _node_id(prefix, name) for name in names}
+    # Reserve every natural id up front.  Otherwise a collision such as
+    # ``sales-data`` / ``sales_data`` can claim ``src_sales_data_2``, which
+    # belongs naturally to a third name, ``sales_data_2``.
+    reserved = set(bases.values())
+    taken: set[str] = set()
     ids: dict[str, str] = {}
-    for base, members in groups.items():
-        for index, name in enumerate(sorted(members), start=1):
-            ids[name] = base if index == 1 else f"{base}_{index}"
+    for name in sorted(names):
+        base = bases[name]
+        candidate = base
+        suffix = 2
+        while candidate in taken or (candidate != base and candidate in reserved):
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        ids[name] = candidate
+        taken.add(candidate)
     return ids
 
 
