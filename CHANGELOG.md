@@ -64,11 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (v1.3.3)
+## [1.3.3] - 2026-11-14
+
+**Where a sync really reads from.** For projects on PostgreSQL, `drt docs` can now show the physical tables a hand-written model reads, instead of just the profile — in the lineage graph, on each sync page and in the Overview table. Contributed by Muawiya-contact. Opt-in and additive: the docs manifest moves to schema v8 (v1-v7 still load), nothing else changes.
+
+### Added
 
 - **Postgres raw-SQL source-table lineage in `drt docs`** ([#1045](https://github.com/drt-hub/drt/issues/1045), [ADR 0020](docs/adr/0020-postgres-raw-sql-source-lineage.md)): projects that explicitly declare `source.type: postgres` and install the `docs` extra now publish the physical relations read by a hand-written model or local `syncs/models/<ref>.sql` override. The parser follows Postgres scopes, so CTE aliases, derived queries and table-valued functions are not claimed as tables; joins and nested queries create one source edge per real relation. Manifest **schema v8** adds omit-when-unavailable `syncs[].sources` while preserving the deterministic primary `syncs[].source` for single-source consumers; HTML, Mermaid and static DAG views render every input. Model SQL never enters manifest JSON. Unsupported dialects, dbt-resolved refs, unrendered `var()` calls, non-read-only/invalid/multi-statement SQL, unavailable parser support and parser failures conservatively retain the former profile-level lineage. This docs-only feature adds optional MIT-licensed `sqlglot` parser support; it changes neither extraction nor destination writes.
 
-### Changed (v1.3.3)
+### Changed
 
 - **Overview sync catalog shows source lineage:** the `drt docs` Overview Syncs table now links every source for each sync, including the configured profile for single-source syncs and all physical relations for supported raw Postgres models. The responsive card layout includes the same source links, and large-catalog text search matches source names. Manifest schema remains v8 and generated output remains deterministic.
 
