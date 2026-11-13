@@ -19,23 +19,31 @@ def _slug(value: str) -> str:
 
 
 def _slug_map(names: list[str], kind: str) -> dict[str, str]:
-    """Map each name to a stable slug, failing fast on a collision.
+    """Map each name to a stable, collision-free page slug.
 
     ``_slug`` collapses runs of non-alphanumerics, so punctuation-only-distinct
-    names (``a_b`` vs ``a__b``) can slugify to the same file — which would
-    silently overwrite a page and break cross-links. Detect that and raise.
+    names can slugify to the same file. Allocate a deterministic suffix in
+    name-sorted order rather than silently overwriting a page or requiring the
+    project author to rename a valid physical relation.
     """
+    del kind  # Kept in the public helper signature for existing callers.
+
+    bases = {name: _slug(name) for name in names}
+    # Reserve all natural slugs before allocating suffixes.  A generated
+    # ``sales-data-2`` must not steal the natural slug for an actual
+    # ``sales-data-2`` node.
+    reserved = set(bases.values())
+    taken: set[str] = set()
     out: dict[str, str] = {}
-    seen: dict[str, str] = {}
-    for name in names:
-        slug = _slug(name)
-        if slug in seen and seen[slug] != name:
-            raise ValueError(
-                f"Two {kind} names slugify to the same page {slug!r}: "
-                f"{seen[slug]!r} and {name!r}. Rename one so their pages don't collide."
-            )
-        seen[slug] = name
-        out[name] = slug
+    for name in sorted(names):
+        base = bases[name]
+        candidate = base
+        suffix = 2
+        while candidate in taken or (candidate != base and candidate in reserved):
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        out[name] = candidate
+        taken.add(candidate)
     return out
 
 

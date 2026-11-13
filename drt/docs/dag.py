@@ -17,7 +17,7 @@ reads clocks, randomness, or unordered sets.
 from __future__ import annotations
 
 from drt.docs._svg import _marker_defs, _node_card, _slug_map
-from drt.docs.layout import LayoutConfig, LayoutEdge, compute_layout
+from drt.docs.layout import LayoutConfig, LayoutEdge, compute_layout, node_name
 from drt.docs.manifest import Manifest
 
 _HEADER_H = 48.0  # band above the layout content, holding the zone titles
@@ -164,8 +164,9 @@ def render_dag_svg(manifest: Manifest, *, strategy: str = "median") -> str:
     for node in layout.nodes:
         x = round(node.x - cfg.node_w / 2)
         y = round(node.y - cfg.node_h / 2)
+        name = node_name(node.id)
         if node.kind == "sync":
-            sync = sync_by_name[node.id]
+            sync = sync_by_name[name]
             parts.append(
                 _node_card(
                     x,
@@ -180,20 +181,20 @@ def render_dag_svg(manifest: Manifest, *, strategy: str = "median") -> str:
                 )
             )
         elif node.kind == "source":
-            conn_type = src_type.get(node.id, "source")
+            conn_type = src_type.get(name, "source")
             parts.append(
                 _node_card(
                     x,
                     y,
                     card_w,
                     conn_type,
-                    node.id,
+                    name,
                     conn_type,
-                    f"source/{source_slugs[node.id]}.html",
+                    f"source/{source_slugs[name]}.html",
                 )
             )
         else:
-            dest = dest_by_id.get(node.id)
+            dest = dest_by_id.get(name)
             conn_type = dest.type if dest else "destination"
             parts.append(
                 _node_card(
@@ -201,9 +202,9 @@ def render_dag_svg(manifest: Manifest, *, strategy: str = "median") -> str:
                     y,
                     card_w,
                     conn_type,
-                    dest.label if dest else node.id,
+                    dest.label if dest else name,
                     conn_type,
-                    f"destination/{dest_slugs[node.id]}.html",
+                    f"destination/{dest_slugs[name]}.html",
                 )
             )
 

@@ -30,8 +30,8 @@ from drt.docs import (
 runner = CliRunner()
 
 
-def test_schema_version_is_7() -> None:
-    assert SCHEMA_VERSION == 7
+def test_schema_version_is_8() -> None:
+    assert SCHEMA_VERSION == 8
 
 
 def _write_project(project_dir: Path, profile: str = "bq_prod", name: str = "demo") -> None:
@@ -188,7 +188,7 @@ class TestManifestRoundTrip:
         # omitted when absent rather than emitted as a null placeholder.
         assert "config_hash" not in roundtrip.to_dict()["syncs"][0]
 
-    @pytest.mark.parametrize("schema_version", [1, 2, 3, 4, 5, 6])
+    @pytest.mark.parametrize("schema_version", [1, 2, 3, 4, 5, 6, 7])
     def test_old_shape_without_config_hash_loads_as_none(self, schema_version: int) -> None:
         old_shape = {
             "schema_version": schema_version,

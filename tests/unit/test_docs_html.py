@@ -396,10 +396,10 @@ def test_removed_sync_leaves_no_orphan_page(tmp_path: Path) -> None:
     assert not (out / "destination/dest-pg-users.html").exists()
 
 
-# --- #703 hardening: slug-collision, rmtree guard, ImportError hint ------------
+# --- #703 hardening: slug allocation, rmtree guard, ImportError hint ------------
 
 
-def test_slug_collision_fails_fast(tmp_path: Path) -> None:
+def test_slug_collision_gets_stable_suffixes(tmp_path: Path) -> None:
     manifest = Manifest(
         schema_version=SCHEMA_VERSION,
         drt_version="9.9.9",
@@ -408,12 +408,17 @@ def test_slug_collision_fails_fast(tmp_path: Path) -> None:
         sources=[Source(name="default", type="duckdb")],
         destinations=[Destination(name="d", type="discord", label="discord")],
         syncs=[
-            Sync(name="a_b", source="default", destination="d", mode="full"),
-            Sync(name="a__b", source="default", destination="d", mode="full"),
+            Sync(name="sales-data", source="default", destination="d", mode="full"),
+            Sync(name="sales_data", source="default", destination="d", mode="full"),
+            Sync(name="sales-data-2", source="default", destination="d", mode="full"),
         ],
     )
-    with pytest.raises(ValueError, match="slugify to the same page"):
-        render_html(manifest, tmp_path / "docs")
+    output = tmp_path / "docs"
+    render_html(manifest, output)
+
+    assert (output / "sync/sales-data.html").exists()
+    assert (output / "sync/sales-data-2.html").exists()
+    assert (output / "sync/sales-data-3.html").exists()
 
 
 def test_rmtree_guard_refuses_non_docs_directory(tmp_path: Path) -> None:

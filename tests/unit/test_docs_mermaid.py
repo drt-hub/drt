@@ -18,7 +18,7 @@ from drt.docs.manifest import (
     Source,
     Sync,
 )
-from drt.docs.mermaid import render_mermaid
+from drt.docs.mermaid import _node_ids, render_mermaid
 
 runner = CliRunner()
 
@@ -76,6 +76,13 @@ def _postgres_sync(
 
 
 class TestRenderMermaid:
+    def test_node_ids_reserve_naturally_suffixed_names(self) -> None:
+        assert _node_ids("src", ["sales-data", "sales_data", "sales_data_2"]) == {
+            "sales-data": "src_sales_data",
+            "sales_data": "src_sales_data_3",
+            "sales_data_2": "src_sales_data_2",
+        }
+
     def test_empty_project_renders_placeholder(self) -> None:
         out = render_mermaid(_manifest())
         assert out.startswith("graph LR")
@@ -165,6 +172,36 @@ class TestRenderMermaid:
             )
         )
         assert "&quot;" in out
+
+    def test_labels_escape_html_and_node_ids_do_not_collide(self) -> None:
+        sources = [
+            Source(name='"<img onerror=alert(1)>" & source', type="postgres"),
+            Source(name="sales-data", type="postgres"),
+            Source(name="sales_data", type="postgres"),
+            Source(name="users", type="postgres"),
+        ]
+        destination = Destination(name="users", type="postgres", label='"<target>" & users')
+        sync = Sync(name="users", source="users", destination=destination.name, mode="upsert")
+        manifest = _manifest(
+            sources=sources,
+            destinations=[destination],
+            syncs=[sync],
+            edges=[
+                Edge(kind="source_to_sync", from_="users", to="users"),
+                Edge(kind="sync_to_destination", from_="users", to="users"),
+            ],
+        )
+
+        out = render_mermaid(manifest)
+
+        assert "&lt;img onerror=alert(1)&gt;" in out
+        assert "&lt;target&gt;" in out
+        assert "&amp;" in out
+        assert "&quot;" in out
+        assert "src_sales_data[" in out
+        assert "src_sales_data_2[" in out
+        assert "src_users -->|extract| sync_users" in out
+        assert "sync_users -->|load| dst_users" in out
 
 
 class TestBuildManifest:

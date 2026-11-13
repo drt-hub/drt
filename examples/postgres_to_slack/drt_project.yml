@@ -1,3 +1,7 @@
 name: postgres-to-slack
 version: "0.1"
 profile: default
+source:
+  # Lets `drt docs` parse local raw models with the Postgres dialect (#1045).
+  # Runtime credentials still come from the selected profile.
+  type: postgres

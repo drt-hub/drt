@@ -36,6 +36,11 @@ from drt.docs.manifest import Manifest, Sync
 SCALE_MODE_SYNC_THRESHOLD = 8
 
 
+def _source_names(sync: Sync) -> tuple[str, ...]:
+    """Authoritative source nodes, with the pre-v8 scalar as a fallback."""
+    return sync.sources or (sync.source,)
+
+
 def _ego_svg(
     sync: Sync,
     manifest: Manifest,
@@ -45,7 +50,7 @@ def _ego_svg(
 ) -> str:
     """Static ego-graph for one sync: reads on the left, writes on the right.
 
-    Deterministic single-fan layout (no crossing possible), emitted as inline
+    Deterministic source fan-in / lookup fan-out layout, emitted as inline
     themeable SVG. Names are escaped here — the template injects with |safe.
     """
     dest_by_id = {d.name: d for d in manifest.destinations}
@@ -55,28 +60,39 @@ def _ego_svg(
     upstream = [e.from_ for e in manifest.edges if e.kind == "lookup" and e.to == sync.name]
     downstream = [e.to for e in manifest.edges if e.kind == "lookup" and e.from_ == sync.name]
 
+    source_names = _source_names(sync)
     w_card, x_l, x_m, x_r = 230, 10, 330, 650
-    rows = max(len(upstream), len(downstream))
-    height = 84 + 84 * rows
+    left_rows = len(source_names) + len(upstream)
+    rows = max(left_rows, len(downstream) + 1, 1)
+    height = 84 * rows
+    y0 = 16
     parts: list[str] = [
         f'<svg viewBox="0 0 890 {height}" width="890" height="{height}" role="img" '
         f'aria-label="Lineage for {escape(sync.name, quote=True)}">',
         _marker_defs("ego"),
     ]
 
-    # main row: source → sync → destination
-    y0 = 16
-    parts.append(
-        _node_card(
-            x_l,
-            y0,
-            w_card,
-            src_type.get(sync.source, "configured"),
-            sync.source,
-            src_type.get(sync.source, "source"),
-            f"../source/{source_slugs.get(sync.source, _slug(sync.source))}.html",
+    # Physical sources fan into the sync. A pre-v8 manifest falls back to its
+    # one scalar source, while a v8 raw-SQL model can draw every input table.
+    for i, source_name in enumerate(source_names):
+        y = 16 + 84 * i
+        parts.append(
+            _node_card(
+                x_l,
+                y,
+                w_card,
+                src_type.get(source_name, "configured"),
+                source_name,
+                src_type.get(source_name, "source"),
+                f"../source/{source_slugs.get(source_name, _slug(source_name))}.html",
+            )
         )
-    )
+        parts.append(
+            f'<path d="M{x_l + w_card},{y + 27} C{x_l + w_card + 70},{y + 27} '
+            f'{x_m - 70},{y0 + 27} {x_m - 2},{y0 + 27}" fill="none" '
+            'stroke="var(--edge)" stroke-width="1.5" marker-end="url(#ego-arr)"/>'
+        )
+
     parts.append(_node_card(x_m, y0, w_card, "", sync.name, sync.mode, None, code=True))
     dest = dest_by_id.get(sync.destination)
     dest_label = dest.label if dest else sync.destination
@@ -93,14 +109,14 @@ def _ego_svg(
         )
     )
     parts.append(
-        f'<g fill="none" stroke="var(--edge)" stroke-width="1.5" marker-end="url(#ego-arr)">'
-        f'<line x1="{x_l + w_card}" y1="{y0 + 27}" x2="{x_m - 2}" y2="{y0 + 27}"/>'
-        f'<line x1="{x_m + w_card}" y1="{y0 + 27}" x2="{x_r - 2}" y2="{y0 + 27}"/></g>'
+        f'<line x1="{x_m + w_card}" y1="{y0 + 27}" x2="{x_r - 2}" '
+        f'y2="{y0 + 27}" fill="none" stroke="var(--edge)" stroke-width="1.5" '
+        'marker-end="url(#ego-arr)"/>'
     )
 
     # upstream lookups: destination tables this sync reads, below the source column
     for i, producer in enumerate(upstream):
-        y = y0 + 84 * (i + 1)
+        y = 16 + 84 * (len(source_names) + i)
         p_sync = sync_by_name.get(producer)
         p_dest = dest_by_id.get(p_sync.destination) if p_sync else None
         label = p_dest.label if p_dest else producer
@@ -159,6 +175,8 @@ def _sync_yaml(sync: Sync) -> str:
         "destination": sync.destination,
         "mode": sync.mode,
     }
+    if sync.sources:
+        doc["sources"] = list(sync.sources)
     if sync.description:
         doc["description"] = sync.description
     if sync.tags:
@@ -419,7 +437,7 @@ _SYNC = """\
   </div>
   <div class="kpi">
     <div class="kpi__label">Configuration</div>
-    <div>source: <code>{{ sync.source }}</code> &middot; mode: <code>{{ sync.mode }}</code></div>
+    <div>sources: {% for source in source_names %}<code>{{ source }}</code>{{ ", " if not loop.last }}{% endfor %} &middot; mode: <code>{{ sync.mode }}</code></div>
     <div class="font-mono">&rarr; {{ destination_label }}</div>
     {% if sync.meta %}<div>owner: {{ sync.meta.owner or '&mdash;'|safe }} &middot; maturity: <code>{{ sync.meta.maturity }}</code></div>{% endif %}
     {% if sync.freshness %}<div>freshness: last success within <code>{{ freshness_label }}</code></div>{% endif %}
@@ -462,7 +480,7 @@ _SYNC = """\
   <h2>Lineage</h2>
   <div class="ego">{{ ego_svg|safe }}</div>
   <p class="lede" style="font-size:12.5px;margin-top:10px">
-    Reads <a href="../source/{{ source_slug }}.html">{{ sync.source }}</a>
+    Reads {% for source in source_links %}<a href="../source/{{ source.slug }}.html">{{ source.name }}</a>{{ ", " if not loop.last }}{% endfor %}
     {%- for up in upstream %} + <a href="../destination/{{ up.slug }}.html">{{ up.label }}</a> (lookup){% endfor %} &middot;
     writes <a href="../destination/{{ destination_slug }}.html">{{ destination_label }}</a>
     {%- if downstream %} &middot; read by {% for d in downstream %}<a href="../sync/{{ d.slug }}.html">{{ d.name }}</a>{{ ", " if not loop.last }}{% endfor %}{% endif %}.
@@ -836,7 +854,15 @@ def render_html(
     # bare node count, and matches the ADR #500 mockup.
     src_type = {s.name: s.type for s in manifest.sources}
     dst_type = {d.name: d.type for d in manifest.destinations}
-    source_type_counts = dict(Counter(src_type.get(s.source, s.source) for s in manifest.syncs))
+    source_type_counts = dict(
+        Counter(
+            source_type
+            for sync in manifest.syncs
+            for source_type in dict.fromkeys(
+                src_type.get(source_name, source_name) for source_name in _source_names(sync)
+            )
+        )
+    )
     destination_type_counts = dict(
         Counter(dst_type.get(s.destination, s.destination) for s in manifest.syncs)
     )
@@ -915,6 +941,13 @@ def render_html(
     yaml_texts = sync_yaml_texts or {}
     yaml_formatter = HtmlFormatter(cssclass="highlight", linenos="table")
     for s in manifest.syncs:
+        source_links = [
+            {
+                "name": source_name,
+                "slug": source_slugs.get(source_name, _slug(source_name)),
+            }
+            for source_name in _source_names(s)
+        ]
         entry = yaml_texts.get(s.name)
         yaml_path, raw_yaml = entry if entry is not None else (None, None)
         yaml_text = raw_yaml if raw_yaml is not None else _sync_yaml(s)
@@ -982,7 +1015,8 @@ def render_html(
                 root="../",
                 current_slug=sync_slugs[s.name],
                 sync=s,
-                source_slug=source_slugs.get(s.source, _slug(s.source)),
+                source_links=source_links,
+                source_names=[source["name"] for source in source_links],
                 destination_slug=dest_slugs.get(s.destination, _slug(s.destination)),
                 destination_label=dest.label if dest else s.destination,
                 freshness_label=_duration_label(s.freshness.max_age_seconds) if s.freshness else "",
@@ -1015,7 +1049,7 @@ def render_html(
                 **_status_fields(s),
             }
             for s in manifest.syncs
-            if s.source == src.name
+            if src.name in _source_names(s)
         ]
         emit(
             f"source/{source_slugs[src.name]}.html",
@@ -1038,7 +1072,7 @@ def render_html(
             {
                 "name": s.name,
                 "slug": sync_slugs[s.name],
-                "source": s.source,
+                "source": ", ".join(_source_names(s)),
                 "mode": s.mode,
                 **_status_fields(s),
             }
