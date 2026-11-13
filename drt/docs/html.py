@@ -331,11 +331,12 @@ drt docs generate # rebuild this site</pre>
 </div>
 {% endif %}
 <table class="overview-sync-table" role="table">
-  <thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Name</th><th scope="col" role="columnheader">Destination</th><th scope="col" role="columnheader">Status</th><th scope="col" role="columnheader">Last run</th><th scope="col" role="columnheader">Plan coverage</th></tr></thead>
+  <thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Name</th><th scope="col" role="columnheader">Sources</th><th scope="col" role="columnheader">Destination</th><th scope="col" role="columnheader">Status</th><th scope="col" role="columnheader">Last run</th><th scope="col" role="columnheader">Plan coverage</th></tr></thead>
   <tbody role="rowgroup">
   {% for s in overview_syncs %}
   <tr class="overview-sync-row" role="row"{% if scale_mode %} data-scale-sync data-search="{{ s.search_text }}" data-owner="{{ s.owner }}" data-maturity="{{ s.maturity }}" data-tags="{{ s.tags_json }}"{% endif %}>
     <td role="cell" data-label="Name"><a href="sync/{{ s.slug }}.html">{{ s.name }}</a></td>
+    <td role="cell" data-label="Sources">{% for source in s.source_links %}<a href="source/{{ source.slug }}.html">{{ source.name }}</a>{{ ", " if not loop.last }}{% endfor %}</td>
     <td role="cell" data-label="Destination">{{ s.destination_label }}</td>
     <td role="cell" data-label="Status">{% if s.status %}<span><span class="dot" style="background:var(--{{ s.status_var }})"></span><span class="status-{{ s.status }}">{{ s.status }}</span></span>{% else %}<span class="font-mono">—</span>{% endif %}</td>
     <td role="cell" data-label="Last run" class="font-mono">{{ s.last_run or "—" }}</td>
@@ -730,6 +731,7 @@ def render_html(
                     dest_by_id[s.destination].label
                     if s.destination in dest_by_id
                     else s.destination,
+                    " ".join(_source_names(s)),
                     " ".join(s.tags),
                     s.meta.owner if s.meta and s.meta.owner else "",
                 )
@@ -890,6 +892,13 @@ def render_html(
             {
                 "name": s.name,
                 "slug": sync_slugs[s.name],
+                "source_links": [
+                    {
+                        "name": source_name,
+                        "slug": source_slugs.get(source_name, _slug(source_name)),
+                    }
+                    for source_name in _source_names(s)
+                ],
                 "destination_label": destination.label if destination else s.destination,
                 "plan_status": plan.status if plan else None,
                 **_overview_run_fields(s),

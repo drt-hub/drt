@@ -178,10 +178,12 @@ td.right, th.right { text-align:right; }
   background:var(--brand-50); border-radius:999px; padding:2px 7px; vertical-align:1px; }
 .plan-coverage, .managed-table { color:var(--muted); font-size:12.5px; }
 .overview-sync-table { table-layout:fixed; }
-.overview-sync-table th:nth-child(1) { width:23%; }
-.overview-sync-table th:nth-child(2) { width:25%; }
-.overview-sync-table th:nth-child(3) { width:14%; }
-.overview-sync-table th:nth-child(4) { width:23%; }
+.overview-sync-table th:nth-child(1) { width:17%; }
+.overview-sync-table th:nth-child(2) { width:13%; }
+.overview-sync-table th:nth-child(3) { width:22%; }
+.overview-sync-table th:nth-child(4) { width:11%; }
+.overview-sync-table th:nth-child(5) { width:20%; }
+.overview-sync-table th:nth-child(6) { width:17%; }
 .overview-sync-table td { overflow-wrap:anywhere; }
 .overview-sync-row[hidden] { display:none; }
 .overview-sync-empty { padding:18px; }
