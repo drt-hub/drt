@@ -2185,6 +2185,185 @@
       "title": "JiraDestinationConfig",
       "type": "object"
     },
+    "KafkaAuthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "none",
+            "sasl_plain",
+            "sasl_scram",
+            "ssl"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "username_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Username Env"
+        },
+        "password_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password Env"
+        },
+        "scram_mechanism": {
+          "default": "SCRAM-SHA-512",
+          "enum": [
+            "SCRAM-SHA-256",
+            "SCRAM-SHA-512"
+          ],
+          "title": "Scram Mechanism",
+          "type": "string"
+        },
+        "ca_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ca Env"
+        },
+        "cert_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cert Env"
+        },
+        "key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Env"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "KafkaAuthConfig",
+      "type": "object"
+    },
+    "KafkaDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "kafka",
+          "title": "Type",
+          "type": "string"
+        },
+        "bootstrap_servers_env": {
+          "minLength": 1,
+          "title": "Bootstrap Servers Env",
+          "type": "string"
+        },
+        "topic": {
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        },
+        "key_field": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Field"
+        },
+        "value_format": {
+          "const": "json",
+          "default": "json",
+          "title": "Value Format",
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "auth": {
+          "$ref": "#/$defs/KafkaAuthConfig"
+        },
+        "delivery_timeout_s": {
+          "default": 30.0,
+          "maximum": 2147483.647,
+          "minimum": 0.001,
+          "title": "Delivery Timeout S",
+          "type": "number"
+        },
+        "enable_idempotence": {
+          "default": true,
+          "title": "Enable Idempotence",
+          "type": "boolean"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "bootstrap_servers_env",
+        "topic",
+        "auth"
+      ],
+      "title": "KafkaDestinationConfig",
+      "type": "object"
+    },
     "KlaviyoDestinationConfig": {
       "properties": {
         "type": {
@@ -6103,6 +6282,9 @@
         },
         {
           "$ref": "#/$defs/SQSDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/KafkaDestinationConfig"
         },
         {
           "$ref": "#/$defs/DiscordDestinationConfig"
