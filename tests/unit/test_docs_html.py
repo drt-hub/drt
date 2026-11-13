@@ -143,9 +143,10 @@ def test_overview_sync_table_lists_every_sync_with_deterministic_operational_fie
     rows = re.findall(r'<tr class="overview-sync-row".*?</tr>', table, re.S)
 
     assert len(rows) == len(manifest.syncs) == 2
-    for column in ("Name", "Destination", "Status", "Last run", "Plan coverage"):
+    for column in ("Name", "Sources", "Destination", "Status", "Last run", "Plan coverage"):
         assert f'<th scope="col" role="columnheader">{column}</th>' in table
     assert 'href="sync/customers-to-discord.html"' in rows[0]
+    assert 'href="source/default.html">default</a>' in rows[0]
     assert "discord (webhook)" in rows[0]
     assert "success" in rows[0]
     assert "2026-06-27T06:47:32Z" in rows[0]
@@ -242,18 +243,26 @@ def test_overview_sync_table_has_one_responsive_dom_shape(site: Path) -> None:
 
     assert html.count('class="overview-sync-row"') == 2
     assert html.count('data-label="Name"') == 2
+    assert html.count('data-label="Sources"') == 2
     assert '<table class="overview-sync-table" role="table">' in html
     assert '<thead role="rowgroup"><tr role="row">' in html
     assert '<tbody role="rowgroup">' in html
-    assert html.count('role="columnheader"') >= 5
+    assert html.count('role="columnheader"') == 6
     assert '<th scope="col" role="columnheader">Name</th>' in html
+    assert '<th scope="col" role="columnheader">Sources</th>' in html
     assert html.count('class="overview-sync-row" role="row"') == 2
-    assert html.count('role="cell" data-label=') == 10
+    assert html.count('role="cell" data-label=') == 12
     assert ".overview-sync-table tr" in css
     assert "content:attr(data-label)" in css
     assert ".overview-sync-table tr[hidden]" in css
     assert ".overview-sync-table thead {\n    position:absolute" in css
     assert ".overview-sync-table thead { display:none; }" not in css
+    widths = [
+        int(width)
+        for width in re.findall(r"\.overview-sync-table th:nth-child\(\d\) \{ width:(\d+)%", css)
+    ]
+    assert len(widths) == 6
+    assert sum(widths) == 100
 
 
 def _contrast_ratio(foreground: str, background: str) -> float:
@@ -925,7 +934,9 @@ def test_scale_mode_threshold_and_facets(tmp_path: Path) -> None:
     assert "All owners" in large_html
     assert "All maturities" in large_html
     assert "All tags" in large_html
-    assert 'data-search="sync_0 description 0 discord (webhook) growth growth"' in large_html
+    assert (
+        'data-search="sync_0 description 0 discord (webhook) default growth growth"' in large_html
+    )
     assert large_html.index("data-scale-filter-root") < large_html.index(
         'class="overview-sync-table"'
     )
@@ -984,6 +995,35 @@ def test_overview_sync_name_and_scale_filter_tag_are_escaped(tmp_path: Path) -> 
     assert "&lt;sync_0&gt;" in overview
     assert "&lt;customer&gt;" in overview
     assert 'data-tags="[&#34;&lt;customer&gt;&#34;]"' in overview
+
+
+def test_overview_lists_and_searches_all_sources_with_escaped_names(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    source_names = ("sales.orders", 'table <raw> & "quoted"')
+    manifest = _scale_manifest(8)
+    manifest.sources = [
+        *manifest.sources,
+        *(Source(name=name, type="postgres") for name in source_names),
+    ]
+    manifest.syncs[0] = replace(
+        manifest.syncs[0],
+        source=source_names[0],
+        sources=source_names,
+    )
+    first, second = tmp_path / "first", tmp_path / "second"
+    render_html(manifest, first)
+    render_html(manifest, second)
+
+    overview = (first / "index.html").read_text(encoding="utf-8")
+    row = re.search(r'<tr class="overview-sync-row".*?</tr>', overview, re.S).group(0)
+
+    assert 'href="source/sales-orders.html">sales.orders</a>' in row
+    assert 'href="source/table-raw-quoted.html">table &lt;raw&gt; &amp; &#34;quoted&#34;</a>' in row
+    assert 'data-label="Sources"' in row
+    assert "sales.orders table &lt;raw&gt; &amp; &#34;quoted&#34;" in row
+    assert "table <raw>" not in row
+    assert (first / "index.html").read_bytes() == (second / "index.html").read_bytes()
 
 
 def test_escape_focus_guard_prevents_the_facet_panel_from_reopening(site: Path) -> None:

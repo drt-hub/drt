@@ -1,7 +1,7 @@
 # ADR 0020 — Postgres raw-SQL source lineage
 
 - **Status:** Accepted 2026-11-09.
-- **Relates to:** [ADR 0001](0001-docs-lineage.md),
+- **Relates to:** [ADR 0001](0001-drt-docs-manifest.md),
   [ADR 0003](0003-manifest-schema-v2.md), and [issue #1045](https://github.com/drt-hub/drt/issues/1045).
 
 ## Context

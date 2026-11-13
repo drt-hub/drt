@@ -77,7 +77,7 @@ test("sync definition and lineage tabs @desktop", async ({ page }) => {
 test("overview page @mobile", async ({ page }) => {
   await openDocsPage(page, "/index.html");
   const table = page.locator(".overview-sync-table");
-  await expect(table.locator("a")).toHaveCount(10);
+  await expect(table.locator('td[data-label="Name"] a')).toHaveCount(10);
   await table.scrollIntoViewIfNeeded();
   await expect(table.locator(".overview-sync-row").first()).toHaveCSS(
     "display",
