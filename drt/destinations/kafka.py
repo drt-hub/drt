@@ -148,6 +148,13 @@ class KafkaDestination:
                         "been delivered, so replay can duplicate it."
                     ),
                 )
+            if pending:
+                # Settle timeout outcomes before servicing purge callbacks.
+                # Purge stops further local sends/retries.
+                # Poll ensures producer to process available events.
+                pending.clear()
+                producer.purge()
+                producer.poll(0)
         finally:
             pending.clear()
 
