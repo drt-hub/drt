@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`incremental_strategy: diff` on PostgreSQL: a concurrent run of the same sync now says so** ([#1330](https://github.com/drt-hub/drt/issues/1330)): when two runs of the same sync raced on the snapshot scratch table, the losing run could see the table vanish between its `CREATE` and its column introspection and report a misleading `upsert_key column(s) [...] not found in the model's output columns []` error. An empty introspection now raises the same "another run of sync ... appears to be building the same snapshot table concurrently" error as the other race outcomes; a genuinely missing key column is still a `ValueError`.
+
 ## [1.3.3] - 2026-11-14
 
 **Where a sync really reads from.** For projects on PostgreSQL, `drt docs` can now show the physical tables a hand-written model reads, instead of just the profile — in the lineage graph, on each sync page and in the Overview table. Contributed by Muawiya-contact. Opt-in and additive: the docs manifest moves to schema v8 (v1-v7 still load), nothing else changes.
