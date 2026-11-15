@@ -135,7 +135,7 @@ class KafkaDestination:
                     ):
                         break
                     pending.add(index)
-                except Exception as exc:
+                except BufferError as exc:
                     fail(index, exc)
 
             if pending:
