@@ -54,13 +54,17 @@ def _reraise_diff_concurrency_race(e: BaseException, sync_name: str) -> None:
     this with their own bare ``raise`` to re-propagate the original.
     """
     if getattr(e, "pgcode", None) in _DIFF_CONCURRENT_RACE_PGCODES:
-        raise RuntimeError(
-            f"sync.incremental_strategy: diff — another run of sync "
-            f"{sync_name!r} appears to be building the same snapshot table "
-            f"concurrently. diff-strategy syncs must not run concurrently "
-            f"for the same sync — see drt serve's request coalescing (#854) "
-            f"or your scheduler's own overlap protection."
-        ) from e
+        raise _diff_concurrency_error(sync_name) from e
+
+
+def _diff_concurrency_error(sync_name: str) -> RuntimeError:
+    return RuntimeError(
+        f"sync.incremental_strategy: diff — another run of sync "
+        f"{sync_name!r} appears to be building the same snapshot table "
+        f"concurrently. diff-strategy syncs must not run concurrently "
+        f"for the same sync — see drt serve's request coalescing (#854) "
+        f"or your scheduler's own overlap protection."
+    )
 
 
 def _key_join_condition(key_columns: list[str], left: str, right: str) -> Any:
@@ -440,6 +444,12 @@ class PostgresSource:
                 (config.managed_schema, scratch_table),
             )
             all_columns = [row[0] for row in cur.fetchall()]
+            if not all_columns:
+                # ``CREATE TABLE ... AS`` always yields at least one column, so
+                # an empty introspection means a concurrent run for the same
+                # sync dropped this scratch table between our CREATE and this
+                # read. Report that, not a misleading upsert_key ValueError (#1330).
+                raise _diff_concurrency_error(sync_name)
 
             missing_keys = [k for k in key_columns if k not in all_columns]
             if missing_keys:

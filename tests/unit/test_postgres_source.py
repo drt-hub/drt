@@ -447,3 +447,45 @@ class TestManagedTableCapable:
         from drt.sources.base import ManagedTableCapable
 
         assert isinstance(PostgresSource(), ManagedTableCapable)
+
+
+class TestSnapshotDiffConcurrentDrop:
+    """#1330: an empty column list for the scratch table means a concurrent run dropped it."""
+
+    def test_empty_scratch_introspection_reports_the_concurrent_run(self) -> None:
+        source = PostgresSource()
+        conn = MagicMock()
+        cur = conn.cursor.return_value
+        cur.fetchall.return_value = []  # information_schema sees no such table
+
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            pytest.raises(RuntimeError, match="another run of sync 'dup_sync'"),
+        ):
+            source.extract_snapshot_diff(
+                "SELECT 1 AS id",
+                _profile(),
+                sync_name="dup_sync",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+    def test_a_genuinely_missing_key_column_is_still_a_value_error(self) -> None:
+        source = PostgresSource()
+        conn = MagicMock()
+        cur = conn.cursor.return_value
+        cur.fetchall.return_value = [("email",)]
+
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            pytest.raises(ValueError, match="upsert_key column"),
+        ):
+            source.extract_snapshot_diff(
+                "SELECT 'a' AS email",
+                _profile(),
+                sync_name="dup_sync",
+                key_columns=["id"],
+                hash_columns="all",
+            )
