@@ -117,7 +117,7 @@ dev = [
     "pytest-httpserver>=1.0",
     "sqlglot>=30.30.0,<31",
     "mypy>=1.10,<3",
-    "ruff==0.17.3",
+    "ruff==0.17.4",
     "types-pyyaml",
     "types-PyMySQL",
     "testcontainers[postgres]>=4.0",
