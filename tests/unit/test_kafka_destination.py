@@ -32,6 +32,7 @@ class FakeProducer:
         self.flush_timeouts: list[float] = []
         self.closed = False
         self.purged = False
+        self.purge_reports: set[int] = set()
 
     def __len__(self) -> int:
         return len(self.pending)
@@ -53,25 +54,31 @@ class FakeProducer:
         self.messages[index]["on_delivery"](error, None)
 
     def poll(self, timeout: float) -> int:
+        ready = self.pending & self.purge_reports
         if self.report_on_poll:
-            ready = sorted(self.pending - self.held)
-            for index in ready:
-                self.complete(index, self.errors.get(index))
-            return len(ready)
-        return 0
+            ready |= self.pending - self.held
+        for index in sorted(ready):
+            error = (
+                RuntimeError("purged") if index in self.purge_reports else self.errors.get(index)
+            )
+            self.complete(index, error)
+        self.purge_reports.difference_update(ready)
+        return len(ready)
 
     def flush(self, timeout: float) -> int:
         self.flush_timeouts.append(timeout)
         if self.flush_error is not None:
             raise self.flush_error
+        if self.purge_reports:
+            self.poll(0)
         for index in sorted(self.pending - self.held, reverse=self.reverse_reports):
             self.complete(index, self.errors.get(index))
         return len(self.pending)
 
     def purge(self) -> None:
         self.purged = True
-        for index in list(self.pending):
-            self.complete(index, RuntimeError("purged"))
+        # Like the SDK, purge queues reports; poll/flush must serve them.
+        self.purge_reports.update(self.pending)
 
     def close(self) -> bool:
         assert not self.pending, "close must not perform an unbounded delivery wait"
@@ -268,23 +275,31 @@ def test_fail_policy_stops_when_a_delivery_failure_is_observed_while_polling(sdk
     destination.finalize_sync(config(), options())
 
 
-def test_timeout_marks_only_unconfirmed_rows_and_late_callbacks_do_not_mutate_result(
+@pytest.mark.parametrize("on_error", ["skip", "fail"])
+def test_timeout_purges_unconfirmed_rows_and_keeps_returned_outcomes_stable(
     sdk: FakeSDK,
+    on_error: str,
 ) -> None:
     producer = sdk.next_producer
     producer.held = {1}
     destination = KafkaDestination()
-    result = destination.load([{"id": 1}, {"id": 2}], config(delivery_timeout_s=0.2), options())
+    cfg = config(delivery_timeout_s=0.2)
+    result = destination.load([{"id": 1}, {"id": 2}], cfg, options(on_error=on_error))
     assert (result.success, result.failed, result.skipped) == (1, 1, 0)
     assert result.row_errors[0].batch_index == 1
     assert "tim" in result.row_errors[0].error_message.lower()
     assert producer.flush_timeouts == [0.2]
-    producer.complete(1)  # Could have reached the broker despite the deadline.
+    assert producer.purged
+    assert not producer.pending
+    assert not producer.purge_reports  # Purge callbacks were serviced before return.
+    # An acknowledgement of an already-persisted message can still arrive late.
+    producer.messages[1]["on_delivery"](None, None)
     assert (result.success, result.failed) == (1, 1)
-    next_result = destination.load([{"id": 3}], config(delivery_timeout_s=0.2), options())
+    next_result = destination.load([{"id": 3}], cfg, options())
     assert next_result.success == 1
+    assert len(producer.messages) == 3  # The timed-out row was not resubmitted.
     assert len(sdk.producers) == 1
-    destination.finalize_sync(config(delivery_timeout_s=0.2), options())
+    destination.finalize_sync(cfg, options())
 
 
 @pytest.mark.parametrize("hook", ["finalize_sync", "reset_write_state"])
@@ -304,15 +319,16 @@ def test_safety_drain_closes_but_fails_loudly_if_anything_was_outstanding(
 
 def test_safety_drain_purges_before_close_if_bounded_flush_times_out(sdk: FakeSDK) -> None:
     producer = sdk.next_producer
-    producer.held = {0}
     destination = KafkaDestination()
-    result = destination.load([{"id": 1}], config(delivery_timeout_s=0.1), options())
-    assert result.failed == 1
+    cfg = config(delivery_timeout_s=0.1)
+    result = destination.load([{"id": 1}], cfg, options())
+    producer.held = {1}
+    producer.produce(topic="events", value=b"unexpected", on_delivery=lambda *_: None)
     with pytest.raises(RuntimeError, match="undelivered|outstanding|unconfirmed"):
-        destination.finalize_sync(config(delivery_timeout_s=0.1), options())
+        destination.finalize_sync(cfg, options())
     assert producer.purged
     assert producer.closed
-    assert result.failed == 1 and result.success == 0
+    assert result.success == 1 and result.failed == 0
 
 
 def test_reset_closes_producer_after_a_batch_level_exception(sdk: FakeSDK) -> None:
@@ -327,15 +343,25 @@ def test_reset_closes_producer_after_a_batch_level_exception(sdk: FakeSDK) -> No
     assert producer.closed
 
 
-def test_immediate_send_errors_are_attributed_without_application_resends(sdk: FakeSDK) -> None:
+@pytest.mark.parametrize("on_error", ["skip", "fail"])
+@pytest.mark.parametrize(
+    "error", [RuntimeError("authentication rejected"), ValueError("invalid configuration")]
+)
+def test_immediate_producer_errors_abort_without_application_resends(
+    sdk: FakeSDK,
+    on_error: str,
+    error: Exception,
+) -> None:
     producer = sdk.next_producer
-    producer.send_error = RuntimeError("producer fatal")
+    producer.send_error = error
     destination = KafkaDestination()
-    result = destination.load([{"id": 1}, {"id": 2}], config(), options(on_error="fail"))
-    assert (result.failed, result.skipped) == (1, 1)
-    assert result.row_errors[0].batch_index == 0
+    with pytest.raises(type(error)) as raised:
+        destination.load([{"id": 1}, {"id": 2}], config(), options(on_error=on_error))
+    assert raised.value is error
     assert producer.attempts == 1
-    destination.finalize_sync(config(), options())
+    assert not producer.messages
+    destination.reset_write_state(config(), options())
+    assert producer.closed
 
 
 def test_only_queue_full_is_retried_and_each_message_is_paced_once(
