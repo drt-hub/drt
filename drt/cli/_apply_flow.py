@@ -673,8 +673,11 @@ def apply_plan(
         exact=True if exact else None,
         project_dir=project_dir,
     )
+    from drt.config.credentials import project_dir_context
+
     try:
-        _name, entry, had_error = _run_one(replay_sync, ctx, ctx_plan.profile)
+        with project_dir_context(project_dir):
+            _name, entry, had_error = _run_one(replay_sync, ctx, ctx_plan.profile)
     except BaseException:
         _finish_claim(project_dir, plan_id, "failed")  # never raises: cannot mask this error
         raise

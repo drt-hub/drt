@@ -683,7 +683,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             ``{"name": ..., "type": ..., "ok": bool}`` and, on failure, an
             ``error`` message.
         """
-        return _test_profile(name)
+        return _test_profile(name, project_dir=_project_dir)
 
     # -----------------------------------------------------------------------
     # drt_doctor

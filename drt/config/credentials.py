@@ -27,8 +27,10 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
-from dataclasses import asdict, is_dataclass
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, is_dataclass, replace
 from inspect import signature
 from pathlib import Path
 from typing import Any, Literal, TextIO
@@ -81,6 +83,33 @@ class ObservabilityConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_secrets_project_dir: ContextVar[Path | None] = ContextVar("_secrets_project_dir", default=None)
+
+
+@contextmanager
+def project_dir_context(project_dir: Path | None) -> Iterator[None]:
+    """Bind *project_dir* for ``.drt/secrets.toml`` lookups within this context."""
+    token = _secrets_project_dir.set(project_dir)
+    try:
+        yield
+    finally:
+        _secrets_project_dir.reset(token)
+
+
+def resolve_profile_paths(
+    profile: ProfileConfigLike,
+    project_dir: Path | None = None,
+) -> ProfileConfigLike:
+    """Resolve relative SQLite/DuckDB database paths against *project_dir*."""
+    if project_dir is None:
+        return profile
+    if isinstance(profile, (SQLiteProfile, DuckDBProfile)):
+        db = profile.database
+        if db and db != ":memory:" and not Path(db).is_absolute():
+            return replace(profile, database=str((project_dir / db).resolve()))
+    return profile
+
+
 def _config_dir(override: Path | None = None) -> Path:
     return override if override is not None else Path.home() / ".drt"
 
@@ -124,12 +153,13 @@ def _load_secrets(project_dir: Path | None = None) -> dict[str, Any]:
     return data
 
 
-def _lookup_secrets_toml(env_var: str) -> str | None:
+def _lookup_secrets_toml(env_var: str, project_dir: Path | None = None) -> str | None:
     """Look up an env-var-style key in secrets.toml.
 
     Walks all nested dicts searching for a matching key.
     """
-    secrets = _load_secrets()
+    resolved_dir = project_dir if project_dir is not None else _secrets_project_dir.get()
+    secrets = _load_secrets(resolved_dir)
 
     def _search(d: dict[str, Any]) -> str | None:
         for k, v in d.items():
@@ -144,7 +174,11 @@ def _lookup_secrets_toml(env_var: str) -> str | None:
     return _search(secrets)
 
 
-def resolve_env(value: str | None, env_var: str | None) -> str | None:
+def resolve_env(
+    value: str | None,
+    env_var: str | None,
+    project_dir: Path | None = None,
+) -> str | None:
     """Resolve a secret value: explicit value → env var → secrets.toml →
     provider URI → None.
 
@@ -160,7 +194,7 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
         env_val = os.environ.get(env_var)
         if env_val is not None:
             return env_val
-        from_secrets = _lookup_secrets_toml(env_var)
+        from_secrets = _lookup_secrets_toml(env_var, project_dir=project_dir)
         if from_secrets is not None:
             return from_secrets
 
@@ -974,9 +1008,11 @@ __all__ = [
     "load_profile",
     "load_raw_profiles",
     "load_snowflake_private_key",
+    "project_dir_context",
     "remove_profile",
     "resolve_env",
     "resolve_env_dict",
+    "resolve_profile_paths",
     "save_profile",
     "write_raw_profile",
 ]

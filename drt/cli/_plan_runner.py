@@ -148,7 +148,7 @@ def compute_plan(
     ``preflight(project, state_bundle, sync)`` may raise :class:`PlanCliError` to
     stop before anything is extracted.
     """
-    from drt.config.credentials import load_profile
+    from drt.config.credentials import load_profile, project_dir_context, resolve_profile_paths
     from drt.config.parser import load_project, load_syncs
     from drt.config.vars import VarError, resolve_vars
     from drt.engine.sync import run_sync
@@ -160,7 +160,10 @@ def compute_plan(
         raise PlanCliError(str(e)) from e
 
     try:
-        profile = load_profile(resolve_profile_name(profile_name, project.profile))
+        profile = resolve_profile_paths(
+            load_profile(resolve_profile_name(profile_name, project.profile)),
+            project_dir,
+        )
     except (FileNotFoundError, KeyError, ValueError) as e:
         raise PlanCliError(str(e)) from e
 
@@ -199,19 +202,20 @@ def compute_plan(
             sync.sync._capture_plan_payload = include_values
             sync.sync._planning = True
             try:
-                result = run_sync(
-                    sync,
-                    get_source(profile),
-                    get_destination(sync),
-                    profile,
-                    project_dir,
-                    True,
-                    state_bundle.state,
-                    watermark_storage=get_watermark_storage(sync, project_dir),
-                    cursor_value_override=(
-                        cursor_value if sync.sync.mode == "incremental" else None
-                    ),
-                    compute_diff=True,
+                with project_dir_context(project_dir):
+                    result = run_sync(
+                        sync,
+                        get_source(profile),
+                        get_destination(sync),
+                        profile,
+                        project_dir,
+                        True,
+                        state_bundle.state,
+                        watermark_storage=get_watermark_storage(sync, project_dir),
+                        cursor_value_override=(
+                            cursor_value if sync.sync.mode == "incremental" else None
+                        ),
+                        compute_diff=True,
                     # Not a sample: a plan needs every changed key.
                     diff_limit=sys.maxsize,
                     vars=project_vars,
@@ -288,7 +292,7 @@ def compute_plan_from_records(
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
 ) -> PlanContext:
     """Recompute a plan from decrypted destination-facing rows without reading the source."""
-    from drt.config.credentials import load_profile
+    from drt.config.credentials import load_profile, resolve_profile_paths
     from drt.config.parser import load_project, load_syncs
     from drt.config.vars import VarError, resolve_vars
     from drt.engine.diff import compute_diff
@@ -299,7 +303,10 @@ def compute_plan_from_records(
     except FileNotFoundError as e:
         raise PlanCliError(str(e)) from e
     try:
-        profile = load_profile(resolve_profile_name(profile_name, project.profile))
+        profile = resolve_profile_paths(
+            load_profile(resolve_profile_name(profile_name, project.profile)),
+            project_dir,
+        )
     except (FileNotFoundError, KeyError, ValueError) as e:
         raise PlanCliError(str(e)) from e
     try:

@@ -1812,3 +1812,109 @@ async def test_run_sync_full_refresh_real_run_clears_watermark(
     await call(srv, "drt_run_sync", sync_name="notify", dry_run=False, full_refresh=True)
 
     storage.delete.assert_called_once_with("notify")
+
+
+@pytest.mark.asyncio
+async def test_non_cwd_real_sqlite_profile_resolves_against_project_dir(
+    tmp_path_factory: Any, monkeypatch: Any
+) -> None:
+    """#1243: relative SQLite database paths resolve against project_dir, not cwd."""
+    import sqlite3
+
+    import yaml
+
+    from drt.config.credentials import SQLiteProfile
+
+    proj = tmp_path_factory.mktemp("sqlite_proj")
+    elsewhere = tmp_path_factory.mktemp("elsewhere_cwd")
+    (proj / "data").mkdir()
+    db_path = proj / "data" / "warehouse.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
+    conn.execute("INSERT INTO users (id, email) VALUES (1, 'ada@example.com')")
+    conn.commit()
+    conn.close()
+
+    (proj / "drt_project.yml").write_text(
+        yaml.dump({"name": "sqlite-non-cwd", "version": "0.1", "profile": "local"})
+    )
+    (proj / "syncs").mkdir()
+    (proj / "syncs" / "users_out.yml").write_text(
+        yaml.dump(
+            {
+                "name": "users_out",
+                "model": "SELECT id, email FROM users",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "https://example.invalid/hook",
+                },
+                "sync": {"mode": "full"},
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile",
+        lambda _name: SQLiteProfile(type="sqlite", database="data/warehouse.sqlite"),
+    )
+    monkeypatch.chdir(elsewhere)
+
+    srv = create_server(proj)
+
+    tested = await call(srv, "drt_test_profile", name="local")
+    assert tested == {"name": "local", "type": "sqlite", "ok": True}
+
+    run_res = await call(srv, "drt_run_sync", sync_name="users_out", dry_run=True)
+    assert run_res["success"] == 1
+    assert run_res["failed"] == 0
+    assert not (elsewhere / "data").exists()
+
+
+@pytest.mark.asyncio
+async def test_non_cwd_secrets_toml_resolves_against_project_dir(
+    tmp_path_factory: Any, monkeypatch: Any
+) -> None:
+    """#1243: .drt/secrets.toml resolves against project_dir when cwd is elsewhere."""
+    import yaml
+
+    from drt.config.credentials import resolve_env
+
+    proj = tmp_path_factory.mktemp("secrets_proj")
+    elsewhere = tmp_path_factory.mktemp("elsewhere_cwd")
+    (proj / ".drt").mkdir()
+    (proj / ".drt" / "secrets.toml").write_text('MY_TEST_SECRET = "from-project-secrets"\n')
+    (proj / "drt_project.yml").write_text(
+        yaml.dump({"name": "secrets-non-cwd", "version": "0.1", "profile": "local"})
+    )
+    (proj / "syncs").mkdir()
+    (proj / "syncs" / "users_out.yml").write_text(
+        yaml.dump(
+            {
+                "name": "users_out",
+                "model": "SELECT 1 AS id",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "https://example.invalid/hook",
+                },
+                "sync": {"mode": "full"},
+            }
+        )
+    )
+
+    seen: list[str | None] = []
+
+    class _SecretCheckingSource:
+        def extract(self, *_args: Any, **_kwargs: Any) -> Any:
+            seen.append(resolve_env(None, "MY_TEST_SECRET"))
+            return iter([{"id": 1}])
+
+    monkeypatch.delenv("MY_TEST_SECRET", raising=False)
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: _SecretCheckingSource())
+    monkeypatch.chdir(elsewhere)
+
+    srv = create_server(proj)
+    run_res = await call(srv, "drt_run_sync", sync_name="users_out", dry_run=True)
+
+    assert run_res["success"] == 1
+    assert seen == ["from-project-secrets"]
