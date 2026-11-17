@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`drt retry` no longer deletes dead letters the destination never attempted** ([#1343](https://github.com/drt-hub/drt/issues/1343)): when a destination stops after a failure (`on_error: fail`) it reports the rest of the batch as `skipped` without naming those rows, and `replay_dead_letters()` treated every non-failed row as delivered and removed it from the DLQ. A skip that `skipped_no_match` does not explain now keeps the whole group queued with a "not attempted" message; match-policy skips behave as before.
 - **`incremental_strategy: diff` on PostgreSQL: a concurrent run of the same sync now says so** ([#1330](https://github.com/drt-hub/drt/issues/1330)): when two runs of the same sync raced on the snapshot scratch table, the losing run could see the table vanish between its `CREATE` and its column introspection and report a misleading `upsert_key column(s) [...] not found in the model's output columns []` error. An empty introspection now raises the same "another run of sync ... appears to be building the same snapshot table concurrently" error as the other race outcomes; a genuinely missing key column is still a `ValueError`.
 
 ## [1.3.3] - 2026-11-14
