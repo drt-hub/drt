@@ -22,6 +22,7 @@ from drt.config.duration import parse_duration
 from drt.config.models import LookupConfig, SyncConfig
 from drt.config.profiles import ProfileConfigLike
 from drt.config.query_tags import build_query_tags, new_run_id, render_comment_header
+from drt.config.sync_options import ensure_backfill_executable
 from drt.destinations.base import (
     Destination,
     ManagedDestinationTableCapable,
@@ -35,6 +36,7 @@ from drt.destinations.lookup import (
     build_lookup_map,
     detect_ambiguous_lookup_ordering,
 )
+from drt.engine.backfill import stringify_cursor_value as _stringify_cursor_value
 from drt.engine.computed_fields import apply_computed_fields
 from drt.engine.contract import (
     check_contract,
@@ -66,27 +68,6 @@ from drt.state.idempotency import (
 )
 from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
-
-
-def _stringify_cursor_value(val: Any) -> str:
-    """Convert a cursor value into a stable string representation.
-
-    For tz-aware datetimes (e.g. BigQuery TIMESTAMP returns from the
-    Python BQ client), normalize to **naive UTC** before stringifying.
-    This avoids a re-emit-at-boundary bug (#475) where the persisted
-    watermark gained a ``+00:00`` suffix while user SQL / default_value
-    is typically written tz-naive — causing the same instant to be
-    represented two different ways and ``WHERE col >= TIMESTAMP(...)``
-    to re-match the boundary row on every subsequent run.
-
-    BigQuery (and most warehouses) parse ``TIMESTAMP('YYYY-MM-DD HH:MM:SS')``
-    as UTC, so dropping the ``+00:00`` suffix preserves the same instant.
-    Other types pass through ``str()`` unchanged.
-    """
-    if isinstance(val, datetime) and val.tzinfo is not None:
-        val = val.astimezone(timezone.utc).replace(tzinfo=None)
-    return str(val)
-
 
 _INT_CURSOR_PATTERN = re.compile(r"-?\d+")
 
@@ -432,6 +413,7 @@ def run_sync(
         Aggregated SyncResult across all batches, with ``run_id`` and
         ``sync_run_id`` stamped on it.
     """
+    ensure_backfill_executable(sync.sync)
     if observer is None:
         observer = NullObserver()
     sync_run_id = new_correlation_id()

@@ -371,6 +371,16 @@ def _replay_dead_letters(
                     if 0 <= e.batch_index < len(retry_group)
                 }
                 pinpointed = len(failed_idx) == result.failed
+                # A destination that stops after a failure (``on_error: fail``)
+                # reports the records it never attempted as ``skipped`` without
+                # naming them, so a skip that ``skipped_no_match`` does not
+                # explain cannot be told apart from a delivered record by
+                # position. Re-queue the whole group rather than delete a record
+                # that was never sent (a re-send beats a silent drop, as for an
+                # un-attributable group below).
+                unattempted_skips = result.skipped > result.skipped_no_match
+                if unattempted_skips:
+                    pinpointed = False
                 if isinstance(dest, StagedDestination):
                     if len(retry_group) > sync.sync.batch_size:
                         # StagedDestination's Protocol (drt/destinations/base.py)
@@ -413,7 +423,11 @@ def _replay_dead_letters(
                         error_message=(
                             err.error_message
                             if err is not None
-                            else (result.errors[0] if result.errors else "retry failed")
+                            else (
+                                "not attempted: the destination stopped after a failure"
+                                if unattempted_skips
+                                else (result.errors[0] if result.errors else "retry failed")
+                            )
                         ),
                         http_status=err.http_status if err is not None else None,
                         timestamp=entry.timestamp,  # preserve first-seen time

@@ -7,6 +7,7 @@ the three ``destinations_*`` modules and consumed by :class:`SyncConfig`.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from difflib import get_close_matches
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
@@ -14,12 +15,14 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    GetJsonSchemaHandler,
     PrivateAttr,
     SerializeAsAny,
     Tag,
     field_validator,
     model_validator,
 )
+from pydantic.json_schema import JsonSchemaValue
 
 # RateLimitConfig is defined in base.py (beside RetryConfig) because the
 # destination configs imported below now carry a rate_limit override; it is
@@ -78,6 +81,166 @@ from drt.config.destinations_storage import (
 )
 from drt.config.duration import parse_duration
 from drt.templates.renderer import validate_template_syntax
+
+# Temporary slice-1 safety gate. Config/schema support lands before bounded
+# extraction and durable checkpoints; accepting it for execution now would
+# silently run an ordinary unbounded incremental sync. ADR 0021 slice 3 removes
+# this constant and its checks when execution becomes safe.
+BACKFILL_EXECUTION_ENABLED = False
+BACKFILL_NOT_EXECUTABLE_ERROR = (
+    "sync.backfill is accepted by the schema but not executable yet (ADR 0021 slices 2-3)"
+)
+
+_DURATION_JSON_PATTERN = (
+    r"^(?:\s*0*[1-9]\d*\s*[smhdw]\s*|\s*0*[1-9]\d*\s+"
+    r"(?:[dD][aA][yY]|[hH][oO][uU][rR]|[mM][iI][nN][uU][tT][eE]|"
+    r"[sS][eE][cC][oO][nN][dD]|[wW][eE][eE][kK])(?:[sS])?\s*)$"
+)
+
+
+def _find_backfill_like_unknown_key(value: Any, known_fields: Iterable[str]) -> str | None:
+    """Return a likely misspelling of backfill without making models strict."""
+    if not isinstance(value, dict):
+        return None
+    known = set(known_fields)
+    for key in value:
+        if not isinstance(key, str) or key in known:
+            continue
+        normalized = key.casefold().rstrip("s_")
+        if get_close_matches(normalized, ("backfill",), n=1, cutoff=0.75):
+            return key
+    return None
+
+
+class BackfillConfig(BaseModel):
+    """Fixed-width cursor windows for an incremental backfill (ADR 0021).
+
+    Mode, incremental strategy, and watermark.default_value eligibility are
+    enforced at validation time by ``drt validate``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    window: str | Annotated[int, Field(strict=True, gt=0)]
+    start: str | Annotated[int, Field(strict=True)]
+    end: str | Annotated[int, Field(strict=True)] | None = None
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: Any, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        """Describe the two valid arithmetic families instead of loose unions."""
+        schema = handler(core_schema)
+        for key in ("additionalProperties", "properties", "required", "type"):
+            schema.pop(key, None)
+        schema["oneOf"] = [
+            {
+                "title": "Timestamp backfill",
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "window": {
+                        "type": "string",
+                        "pattern": _DURATION_JSON_PATTERN,
+                        "description": "Positive compact or long duration.",
+                    },
+                    "start": {"type": "string", "format": "date-time"},
+                    "end": {
+                        "anyOf": [
+                            {"type": "string", "format": "date-time"},
+                            {"type": "null"},
+                        ],
+                        "default": None,
+                    },
+                },
+                "required": ["window", "start"],
+            },
+            {
+                "title": "Integer backfill",
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "window": {"type": "integer", "exclusiveMinimum": 0},
+                    "start": {"type": "integer"},
+                    "end": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                        "default": None,
+                    },
+                },
+                "required": ["window", "start"],
+            },
+        ]
+        return schema
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_non_integral_scalars(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        for field_name in ("window", "start", "end"):
+            field_value = value.get(field_name)
+            if field_value is None and field_name == "end":
+                continue
+            if isinstance(field_value, bool) or isinstance(field_value, float):
+                raise ValueError(
+                    f"sync.backfill.{field_name} must not be a boolean or float; "
+                    "use an ISO-8601 timestamp string or exact integer as appropriate."
+                )
+            if field_name == "window" and isinstance(field_value, int) and field_value <= 0:
+                raise ValueError(
+                    "sync.backfill.window must be a positive duration or positive integer."
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _check_range_types_and_values(self) -> BackfillConfig:
+        from drt.engine.backfill import canonicalize_bound
+
+        if isinstance(self.window, bool):
+            raise ValueError(
+                "sync.backfill.window must be a positive duration or positive integer, not bool."
+            )
+
+        if isinstance(self.window, int):
+            if self.window <= 0:
+                raise ValueError("sync.backfill.window must be a positive integer.")
+            if isinstance(self.start, bool) or not isinstance(self.start, int):
+                raise ValueError(
+                    "sync.backfill.start must be an integer when sync.backfill.window is integer."
+                )
+            if self.end is not None and (
+                isinstance(self.end, bool) or not isinstance(self.end, int)
+            ):
+                raise ValueError(
+                    "sync.backfill.end must be an integer when sync.backfill.window is integer."
+                )
+            if self.end is not None and self.start >= self.end:
+                raise ValueError(
+                    "sync.backfill.start must be less than sync.backfill.end (exclusive)."
+                )
+        else:
+            parse_duration(self.window, field_name="sync.backfill.window")
+            if not isinstance(self.start, str):
+                raise ValueError(
+                    "sync.backfill.start must be an ISO-8601 timestamp when "
+                    "sync.backfill.window is a duration."
+                )
+            if self.end is not None and not isinstance(self.end, str):
+                raise ValueError(
+                    "sync.backfill.end must be an ISO-8601 timestamp when "
+                    "sync.backfill.window is a duration."
+                )
+            canonical_start = canonicalize_bound(self.start, field_name="sync.backfill.start")
+            canonical_end = (
+                canonicalize_bound(self.end, field_name="sync.backfill.end")
+                if self.end is not None
+                else None
+            )
+            if canonical_end is not None and canonical_start >= canonical_end:
+                raise ValueError(
+                    "sync.backfill.start must be less than sync.backfill.end (exclusive)."
+                )
+        return self
 
 
 class WatermarkConfig(BaseModel):
@@ -404,6 +567,7 @@ class SyncOptions(BaseModel):
     incremental_strategy: Literal["cursor", "diff"] = "cursor"
     diff: DiffConfig | None = None
     watermark: WatermarkConfig | None = None
+    backfill: BackfillConfig | None = None
     batch_size: int = Field(default=100, gt=0)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
@@ -516,10 +680,39 @@ class SyncOptions(BaseModel):
     _source_column_types: dict[str, str] = PrivateAttr(default_factory=dict)
     _source_column_metadata_loaded: bool = PrivateAttr(default=False)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_backfill_like_unknown_keys(cls, value: Any) -> Any:
+        key = _find_backfill_like_unknown_key(value, cls.model_fields)
+        if key is not None:
+            raise ValueError(f"Unknown sync key {key!r}; did you mean sync.backfill?")
+        return value
+
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_backfill_eligibility(self) -> SyncOptions:
+        if self.backfill is None:
+            return self
+        if self.mode != "incremental":
+            raise ValueError("sync.backfill is valid only with mode: incremental.")
+        if self.incremental_strategy != "cursor":
+            raise ValueError(
+                "sync.backfill is not compatible with sync.incremental_strategy: diff; "
+                "use the default cursor strategy."
+            )
+        if self.watermark is not None and self.watermark.default_value is not None:
+            raise ValueError(
+                "sync.backfill cannot be combined with watermark.default_value; "
+                "sync.backfill.start is the first-run bound."
+            )
+        # TODO(ADR 0021 slice 4): reject CLI --limit with sync.backfill. The
+        # config model cannot see invocation flags, and slice 4 owns that CLI
+        # range/option validation.
         return self
 
     @model_validator(mode="after")
@@ -663,6 +856,12 @@ class SyncOptions(BaseModel):
                 "path (mode: full / upsert / incremental)."
             )
         return self
+
+
+def ensure_backfill_executable(options: SyncOptions) -> None:
+    """Fail closed until bounded extraction/checkpoint slices are implemented."""
+    if options.backfill is not None and not BACKFILL_EXECUTION_ENABLED:
+        raise ValueError(BACKFILL_NOT_EXECUTABLE_ERROR)
 
 
 class RowCountTest(BaseModel):
@@ -1097,6 +1296,16 @@ class SyncConfig(BaseModel):
     # contract can still have an authored ``columns:`` block, which wins; the
     # public catalog must describe the columns that actually won resolution.
     _columns_source: Literal["dbt", "declared"] | None = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_misplaced_backfill_keys(cls, value: Any) -> Any:
+        key = _find_backfill_like_unknown_key(value, cls.model_fields)
+        if key is not None:
+            raise ValueError(
+                f"Top-level key {key!r} belongs under sync:; did you mean sync.backfill?"
+            )
+        return value
 
     @model_validator(mode="after")
     def _check_column_contract(self) -> SyncConfig:
