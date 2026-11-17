@@ -66,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP `project_dir` resolution for relative SQLite/DuckDB `database` paths** ([#1243](https://github.com/drt-hub/drt/issues/1243), PR [#1337](https://github.com/drt-hub/drt/pull/1337)): `create_server(project_dir=...)` now resolves `project_dir` once at startup and resolves relative SQLite and DuckDB `database` paths against `project_dir` instead of the process working directory, rejecting relative paths (including `..` and symlinks) that escape `project_dir` while leaving `:memory:`, `file:` URIs, and explicit absolute paths untouched.
+
 - **`incremental_strategy: diff` on PostgreSQL: a concurrent run of the same sync now says so** ([#1330](https://github.com/drt-hub/drt/issues/1330)): when two runs of the same sync raced on the snapshot scratch table, the losing run could see the table vanish between its `CREATE` and its column introspection and report a misleading `upsert_key column(s) [...] not found in the model's output columns []` error. An empty introspection now raises the same "another run of sync ... appears to be building the same snapshot table concurrently" error as the other race outcomes; a genuinely missing key column is still a `ValueError`.
 
 ## [1.3.3] - 2026-11-14

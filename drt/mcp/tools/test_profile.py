@@ -12,7 +12,7 @@ from typing import Any
 
 
 def test_profile(name: str, project_dir: Path | None = None) -> dict[str, Any]:
-    from drt.config.credentials import load_profile, project_dir_context, resolve_profile_paths
+    from drt.config.credentials import load_profile, resolve_profile_paths
     from drt.connectors.registry import get_source
 
     try:
@@ -22,8 +22,7 @@ def test_profile(name: str, project_dir: Path | None = None) -> dict[str, Any]:
 
     source = get_source(profile)
     try:
-        with project_dir_context(project_dir):
-            ok = source.test_connection(profile)
+        ok = source.test_connection(profile)
     except Exception as e:
         return {"name": name, "type": profile.type, "ok": False, "error": str(e)}
 

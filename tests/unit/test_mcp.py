@@ -1871,27 +1871,33 @@ async def test_non_cwd_real_sqlite_profile_resolves_against_project_dir(
 
 
 @pytest.mark.asyncio
-async def test_non_cwd_secrets_toml_resolves_against_project_dir(
+async def test_non_cwd_duckdb_profile_resolves_against_project_dir(
     tmp_path_factory: Any, monkeypatch: Any
 ) -> None:
-    """#1243: .drt/secrets.toml resolves against project_dir when cwd is elsewhere."""
+    """#1243: relative DuckDB database paths resolve against project_dir, not cwd."""
+    duckdb = pytest.importorskip("duckdb")
     import yaml
 
-    from drt.config.credentials import resolve_env
+    from drt.config.credentials import DuckDBProfile
 
-    proj = tmp_path_factory.mktemp("secrets_proj")
+    proj = tmp_path_factory.mktemp("duckdb_proj")
     elsewhere = tmp_path_factory.mktemp("elsewhere_cwd")
-    (proj / ".drt").mkdir()
-    (proj / ".drt" / "secrets.toml").write_text('MY_TEST_SECRET = "from-project-secrets"\n')
+    (proj / "data").mkdir()
+    db_path = proj / "data" / "warehouse.duckdb"
+    conn = duckdb.connect(str(db_path))
+    conn.execute("CREATE TABLE users (id INTEGER, email VARCHAR)")
+    conn.execute("INSERT INTO users VALUES (1, 'ada@example.com')")
+    conn.close()
+
     (proj / "drt_project.yml").write_text(
-        yaml.dump({"name": "secrets-non-cwd", "version": "0.1", "profile": "local"})
+        yaml.dump({"name": "duckdb-non-cwd", "version": "0.1", "profile": "local"})
     )
     (proj / "syncs").mkdir()
     (proj / "syncs" / "users_out.yml").write_text(
         yaml.dump(
             {
                 "name": "users_out",
-                "model": "SELECT 1 AS id",
+                "model": "SELECT id, email FROM users",
                 "destination": {
                     "type": "rest_api",
                     "url": "https://example.invalid/hook",
@@ -1901,20 +1907,69 @@ async def test_non_cwd_secrets_toml_resolves_against_project_dir(
         )
     )
 
-    seen: list[str | None] = []
-
-    class _SecretCheckingSource:
-        def extract(self, *_args: Any, **_kwargs: Any) -> Any:
-            seen.append(resolve_env(None, "MY_TEST_SECRET"))
-            return iter([{"id": 1}])
-
-    monkeypatch.delenv("MY_TEST_SECRET", raising=False)
-    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
-    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: _SecretCheckingSource())
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile",
+        lambda _name: DuckDBProfile(type="duckdb", database="data/warehouse.duckdb"),
+    )
     monkeypatch.chdir(elsewhere)
 
     srv = create_server(proj)
-    run_res = await call(srv, "drt_run_sync", sync_name="users_out", dry_run=True)
 
+    tested = await call(srv, "drt_test_profile", name="local")
+    assert tested == {"name": "local", "type": "duckdb", "ok": True}
+
+    run_res = await call(srv, "drt_run_sync", sync_name="users_out", dry_run=True)
     assert run_res["success"] == 1
-    assert seen == ["from-project-secrets"]
+    assert run_res["failed"] == 0
+    assert not (elsewhere / "data").exists()
+
+
+def test_resolve_profile_paths_preserves_absolute_memory_and_file_uri(
+    tmp_path: Path,
+) -> None:
+    """#1243: absolute paths, :memory:, and file: URIs stay untouched."""
+    from drt.config.credentials import SQLiteProfile, resolve_profile_paths
+
+    abs_db = str((tmp_path / "abs.sqlite").resolve())
+    assert (
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database=abs_db), tmp_path).database
+        == abs_db
+    )
+    assert (
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database=":memory:"), tmp_path).database
+        == ":memory:"
+    )
+    uri = "file:data.sqlite?mode=ro"
+    assert (
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database=uri), tmp_path).database == uri
+    )
+
+
+def test_resolve_profile_paths_rejects_parent_escape(tmp_path: Path) -> None:
+    """#1243: relative paths with '..' escaping project_dir are rejected."""
+    from drt.config.credentials import SQLiteProfile, resolve_profile_paths
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    with pytest.raises(ValueError, match="escapes project directory"):
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database="../outside.sqlite"), proj)
+
+
+def test_resolve_profile_paths_rejects_symlink_escape(tmp_path: Path) -> None:
+    """#1243: relative symlinks pointing outside project_dir are rejected."""
+    from drt.config.credentials import SQLiteProfile, resolve_profile_paths
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    outside = tmp_path / "outside.sqlite"
+    outside.write_bytes(b"")
+    link = proj / "link.sqlite"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("symlink creation requires developer mode or admin on Windows")
+        raise
+
+    with pytest.raises(ValueError, match="escapes project directory"):
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database="link.sqlite"), proj)

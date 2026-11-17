@@ -246,9 +246,10 @@ and `approved_by` is recorded exactly as the caller supplied it. So:
   `target/drt/plans/` whose embedded `plan_id` equals the requested one. Beyond
   that, the file system is trusted: an agent that can write inside your project
   can also run other commands.
-- Run `drt mcp run` from the project directory. Relative local database paths
-  (SQLite/DuckDB profiles) and `.drt/secrets.toml` are resolved against the
-  working directory, not the project directory passed to the server.
+- Relative local database paths (SQLite/DuckDB profiles) resolve against the
+  project directory passed to the server (and relative paths that escape it are
+  rejected). Run `drt mcp run` from the project directory if you rely on a
+  project-local `.drt/secrets.toml`.
 
 **Recommended client setup.** Allow `drt_plan` without asking, and require an
 approval prompt for `drt_apply` (in Claude Code, leave `mcp__drt__drt_apply` out

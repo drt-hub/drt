@@ -33,7 +33,7 @@ def run_sync(
 ) -> dict[str, Any]:
     from drt.cli._helpers import resolve_profile_name
     from drt.cli.main import _get_destination, _get_source
-    from drt.config.credentials import load_profile, project_dir_context, resolve_profile_paths
+    from drt.config.credentials import load_profile, resolve_profile_paths
     from drt.config.parser import project_vars as resolve_project_vars
     from drt.engine.sync import run_sync as engine_run_sync
     from drt.state.factory import build_state_bundle
@@ -110,26 +110,25 @@ def run_sync(
         state_mgr.reset(sync_name)
 
     try:
-        with project_dir_context(ctx.project_dir):
-            result = engine_run_sync(
-                sync,
-                source,
-                dest,
-                profile,
-                ctx.project_dir,
-                dry_run,
-                state_mgr,
-                cursor_value_override=(cursor_value if sync.sync.mode == "incremental" else None),
-                compute_diff=compute_diff,
-                diff_limit=diff_limit,
-                extract_limit=limit,
-                vars=resolved_vars,
-                idempotency_ledger=bundle.ledger,
-                audit_trail=bundle.audit_trail,
-                audit_fields=project.state.audit_trail.fields,
-                audit_retain_days=project.state.audit_trail.retain_days or 30,
-                force_guards=force_guards,
-            )
+        result = engine_run_sync(
+            sync,
+            source,
+            dest,
+            profile,
+            ctx.project_dir,
+            dry_run,
+            state_mgr,
+            cursor_value_override=(cursor_value if sync.sync.mode == "incremental" else None),
+            compute_diff=compute_diff,
+            diff_limit=diff_limit,
+            extract_limit=limit,
+            vars=resolved_vars,
+            idempotency_ledger=bundle.ledger,
+            audit_trail=bundle.audit_trail,
+            audit_fields=project.state.audit_trail.fields,
+            audit_retain_days=project.state.audit_trail.retain_days or 30,
+            force_guards=force_guards,
+        )
     except Exception as exc:
         from drt.engine.guards import GuardTripped, guards_outcome_of
 
