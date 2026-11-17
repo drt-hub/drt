@@ -45,6 +45,7 @@ DESTINATIONS = [
     ("hubspot", "HubSpot"),
     ("intercom", "Intercom"),
     ("jira", "Jira"),
+    ("kafka", "Apache Kafka"),
     ("klaviyo", "Klaviyo"),
     ("linear", "Linear"),
     ("meta_conversions", "Meta Conversions"),
@@ -84,6 +85,7 @@ _EXTRAS: dict[str, str] = {
     "iceberg": "iceberg",
     "s3": "s3",
     "sqs": "sqs",
+    "kafka": "kafka",
     "gcs": "gcs",
     "azure_blob": "azure",  # extra name differs from the type
     "parquet": "parquet",

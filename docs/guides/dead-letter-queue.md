@@ -105,6 +105,9 @@ recognise a re-sent record:
 - **Elasticsearch / OpenSearch** — set `id_field` so each document gets a
   stable `_id`; a replay re-indexes the same document (`op_type: index`)
   rather than creating a new one with an auto-generated id.
+- **Kafka** — an append-only topic cannot deduplicate a replay. A compacted topic
+  with `key_field` retains the latest value per key eventually, but live consumers
+  can still observe duplicates; use consumer deduplication or reconcile downstream.
 - **REST API and other HTTP destinations** — prefer an endpoint that upserts on
   a natural key, or one that honours an idempotency key, so a duplicate POST is
   a no-op server-side.

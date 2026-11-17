@@ -385,7 +385,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 ### Destinations
 
 <details>
-<summary><b>37 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
+<summary><b>38 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
 
 | Connector               | Status    | Install                            | Auth                              |
 | ----------------------- | --------- | ---------------------------------- | --------------------------------- |
@@ -408,6 +408,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Parquet file            | ✅ v0.5   | `pip install drt-core[parquet]`    | File path                         |
 | Amazon S3               | ✅ v0.7.9 | `pip install drt-core[s3]`         | AWS credential chain / env vars   |
 | [Amazon SQS](docs/connectors/sqs.md) | ✅ next | `pip install drt-core[sqs]`       | AWS credential chain / env vars   |
+| [Apache Kafka](docs/connectors/kafka.md) | ✅ next | `pip install drt-core[kafka]` | Explicit none / TLS / SASL over TLS |
 | Google Cloud Storage    | ✅ v0.7.9 | `pip install drt-core[gcs]`        | Application Default / Service Account Keyfile |
 | Azure Blob Storage      | ✅ v0.7.9 | `pip install drt-core[azure]`      | Connection string env / DefaultAzureCredential |
 | Microsoft Teams Webhook | ✅ v0.5   | (core)                             | Webhook URL                       |
