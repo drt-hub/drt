@@ -73,6 +73,18 @@ class TestHistoryAppendAndRead:
             )
         assert len(mgr.read(sync_name="s", limit=3)) == 3
 
+    def test_read_breaks_started_at_ties_by_run_id(self, tmp_path: Path) -> None:
+        mgr = HistoryManager(tmp_path)
+        started_at = "2026-05-01T10:00:00+00:00"
+        older_tie = _entry(sync_name="s", started_at=started_at)
+        older_tie.run_id = "run-a"
+        newer_tie = _entry(sync_name="s", started_at=started_at)
+        newer_tie.run_id = "run-b"
+        mgr.append(newer_tie)
+        mgr.append(older_tie)
+
+        assert [entry.run_id for entry in mgr.read("s", limit=1)] == ["run-b"]
+
     def test_read_all_syncs_merges_and_sorts(self, tmp_path: Path) -> None:
         mgr = HistoryManager(tmp_path)
         mgr.append(_entry(sync_name="alpha", started_at="2026-05-01T00:00:00+00:00"))

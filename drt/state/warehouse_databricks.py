@@ -486,11 +486,14 @@ class DatabricksWarehouseHistoryStore:
             if sync_name is not None:
                 cur.execute(
                     f"SELECT {columns} FROM {t} WHERE sync_name = ? "
-                    "ORDER BY started_at DESC LIMIT ?",
+                    "ORDER BY started_at DESC, run_id DESC LIMIT ?",
                     [sync_name, limit],
                 )
             else:
-                cur.execute(f"SELECT {columns} FROM {t} ORDER BY started_at DESC LIMIT ?", [limit])
+                cur.execute(
+                    f"SELECT {columns} FROM {t} ORDER BY started_at DESC, run_id DESC LIMIT ?",
+                    [limit],
+                )
             return [_row_to_history_entry(row, present) for row in cur.fetchall()]
         finally:
             conn.close()

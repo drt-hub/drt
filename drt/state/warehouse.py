@@ -467,14 +467,15 @@ class PostgresWarehouseHistoryStore:
                     cur.execute(
                         _pgsql.SQL(
                             f"SELECT {columns} FROM {{}} WHERE sync_name = %s "
-                            "ORDER BY started_at DESC LIMIT %s"
+                            "ORDER BY started_at DESC, run_id DESC LIMIT %s"
                         ).format(_qualified(self._profile, _HISTORY_TABLE)),
                         (sync_name, limit),
                     )
                 else:
                     cur.execute(
                         _pgsql.SQL(
-                            f"SELECT {columns} FROM {{}} ORDER BY started_at DESC LIMIT %s"
+                            f"SELECT {columns} FROM {{}} "
+                            "ORDER BY started_at DESC, run_id DESC LIMIT %s"
                         ).format(_qualified(self._profile, _HISTORY_TABLE)),
                         (limit,),
                     )

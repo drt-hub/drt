@@ -230,6 +230,47 @@ def test_history_store_append_read_and_prune() -> None:
     assert [e.started_at for e in history.read(sync_a)] == [recent]
 
 
+def test_history_tie_break_is_stable_across_read_and_prune() -> None:
+    from datetime import datetime, timezone
+
+    creds = _require_creds()
+    profile = _profile(creds)
+    history = SnowflakeWarehouseHistoryStore(profile)
+    sync_name = f"history_tie_{uuid.uuid4().hex[:8]}"
+    tied_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def entry(started_at: str, run_id: str) -> HistoryEntry:
+        return HistoryEntry(
+            sync_name=sync_name,
+            started_at=started_at,
+            completed_at=started_at,
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+            run_id=run_id,
+        )
+
+    try:
+        history.append(entry("2020-01-01T00:00:00+00:00", "run-old"))
+        history.append(entry(tied_at, "run-a"))
+        history.append(entry(tied_at, "run-b"))
+
+        assert [item.run_id for item in history.read(sync_name, limit=2)] == ["run-b", "run-a"]
+        assert history.prune(sync_name, retention_days=30) == 1
+        assert [item.run_id for item in history.read(sync_name, limit=2)] == ["run-b", "run-a"]
+    finally:
+        conn = _admin_connect(creds)
+        try:
+            conn.cursor().execute(
+                f"DELETE FROM {profile.database}.{profile.managed_schema}._drt_history "
+                "WHERE sync_name = %s",
+                (sync_name,),
+            )
+        finally:
+            conn.close()
+
+
 def test_dlq_backend_fifo_reconcile_and_clear() -> None:
     """Codex review: the DLQ MERGEs globally on ``id`` and does not update
     ``sync_name`` on a match (same as Postgres's own ``ON CONFLICT (id) DO

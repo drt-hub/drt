@@ -34,6 +34,11 @@ from drt.state._integrity import report_unreadable
 logger = logging.getLogger(__name__)
 
 
+def _history_order_key(entry: HistoryEntry) -> tuple[str, str]:
+    """Stable recency key shared by local and object-store history."""
+    return entry.started_at, entry.run_id or ""
+
+
 @dataclass
 class HistoryEntry:
     """One execution of one sync."""
@@ -162,7 +167,7 @@ class LocalHistoryManager:
         """Return up to ``limit`` most recent entries, newest first.
 
         If ``sync_name`` is given, only that sync's history is read; otherwise
-        all syncs are merged and re-sorted by ``started_at``.
+        all syncs are merged and re-sorted by ``started_at`` and ``run_id``.
         """
         if not self._dir.exists():
             return []
@@ -178,7 +183,7 @@ class LocalHistoryManager:
         for path in files:
             entries.extend(_read_jsonl(path))
 
-        entries.sort(key=lambda e: e.started_at, reverse=True)
+        entries.sort(key=_history_order_key, reverse=True)
         return entries[:limit]
 
     def prune(self, sync_name: str, retention_days: int) -> int:

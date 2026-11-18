@@ -10,6 +10,7 @@ already established for the primitive this backend is built on.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -165,6 +166,50 @@ def test_history_store_append_read_and_prune(pg_profile: PostgresProfile) -> Non
     removed = history.prune("orders", retention_days=30)
     assert removed == 1
     assert [e.started_at for e in history.read("orders")] == [recent_start_iso]
+
+
+def test_history_tie_break_is_stable_across_read_and_prune(pg_profile: PostgresProfile) -> None:
+    history = PostgresWarehouseHistoryStore(pg_profile)
+    sync_name = f"history_tie_{uuid.uuid4().hex[:8]}"
+    tied_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def entry(started_at: str, run_id: str) -> HistoryEntry:
+        return HistoryEntry(
+            sync_name=sync_name,
+            started_at=started_at,
+            completed_at=started_at,
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+            run_id=run_id,
+        )
+
+    try:
+        history.append(entry("2020-01-01T00:00:00+00:00", "run-old"))
+        history.append(entry(tied_at, "run-a"))
+        history.append(entry(tied_at, "run-b"))
+
+        assert [item.run_id for item in history.read(sync_name, limit=2)] == ["run-b", "run-a"]
+        assert history.prune(sync_name, retention_days=30) == 1
+        assert [item.run_id for item in history.read(sync_name, limit=2)] == ["run-b", "run-a"]
+    finally:
+        conn = psycopg2.connect(
+            host=pg_profile.host,
+            port=pg_profile.port,
+            dbname=pg_profile.dbname,
+            user=pg_profile.user,
+            password=pg_profile.password,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM _drt._drt_history WHERE sync_name = %s",
+                    (sync_name,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def test_dlq_backend_fifo_reconcile_and_clear(pg_profile: PostgresProfile) -> None:
