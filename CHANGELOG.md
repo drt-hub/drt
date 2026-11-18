@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Not yet usable — REST API backfill upper-bound configuration:** REST source profiles accept optional `incremental.end_param` alongside `start_param`, the source-side capability needed to send ADR 0021 half-open window bounds. `drt run` still refuses `sync.backfill` until the sequential checkpoint slice lands.
+
 ### Fixed
 
 - **`drt retry` no longer deletes dead letters the destination never attempted** ([#1343](https://github.com/drt-hub/drt/issues/1343)): when a destination stops after a failure (`on_error: fail`) it reports the rest of the batch as `skipped` without naming those rows, and `replay_dead_letters()` treated every non-failed row as delivered and removed it from the DLQ. A skip that `skipped_no_match` does not explain now keeps the whole group queued with a "not attempted" message; match-policy skips behave as before.

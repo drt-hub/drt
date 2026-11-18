@@ -34,8 +34,9 @@ from pathlib import Path
 from typing import Any, Literal, TextIO
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
+from drt.config.base import PaginationConfig, RestIncrementalConfig, validate_rest_window_params
 from drt.config.profiles import (
     DEFAULT_FETCH_SIZE,
     BigQueryProfile,
@@ -557,13 +558,23 @@ def _load_rest_api(raw: dict[str, Any]) -> RestApiProfile:
     url = raw.get("url", "")
     if not url:
         raise ValueError("REST API profile requires 'url'.")
+    incremental_raw = raw.get("incremental")
+    pagination_raw = raw.get("pagination")
+    pagination = (
+        TypeAdapter(PaginationConfig).validate_python(pagination_raw)
+        if pagination_raw is not None
+        else None
+    )
+    if incremental_raw is not None:
+        incremental = TypeAdapter(RestIncrementalConfig).validate_python(incremental_raw)
+        validate_rest_window_params(incremental, pagination)
     return RestApiProfile(
         type="rest_api",
         url=url,
         auth=raw.get("auth"),
-        pagination=raw.get("pagination"),
+        pagination=pagination_raw,
         result_path=raw.get("result_path"),
-        incremental=raw.get("incremental"),
+        incremental=incremental_raw,
     )
 
 

@@ -130,6 +130,8 @@ class BackfillConfig(BaseModel):
         cls, core_schema: Any, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
         """Describe the two valid arithmetic families instead of loose unions."""
+        from drt.engine.backfill import MAX_INT64, MIN_INT64
+
         schema = handler(core_schema)
         for key in ("additionalProperties", "properties", "required", "type"):
             schema.pop(key, None)
@@ -161,9 +163,20 @@ class BackfillConfig(BaseModel):
                 "additionalProperties": False,
                 "properties": {
                     "window": {"type": "integer", "exclusiveMinimum": 0},
-                    "start": {"type": "integer"},
+                    "start": {
+                        "type": "integer",
+                        "minimum": MIN_INT64,
+                        "maximum": MAX_INT64,
+                    },
                     "end": {
-                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                        "anyOf": [
+                            {
+                                "type": "integer",
+                                "minimum": MIN_INT64,
+                                "maximum": MAX_INT64,
+                            },
+                            {"type": "null"},
+                        ],
                         "default": None,
                     },
                 },
@@ -214,6 +227,9 @@ class BackfillConfig(BaseModel):
                 raise ValueError(
                     "sync.backfill.end must be an integer when sync.backfill.window is integer."
                 )
+            canonicalize_bound(self.start, field_name="sync.backfill.start")
+            if self.end is not None:
+                canonicalize_bound(self.end, field_name="sync.backfill.end")
             if self.end is not None and self.start >= self.end:
                 raise ValueError(
                     "sync.backfill.start must be less than sync.backfill.end (exclusive)."
@@ -709,6 +725,11 @@ class SyncOptions(BaseModel):
             raise ValueError(
                 "sync.backfill cannot be combined with watermark.default_value; "
                 "sync.backfill.start is the first-run bound."
+            )
+        if self.cursor_field is not None and "." in self.cursor_field:
+            raise ValueError(
+                "nested cursor paths are not supported for windowed backfill; "
+                "expose the field as a top-level column in the model."
             )
         # TODO(ADR 0021 slice 4): reject CLI --limit with sync.backfill. The
         # config model cannot see invocation flags, and slice 4 owns that CLI

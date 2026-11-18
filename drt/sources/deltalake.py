@@ -26,6 +26,7 @@ from typing import Any
 
 from drt.config.credentials import DeltaLakeProfile, ProfileConfigLike, resolve_env_dict
 from drt.config.profiles import DEFAULT_FETCH_SIZE
+from drt.sources.base import is_windowed_backfill_query
 
 
 def _table_name(profile: DeltaLakeProfile) -> str:
@@ -78,6 +79,8 @@ class DeltaLakeSource:
 
         conn = duckdb.connect()
         try:
+            if is_windowed_backfill_query(query):
+                conn.execute("SET TimeZone='UTC'")
             conn.register(_table_name(config), dataset)
             result = conn.execute(query)
             columns = [desc[0] for desc in result.description]

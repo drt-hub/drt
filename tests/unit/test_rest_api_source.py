@@ -5,8 +5,10 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import TypeAdapter
 
 from drt.config.credentials import RestApiProfile
+from drt.config.models import PaginationConfig
 from drt.sources.rest_api import RestApiSource
 
 
@@ -414,6 +416,156 @@ def test_extract_incremental_without_profile_config_warns_and_full_extracts(
     assert len(records) == 1
     assert calls[0]["params"] is None
     assert any("incremental.start_param" in r.message for r in caplog.records)
+
+
+def test_extract_window_injects_start_and_exclusive_end_params(monkeypatch: Any) -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        incremental={"start_param": "updated_since", "end_param": "updated_before"},
+    )
+    calls = _recording_client(monkeypatch, [{"json": [{"id": 1}]}])
+
+    records = list(source.extract_window("", profile, 100, 200))
+
+    assert records == [{"id": 1}]
+    assert calls[0]["params"] == {"updated_since": "100", "updated_before": "200"}
+
+
+def test_extract_window_without_end_param_is_rejected() -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        incremental={"start_param": "updated_since"},
+    )
+
+    with pytest.raises(ValueError, match=r"sync\.backfill.*incremental\.end_param"):
+        list(source.extract_window("", profile, "2025-01-01", "2025-01-02"))
+
+
+def test_extract_window_without_incremental_config_is_rejected() -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(type="rest_api", url="https://api.example.com/users")
+
+    with pytest.raises(ValueError, match=r"sync\.backfill.*start_param.*end_param"):
+        list(source.extract_window("", profile, 0, 10))
+
+
+def test_rest_incremental_start_and_end_params_must_differ() -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        incremental={"start_param": "cursor", "end_param": "cursor"},
+    )
+
+    with pytest.raises(ValueError, match="end_param must differ"):
+        list(source.extract_window("", profile, 0, 10))
+
+
+@pytest.mark.parametrize(
+    ("pagination", "collision"),
+    [
+        ({"type": "offset", "offset_param": "offset"}, "offset"),
+        (
+            {
+                "type": "cursor",
+                "cursor_param": "after",
+                "cursor_field": "next",
+            },
+            "after",
+        ),
+    ],
+)
+def test_extract_window_defensively_rejects_pagination_param_collisions(
+    pagination: dict[str, object], collision: str
+) -> None:
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        pagination=pagination,
+        incremental={"start_param": "updated_since", "end_param": collision},
+    )
+
+    with pytest.raises(ValueError, match=r"must not collide.*collision"):
+        list(RestApiSource().extract_window("", profile, 0, 10))
+
+
+def test_extract_window_rejects_link_header_pagination_before_first_request(
+    monkeypatch: Any,
+) -> None:
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        pagination={"type": "link_header"},
+        incremental={"start_param": "updated_since", "end_param": "updated_before"},
+    )
+    calls = _recording_client(monkeypatch, [{"json": [{"id": 1}]}])
+
+    with pytest.raises(ValueError, match=r"does not support REST link_header pagination"):
+        list(RestApiSource().extract_window("", profile, 0, 10))
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "pagination",
+    [
+        {"type": "offset", "offset_param": "page", "limit_param": "page"},
+        {
+            "type": "cursor",
+            "cursor_param": "page",
+            "limit_param": "page",
+            "cursor_field": "next",
+        },
+    ],
+)
+def test_pagination_parameter_names_must_be_distinct_for_all_extracts(
+    pagination: dict[str, object],
+) -> None:
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        pagination=pagination,
+    )
+
+    with pytest.raises(ValueError, match=r"pagination\..*_param must differ"):
+        list(RestApiSource().extract("", profile))
+
+
+@pytest.mark.parametrize(
+    "pagination",
+    [
+        {"type": "offset", "offset_param": "Page", "limit_param": "page"},
+        {
+            "type": "cursor",
+            "cursor_param": "Page",
+            "limit_param": "page",
+            "cursor_field": "next",
+        },
+    ],
+)
+def test_pagination_parameter_collision_check_is_case_sensitive(
+    pagination: dict[str, object],
+) -> None:
+    assert TypeAdapter(PaginationConfig).validate_python(pagination) is not None
+
+
+@pytest.mark.parametrize("field", ["start_param", "end_param"])
+@pytest.mark.parametrize("value", ["", "   ", " cursor"])
+def test_extract_window_rejects_empty_or_whitespace_param_names(field: str, value: str) -> None:
+    incremental = {"start_param": "start", "end_param": "end"}
+    incremental[field] = value
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        incremental=incremental,
+    )
+
+    with pytest.raises(ValueError, match="parameter names must be non-empty"):
+        list(RestApiSource().extract_window("", profile, 0, 10))
 
 
 def test_plain_extract_never_injects_even_with_config(monkeypatch: Any) -> None:

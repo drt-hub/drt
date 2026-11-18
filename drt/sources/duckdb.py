@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from drt.config.credentials import DuckDBProfile, ProfileConfigLike
+from drt.sources.base import is_windowed_backfill_query
 
 
 class DuckDBSource:
@@ -40,6 +41,8 @@ class DuckDBSource:
 
         conn = duckdb.connect(config.database)
         try:
+            if is_windowed_backfill_query(query):
+                conn.execute("SET TimeZone='UTC'")
             result = conn.execute(query)
             columns = [desc[0] for desc in result.description]
             # Streaming (#765): fetch in batches rather than materialising the

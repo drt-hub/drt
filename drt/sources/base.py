@@ -6,9 +6,17 @@ Future PyO3 bindings will implement this same protocol.
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, runtime_checkable
+from inspect import Parameter, isasyncgenfunction, iscoroutinefunction, signature
+from typing import Any, Literal, Protocol, TypeGuard, runtime_checkable
 
 from drt.config.profiles import ProfileConfigLike
+
+WINDOWED_BACKFILL_QUERY_MARKER = "/* drt:windowed-backfill */"
+
+
+def is_windowed_backfill_query(query: str) -> bool:
+    """Return whether ``query`` is drt's generated bounded extraction query."""
+    return WINDOWED_BACKFILL_QUERY_MARKER in query
 
 
 @runtime_checkable
@@ -112,6 +120,76 @@ class IncrementalSource(Protocol):
                 contract.
         """
         ...
+
+
+@runtime_checkable
+class WindowedIncrementalSource(Protocol):
+    """Optional source capability for a bounded ``[low, high)`` extract.
+
+    SQL-shaped sources do not implement this Protocol: the engine carries
+    their bounds in the centrally rendered SQL query. API-shaped sources have
+    no SQL predicate surface, so they opt in here without changing the frozen
+    :class:`Source` or :class:`IncrementalSource` signatures (ADR 0007).
+
+    ``runtime_checkable`` verifies attribute presence only; callers must use
+    :func:`is_window_capable` to reject lookalikes with an incompatible
+    ``extract_window`` signature.
+
+    Stability: New in ADR 0021 — not yet frozen.
+    """
+
+    def extract_window(
+        self,
+        query: str,
+        profile: ProfileConfigLike,
+        low: str | int,
+        high: str | int,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield records whose cursor belongs to the half-open window.
+
+        Implementations must filter server-side with an inclusive lower bound
+        and exclusive upper bound. The engine independently validates every
+        returned cursor before loading, so a source that violates this
+        contract fails closed.
+        """
+
+        ...
+
+
+def is_window_capable(source: object) -> TypeGuard[WindowedIncrementalSource]:
+    """Return whether ``source`` has the exact callable window capability.
+
+    The bound method must accept the four required positional parameters
+    ``query``, ``profile``, ``low`` and ``high``. Any additional parameter
+    must have a default, keeping engine calls compatible with optional
+    keyword-only extensions such as ``query_tags``.
+    """
+    if not isinstance(source, WindowedIncrementalSource):
+        return False
+    if iscoroutinefunction(source.extract_window) or isasyncgenfunction(source.extract_window):
+        return False
+    try:
+        parameters = list(signature(source.extract_window).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    required_names = ("query", "profile", "low", "high")
+    if len(parameters) < len(required_names):
+        return False
+    for parameter, name in zip(parameters, required_names):
+        if parameter.name != name or parameter.kind not in {
+            Parameter.POSITIONAL_ONLY,
+            Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            return False
+        if parameter.default is not Parameter.empty:
+            return False
+    return all(
+        parameter.default is not Parameter.empty
+        and parameter.kind not in {Parameter.VAR_POSITIONAL, Parameter.VAR_KEYWORD}
+        for parameter in parameters[len(required_names) :]
+    )
 
 
 @runtime_checkable

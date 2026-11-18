@@ -74,6 +74,18 @@ class TestClickHouseSource:
         assert results[1] == {"id": 2, "name": "Bob"}
         mock_client.close.assert_called_once()
 
+    def test_windowed_extract_sets_utc_session_timezone(self) -> None:
+        source = ClickHouseSource()
+        mock_client = _streaming_client([])
+        query = "SELECT /* drt:windowed-backfill */ * FROM events"
+
+        with patch.object(ClickHouseSource, "_connect", return_value=mock_client):
+            list(source.extract(query, _config()))
+
+        mock_client.query_rows_stream.assert_called_once_with(
+            query, settings={"session_timezone": "UTC"}
+        )
+
     def test_test_connection_success(self) -> None:
         source = ClickHouseSource()
         config = _config()

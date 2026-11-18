@@ -10,6 +10,7 @@ import httpx
 from pydantic import TypeAdapter
 
 from drt._http_utils import extract_next_link
+from drt.config.base import validate_rest_window_params
 from drt.config.credentials import ProfileConfigLike, RestApiProfile
 from drt.config.models import (
     AuthConfig,
@@ -52,7 +53,9 @@ class RestApiSource(Source):
         only.
         """
         assert isinstance(config, RestApiProfile)
-        yield from self._extract_impl(config, incremental=None, cursor_value=None)
+        yield from self._extract_impl(
+            config, incremental=None, cursor_value=None, end_cursor_value=None
+        )
 
     def extract_incremental(
         self,
@@ -84,13 +87,60 @@ class RestApiSource(Source):
                 "Add `incremental: {start_param: <param>}` to the rest_api profile to "
                 "push the watermark to the API."
             )
-        yield from self._extract_impl(config, incremental=incremental, cursor_value=cursor_value)
+        yield from self._extract_impl(
+            config,
+            incremental=incremental,
+            cursor_value=cursor_value,
+            end_cursor_value=None,
+        )
+
+    def extract_window(
+        self,
+        query: str,
+        profile: ProfileConfigLike,
+        low: str | int,
+        high: str | int,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Extract one half-open REST backfill window (ADR 0021).
+
+        REST profiles opt in by configuring both ``start_param`` and
+        ``end_param``. The latter is deliberately optional for ordinary
+        incremental sync compatibility, but a bounded backfill cannot run
+        without it.
+        """
+        assert isinstance(profile, RestApiProfile)
+        if not profile.incremental:
+            raise ValueError(
+                "sync.backfill with a rest_api source requires profile "
+                "incremental.start_param and incremental.end_param."
+            )
+        incremental = TypeAdapter(RestIncrementalConfig).validate_python(profile.incremental)
+        pagination = (
+            TypeAdapter(PaginationConfig).validate_python(profile.pagination)
+            if profile.pagination
+            else None
+        )
+        validate_rest_window_params(incremental, pagination)
+        if incremental.end_param is None:
+            raise ValueError(
+                "sync.backfill with a rest_api source requires profile "
+                "incremental.end_param; the REST source is not window-capable without it."
+            )
+        yield from self._extract_impl(
+            profile,
+            incremental=incremental,
+            cursor_value=str(low),
+            end_cursor_value=str(high),
+        )
 
     def _extract_impl(
         self,
         config: RestApiProfile,
         incremental: RestIncrementalConfig | None,
         cursor_value: str | None,
+        end_cursor_value: str | None,
     ) -> Iterator[dict[str, Any]]:
         auth_config: AuthConfig | None = None
         if config.auth:
@@ -157,6 +207,8 @@ class RestApiSource(Source):
                 ):
                     request_params = dict(request_params or {})
                     request_params[incremental.start_param] = cursor_value
+                    if incremental.end_param is not None and end_cursor_value is not None:
+                        request_params[incremental.end_param] = end_cursor_value
 
                 # Retry transient failures (#766). The load side has had this
                 # since #277; the extract side had none, so a single 503 on

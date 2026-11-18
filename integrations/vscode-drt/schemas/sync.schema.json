@@ -503,11 +503,15 @@
               "type": "integer"
             },
             "start": {
+              "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
               "type": "integer"
             },
             "end": {
               "anyOf": [
                 {
+                  "maximum": 9223372036854775807,
+                  "minimum": -9223372036854775808,
                   "type": "integer"
                 },
                 {

@@ -24,6 +24,7 @@ from typing import Any
 from drt.config.credentials import ProfileConfigLike, RedshiftProfile, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
+from drt.sources.base import is_windowed_backfill_query
 
 
 class RedshiftSource:
@@ -117,11 +118,14 @@ class RedshiftSource:
         def _connect_and_execute() -> tuple[Any, Any]:
             conn = self._connect(config)
             try:
-                if config.schema:
+                if config.schema or is_windowed_backfill_query(query):
                     # Plain cursor: this is session state, and DECLARE ... FOR
                     # SET is not valid SQL.
                     with conn.cursor() as setup:
-                        setup.execute("SET search_path TO %s", (config.schema,))
+                        if config.schema:
+                            setup.execute("SET search_path TO %s", (config.schema,))
+                        if is_windowed_backfill_query(query):
+                            setup.execute("SET TIME ZONE 'UTC'")
                 cur = conn.cursor(name="drt_extract")
                 cur.itersize = config.fetch_size
                 cur.execute(query)

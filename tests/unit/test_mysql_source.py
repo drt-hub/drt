@@ -66,6 +66,22 @@ class TestMySQLSourceExtract:
 
         mock_conn.close.assert_called_once()
 
+    def test_windowed_query_sets_session_timezone_to_utc(self):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.description = [("id",)]
+        mock_cursor.__iter__.side_effect = lambda: iter([(1,)])
+        mock_conn.cursor.return_value = mock_cursor
+        query = "SELECT /* drt:windowed-backfill */ * FROM events"
+
+        with patch("drt.sources.mysql.MySQLSource._connect", return_value=mock_conn):
+            assert list(MySQLSource().extract(query, _profile())) == [{"id": 1}]
+
+        assert [call.args[0] for call in mock_cursor.execute.call_args_list] == [
+            "SET time_zone = '+00:00'",
+            query,
+        ]
+
 
 class TestMySQLSourceTestConnection:
     def test_success(self):
