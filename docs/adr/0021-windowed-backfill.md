@@ -506,6 +506,112 @@ exclusive completed boundaries.
 | 5 | Plan/apply | Version the plan document, seal window bounds and pre-plan checkpoint, aggregate guards, refuse drift/moved progress, and execute verified windows sequentially. |
 | 6 | Exact replay and end-to-end coverage | Group encrypted payload rows by window, checkpoint sealed highs only after successful groups, preserve ordinary exact behavior, and add local-SQL plus one live cloud-warehouse resume smoke test. |
 
+## Amendment 2026-11-17 (slice 2 review)
+
+The maintainer delegated the following eight slice-2 review decisions. They
+refine bounded extraction without enabling execution: the slice-1
+`BACKFILL_EXECUTION_ENABLED = False` gate remains in force.
+
+1. **Timestamp bounds are UTC instants, not session-local strings.** The
+   contract is: **a timestamp cursor column is compared as a UTC instant; naive
+   columns are assumed to hold UTC**. PostgreSQL/Redshift use `TIMESTAMPTZ`,
+   Snowflake uses `TO_TIMESTAMP_TZ`, BigQuery and Databricks use their explicit
+   `TIMESTAMP` instant literals, SQL Server uses `datetimeoffset`, ClickHouse
+   uses UTC `toDateTime64`, and DuckDB/Delta Lake/Iceberg use a UTC
+   `TIMESTAMPTZ` bound with epoch comparison so both aware and naive cursor
+   values are session-independent. MySQL switches the windowed connection to
+   UTC because its timestamp literals cannot carry an instant independently;
+   SQLite compares canonical UTC text and has no session time zone.
+2. **Timestamp precision stops at microseconds.** Bounds with more than six
+   fractional digits are rejected instead of being silently truncated by the
+   Python timestamp parser.
+3. **REST range parameters own distinct request keys.** `start_param` and
+   `end_param` must be non-empty, contain no surrounding whitespace, differ
+   from each other, and not collide with pagination request parameters. Offset
+   pagination reserves `offset_param` and `limit_param`; cursor pagination
+   reserves `cursor_param` and `limit_param`; link-header pagination reserves
+   no query parameter. Profile loading validates this, and `extract_window`
+   repeats it defensively for directly constructed profiles.
+4. **Dotted cursor fields are paths.** Every dot-separated segment is quoted
+   independently in both the window predicate and numeric `MAX` query, matching
+   the legacy incremental path-expression behavior. Row validation traverses
+   the same nested path.
+5. **Derived-table wrapping preserves statement boundaries.** The resolved
+   model is placed on its own lines inside parentheses, trailing whitespace and
+   one trailing statement semicolon are removed, and multiple statements are
+   rejected. Windowed local-model resolution preserves the file's final newline
+   until this wrapping step, so a trailing `--` comment cannot consume the outer
+   predicate. SQL Server models whose first token after comments is `WITH` are
+   rejected with guidance to move the CTE into a view or subquery. A top-level
+   trailing `ORDER BY` is also a SQL Server derived-table limitation; authors
+   must remove it or move the ordered query behind a view/subquery unless they
+   rewrite it into a form SQL Server permits in a derived table.
+6. **Numeric bounds are signed 64-bit integers.** Configured and runtime bounds
+   outside `[-2^63, 2^63-1]` are rejected. If an automatic `MAX(cursor) + 1`
+   ceiling would exceed that range, extraction fails with guidance to set an
+   explicit `backfill.end`.
+7. **Legacy template detection is syntax-aware.** Parsed Jinja undeclared-name
+   analysis detects filtered expressions and control-flow references to
+   `cursor_value` or `watermark` without treating plain words in SQL comments
+   or string literals as templates. Invalid Jinja falls back to the previous
+   exact-token regex and therefore fails closed; exact-token behavior for local
+   `ref()` model files is retained.
+8. **Runtime Protocol presence is insufficient.**
+   `WindowedIncrementalSource` remains `runtime_checkable`, whose native check
+   proves only that the attribute is present. Engine capability checks use
+   `is_window_capable(source)`, which also verifies required positional
+   `query`, `profile`, `low`, and `high` parameters and permits additional
+   parameters only when they have defaults.
+
+### Round 2
+
+The maintainer delegated these follow-up decisions after the second review;
+where they differ, they supersede the first-round entries above:
+
+1. **Every windowed SQL connection with session time-zone state is pinned to
+   UTC.** The timestamp contract is now explicit: the cursor is a UTC instant,
+   naive timestamp columns contain UTC, and the connection used for windowed
+   extraction runs in a UTC session. PostgreSQL/Redshift run `SET TIME ZONE
+   'UTC'`; Snowflake runs `ALTER SESSION SET TIMEZONE='UTC'`; Databricks runs
+   `SET TIME ZONE 'UTC'`; DuckDB and its Delta Lake/Iceberg adapters run `SET
+   TimeZone='UTC'`; ClickHouse sends `session_timezone='UTC'`; MySQL retains
+   its existing UTC session setup. Legacy incremental connections are not
+   changed. SQL Server has no equivalent session setting and BigQuery
+   timestamps are always UTC. BigQuery `DATETIME` cursor columns are not
+   supported for v1 backfills because the resolver cannot know the column type
+   safely; cast the cursor to `TIMESTAMP` in the model. SQLite bounds use
+   lexically sortable `YYYY-MM-DD HH:MM:SS[.ffffff]` UTC text, and stored text
+   must use that same format (no `datetime(column)` normalization, preserving
+   index use). SQL Server binds use `datetime2(7)` constants so indexed
+   `datetime`/`datetime2` columns are not implicitly converted; a
+   `datetimeoffset` column converts the constant.
+2. **Nested cursor paths are unsupported in v1 windowed backfill.** Config
+   validation and the resolver reject dotted `cursor_field` values with
+   guidance to expose a top-level model column. Window predicates and numeric
+   ceiling queries quote one identifier. Legacy incremental behavior is
+   unchanged. To remain consistent with that legacy unquoted expression,
+   PostgreSQL/Redshift still fold configured names to lowercase and Snowflake
+   to uppercase before quoting; other dialects preserve configured case.
+3. **REST link-header pagination is rejected for windowed extraction.** A
+   followed link can silently omit both bounds, so v1 accepts only no
+   pagination, offset pagination, or cursor pagination for bounded REST reads.
+4. **Pagination parameter names are internally distinct.** Offset
+   `offset_param`/`limit_param` and cursor `cursor_param`/`limit_param` are
+   validated for every use, not only backfill. Comparisons are case-sensitive,
+   matching HTTP query parameter names.
+5. **The derived-model normalizer no longer parses statement semicolons.** It
+   removes trailing whitespace, trailing line comments and at most one final
+   semicolon. Other semicolons remain inside the derived table and therefore
+   fail closed as database syntax errors. Empty/comment-only models are
+   rejected. SQL Server's common leading `;WITH` form receives the same CTE
+   guidance error as leading `WITH`.
+6. **Malformed Jinja fails closed.** When parsing fails, drt scans `{{ ... }}`
+   and `{% ... %}` block bodies for the names `cursor_value` or `watermark` and
+   rejects the model rather than wrapping unresolved legacy cursor logic.
+7. **Window capabilities must be synchronous.** `is_window_capable` rejects
+   coroutine functions and async generators in addition to validating the
+   required synchronous signature.
+
 ## Decisions (owner-approved 2026-11-15)
 
 The maintainer accepted the recommended answer to every question below. They are

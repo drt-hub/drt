@@ -20,6 +20,7 @@ from typing import Any
 from drt.config.credentials import MySQLProfile, ProfileConfigLike, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
+from drt.sources.base import is_windowed_backfill_query
 
 # pymysql client-side error numbers that mean "the link to the server broke",
 # from pymysql.constants.CR (MySQL's client library errno space, 2000+).
@@ -126,6 +127,12 @@ class MySQLSource:
                 import pymysql
 
                 cur = conn.cursor(pymysql.cursors.SSCursor)
+                if is_windowed_backfill_query(query):
+                    # MySQL has no timestamp literal that gives both TIMESTAMP
+                    # (instant) and DATETIME (naive UTC by contract) columns
+                    # session-independent semantics. Pin only generated
+                    # windowed queries to UTC before comparing their bounds.
+                    cur.execute("SET time_zone = '+00:00'")
                 cur.execute(query)
                 return conn, cur, [desc[0] for desc in cur.description]
             except BaseException:

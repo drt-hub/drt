@@ -39,6 +39,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from drt.config.credentials import IcebergProfile, ProfileConfigLike, resolve_env_dict
+from drt.sources.base import is_windowed_backfill_query
 
 
 def _catalog_properties(config: IcebergProfile) -> dict[str, str]:
@@ -77,6 +78,8 @@ class IcebergSource:
 
         conn = duckdb.connect()
         try:
+            if is_windowed_backfill_query(query):
+                conn.execute("SET TimeZone='UTC'")
             conn.register(config.table.split(".")[-1], arrow)
             result = conn.execute(query)
             columns = [desc[0] for desc in result.description]

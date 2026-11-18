@@ -290,10 +290,10 @@ class RestApiProfile:
     auth: dict[str, Any] | None = None
     pagination: dict[str, Any] | None = None
     result_path: str | None = None
-    # Incremental extraction (#767): {"start_param": "updated_since"} — the
-    # request query parameter that receives the sync's last watermark value
-    # when mode=incremental. Validated as RestIncrementalConfig at extract
-    # time (same late-validation pattern as auth / pagination).
+    # Incremental extraction (#767 / ADR 0021): start_param receives the
+    # lower watermark and optional end_param receives a backfill window's
+    # exclusive upper bound. Profile loading validates the range/pagination
+    # parameter namespace; extraction repeats it for directly built profiles.
     incremental: dict[str, Any] | None = None
 
     def describe(self) -> str:

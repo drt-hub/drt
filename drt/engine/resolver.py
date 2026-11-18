@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from jinja2 import TemplateSyntaxError, meta
+
 from drt.config.credentials import (
     BigQueryProfile,
     DatabricksProfile,
@@ -26,6 +28,8 @@ from drt.config.credentials import (
 )
 from drt.config.profiles import ProfileConfigLike
 from drt.config.vars import has_var_template, var_environment
+from drt.engine.backfill import BackfillBound, BackfillWindow, canonicalize_bound
+from drt.sources.base import WINDOWED_BACKFILL_QUERY_MARKER
 
 # Matches: ref('table') or ref("table")
 _REF_PATTERN = re.compile(r"""^ref\(\s*['"]([^'"]+)['"]\s*\)$""", re.IGNORECASE)
@@ -58,6 +62,9 @@ def resolve_model_ref(
     vars: dict[str, Any] | None = None,
     dbt_relation_name: str | None = None,
     dbt_manifest_resolved: bool = False,
+    window_bounds: BackfillWindow | None = None,
+    sync_name: str | None = None,
+    windowed_backfill: bool = False,
 ) -> str:
     """Resolve a model reference to a runnable SQL query.
 
@@ -73,6 +80,12 @@ def resolve_model_ref(
             column contract. Avoids a second manifest read during execution.
         dbt_manifest_resolved: Whether the manifest was already resolved even
             if that model has no ``relation_name``.
+        window_bounds: Optional half-open ``(low, high)`` range for a windowed
+            backfill. When present, the resolver always applies both bounds
+            outside the resolved model subquery.
+        sync_name: Name used to make windowed-template errors actionable.
+        windowed_backfill: Validate the resolved model for backfill use even
+            before a numeric automatic ceiling supplies concrete bounds.
 
     Returns:
         A SQL query string ready to send to the source.
@@ -83,7 +96,9 @@ def resolve_model_ref(
         # 1. Check for a hand-written SQL file first
         sql_file = project_dir / "syncs" / "models" / f"{table_name}.sql"
         if sql_file.exists():
-            base_sql = sql_file.read_text().strip()
+            base_sql = sql_file.read_text()
+            if window_bounds is None and not windowed_backfill:
+                base_sql = base_sql.strip()
         # 2. Check dbt manifest.json
         elif dbt_manifest_resolved and dbt_relation_name is not None:
             base_sql = f"SELECT * FROM {dbt_relation_name}"
@@ -129,6 +144,13 @@ def resolve_model_ref(
     # {{ var('name') }} (#783) — in one pass, so SQL can use both.
     cursor_templated = has_cursor_template(base_sql)
     var_templated = has_var_template(base_sql)
+    if cursor_templated and (window_bounds is not None or windowed_backfill):
+        template = _cursor_template_display(base_sql)
+        subject = f" for sync {sync_name!r}" if sync_name is not None else ""
+        raise ValueError(
+            f"sync.backfill{subject} cannot use the legacy lower-only cursor template "
+            f"{template}. Remove the template and let drt apply both half-open window bounds."
+        )
     if cursor_templated or var_templated:
         if cursor_templated and last_cursor_value is None:
             raise ValueError(
@@ -145,11 +167,22 @@ def resolve_model_ref(
             from drt.config.parser import project_vars
 
             vars = project_vars(project_dir)
+        preserve_final_newline = (
+            window_bounds is not None or windowed_backfill
+        ) and base_sql.endswith(("\n", "\r"))
         base_sql = _render_template(base_sql, last_cursor_value, vars)
+        if preserve_final_newline and not base_sql.endswith(("\n", "\r")):
+            base_sql += "\n"
         if cursor_templated:
             # A cursor template means the user placed the predicate themselves;
             # never also inject a WHERE clause (pre-#783 behaviour).
             return base_sql
+
+    if window_bounds is not None:
+        if cursor_field is None:
+            raise ValueError("sync.backfill requires sync.cursor_field for bounded extraction.")
+        low, high = window_bounds
+        return wrap_windowed_query(base_sql, profile, cursor_field, low, high)
 
     # Inject incremental WHERE clause when cursor info is available
     if cursor_field and last_cursor_value:
@@ -165,11 +198,40 @@ def resolve_model_ref(
 # ---------------------------------------------------------------------------
 
 _CURSOR_TEMPLATE_PATTERN = re.compile(r"\{\{\s*(cursor_value|watermark)\s*\}\}")
+_JINJA_BLOCK_PATTERN = re.compile(r"\{\{(.*?)\}\}|\{%(.*?)%\}", re.DOTALL)
+_CURSOR_NAME_PATTERN = re.compile(r"\b(?:cursor_value|watermark)\b")
 
 
 def has_cursor_template(sql: str) -> bool:
-    """Check if SQL contains {{ cursor_value }} or {{ watermark }}."""
-    return bool(_CURSOR_TEMPLATE_PATTERN.search(sql))
+    """Detect legacy cursor variables from the Jinja syntax tree.
+
+    Filters and control-flow references count. Plain SQL mentions do not.
+    Invalid Jinja scans expression and statement block bodies for either
+    legacy cursor name so malformed templates fail closed.
+    """
+    try:
+        parsed = var_environment().parse(sql)
+    except TemplateSyntaxError:
+        return any(
+            _CURSOR_NAME_PATTERN.search(body) is not None
+            for match in _JINJA_BLOCK_PATTERN.finditer(sql)
+            if (body := (match.group(1) if match.group(1) is not None else match.group(2)))
+            is not None
+        )
+    return bool({"cursor_value", "watermark"} & meta.find_undeclared_variables(parsed))
+
+
+def _cursor_template_display(sql: str) -> str:
+    """Return the first legacy cursor template in canonical display form."""
+    match = _CURSOR_TEMPLATE_PATTERN.search(sql)
+    if match is not None:
+        return "{{ " + match.group(1) + " }}"
+    try:
+        names = meta.find_undeclared_variables(var_environment().parse(sql))
+    except TemplateSyntaxError:
+        names = set()
+    name = "cursor_value" if "cursor_value" in names else "watermark"
+    return "{{ " + name + " }}"
 
 
 def _render_template(sql: str, cursor_value: str | None, vars: dict[str, Any] | None = None) -> str:
@@ -229,3 +291,206 @@ def _validate_cursor_field(field: str) -> str:
             "Only letters, digits, underscores, and dots are allowed."
         )
     return field
+
+
+# ---------------------------------------------------------------------------
+# Windowed backfill SQL
+# ---------------------------------------------------------------------------
+
+# Every built-in SQL-shaped source whose ordinary incremental cursor is
+# injected by this resolver today. Delta Lake and Iceberg execute their model
+# SQL through DuckDB and therefore use its ANSI quoting family.
+SQL_SOURCE_PROFILE_TYPES = frozenset(
+    {
+        "bigquery",
+        "clickhouse",
+        "databricks",
+        "duckdb",
+        "mysql",
+        "postgres",
+        "redshift",
+        "snowflake",
+        "sqlite",
+        "sqlserver",
+        "deltalake",
+        "iceberg",
+    }
+)
+
+_BACKTICK_IDENTIFIER_TYPES = frozenset({"clickhouse", "databricks", "mysql"})
+_DOUBLE_QUOTE_IDENTIFIER_TYPES = frozenset(
+    {"duckdb", "postgres", "redshift", "snowflake", "sqlite", "deltalake", "iceberg"}
+)
+
+
+def is_sql_source_profile(profile: ProfileConfigLike) -> bool:
+    """Return whether a built-in profile executes resolved SQL model text."""
+    return profile.type in SQL_SOURCE_PROFILE_TYPES
+
+
+def quote_window_identifier(identifier: str, profile: ProfileConfigLike) -> str:
+    """Quote one top-level cursor identifier using the source dialect's rules."""
+    if "." in identifier:
+        raise ValueError(
+            "nested cursor paths are not supported for windowed backfill; "
+            "expose the field as a top-level column in the model."
+        )
+    if not identifier or any(ord(char) < 32 for char in identifier):
+        raise ValueError(
+            f"sync.cursor_field must be a non-empty SQL identifier; got {identifier!r}."
+        )
+
+    source_type = profile.type
+    if source_type in {"postgres", "redshift"}:
+        identifier = identifier.lower()
+    elif source_type == "snowflake":
+        identifier = identifier.upper()
+
+    if source_type == "bigquery":
+        # Match drt.sources.bigquery._quote_column: BigQuery has its own
+        # escape grammar, so reject embedded backticks instead of borrowing
+        # MySQL's doubling rule.
+        if "`" in identifier:
+            raise ValueError(f"Invalid BigQuery cursor column identifier: {identifier!r}")
+        return f"`{identifier}`"
+    if source_type in _BACKTICK_IDENTIFIER_TYPES:
+        return f"`{identifier.replace('`', '``')}`"
+    if source_type in _DOUBLE_QUOTE_IDENTIFIER_TYPES:
+        return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+    if source_type == "sqlserver":
+        return f"[{identifier.replace(']', ']]')}]"
+    raise ValueError(
+        f"Source profile type {source_type!r} is not a SQL-shaped source for sync.backfill; "
+        "configure an explicit sync.backfill.end and use a WindowedIncrementalSource."
+    )
+
+
+def _render_window_literal(
+    value: BackfillBound, profile: ProfileConfigLike, *, field_name: str
+) -> str:
+    canonical = canonicalize_bound(value, field_name=field_name)
+    if isinstance(canonical, int):
+        return str(canonical)
+    escaped = canonical.replace("'", "''")
+    source_type = profile.type
+    if source_type in {"postgres", "redshift", "duckdb", "deltalake", "iceberg"}:
+        return f"TIMESTAMPTZ '{escaped}+00'"
+    if source_type == "snowflake":
+        return f"TO_TIMESTAMP_TZ('{escaped}+00:00')"
+    if source_type == "bigquery":
+        return f"TIMESTAMP '{escaped}+00'"
+    if source_type == "databricks":
+        return f"TIMESTAMP '{escaped}+00:00'"
+    if source_type == "sqlserver":
+        return f"CAST('{escaped}' AS datetime2(7))"
+    if source_type == "clickhouse":
+        return f"toDateTime64('{escaped}', 6, 'UTC')"
+    if source_type in {"mysql", "sqlite"}:
+        # MySQLSource switches generated windowed queries to a UTC session;
+        # SQLite has no timezone-aware value type and compares canonical UTC
+        # text. In both cases a naive cursor column is assumed to contain UTC.
+        return f"'{escaped}'"
+    raise ValueError(f"Unsupported SQL source profile type for timestamp backfill: {source_type!r}")
+
+
+def _prepare_derived_model(resolved_model: str, profile: ProfileConfigLike) -> str:
+    """Validate and normalize one model before derived-table insertion."""
+    model = resolved_model.rstrip()
+    while re.search(r"--[^\r\n]*\Z", model):
+        model = re.sub(r"--[^\r\n]*\Z", "", model).rstrip()
+    if model.endswith(";"):
+        model = model[:-1].rstrip()
+    comment_free = re.sub(r"--[^\r\n]*(?:\r?\n|\Z)|/\*.*?\*/", "", model, flags=re.S)
+    if not comment_free.strip():
+        raise ValueError("sync.backfill model must not be empty or contain only comments.")
+    leading = re.sub(r"\A(?:\s+|--[^\r\n]*(?:\r?\n|\Z)|/\*.*?\*/)*", "", model, flags=re.S)
+    if profile.type == "sqlserver" and re.match(r";?\s*WITH\b", leading, flags=re.I):
+        raise ValueError(
+            "A model starting with WITH is not supported for windowed backfill on SQL Server: "
+            "move the CTE into a view or subquery."
+        )
+    return model
+
+
+def _window_cursor_expression(quoted_field: str, profile: ProfileConfigLike) -> str:
+    """Normalize DuckDB timestamp families to an epoch with naive values as UTC."""
+    if profile.type in {"duckdb", "deltalake", "iceberg"}:
+        return f"epoch({quoted_field})"
+    return quoted_field
+
+
+def _window_bound_expression(literal: str, profile: ProfileConfigLike) -> str:
+    if profile.type in {"duckdb", "deltalake", "iceberg"}:
+        return f"epoch({literal})"
+    return literal
+
+
+def wrap_windowed_query(
+    resolved_model: str,
+    profile: ProfileConfigLike,
+    cursor_field: str,
+    low: BackfillBound,
+    high: BackfillBound,
+) -> str:
+    """Wrap a resolved SQL model with an exact half-open cursor predicate."""
+    quoted_field = quote_window_identifier(cursor_field, profile)
+    low_sql = _render_window_literal(low, profile, field_name="sync.backfill window low")
+    high_sql = _render_window_literal(high, profile, field_name="sync.backfill window high")
+    if (
+        isinstance(low, bool)
+        or isinstance(high, bool)
+        or isinstance(low, int) != isinstance(high, int)
+    ):
+        raise ValueError("sync.backfill window bounds must use the same timestamp or integer type.")
+    model = _prepare_derived_model(resolved_model, profile)
+    cursor_sql = quoted_field
+    if isinstance(low, str):
+        cursor_sql = _window_cursor_expression(quoted_field, profile)
+        low_sql = _window_bound_expression(low_sql, profile)
+        high_sql = _window_bound_expression(high_sql, profile)
+    return (
+        f"SELECT {WINDOWED_BACKFILL_QUERY_MARKER} * FROM (\n"
+        f"{model}\n"
+        ") AS _drt_base\n"
+        f"WHERE {cursor_sql} >= {low_sql} AND {cursor_sql} < {high_sql}"
+    )
+
+
+def build_numeric_ceiling_query(
+    resolved_model: str,
+    profile: ProfileConfigLike,
+    cursor_field: str,
+) -> str:
+    """Build the one-row ``MAX(cursor_field)`` snapshot query for numeric backfills."""
+    quoted_field = quote_window_identifier(cursor_field, profile)
+    quoted_alias = quote_window_identifier("_drt_cursor_max", profile)
+    model = _prepare_derived_model(resolved_model, profile)
+    return f"SELECT MAX({quoted_field}) AS {quoted_alias} FROM (\n{model}\n) AS _drt_base"
+
+
+def resolve_windowed_model_ref(
+    model_str: str,
+    project_dir: Path,
+    profile: ProfileConfigLike,
+    cursor_field: str,
+    low: BackfillBound,
+    high: BackfillBound,
+    *,
+    sync_name: str | None = None,
+    vars: dict[str, Any] | None = None,
+    dbt_relation_name: str | None = None,
+    dbt_manifest_resolved: bool = False,
+) -> str:
+    """Resolve a model and apply one mandatory half-open backfill window."""
+    return resolve_model_ref(
+        model_str,
+        project_dir,
+        profile,
+        cursor_field=cursor_field,
+        vars=vars,
+        dbt_relation_name=dbt_relation_name,
+        dbt_manifest_resolved=dbt_manifest_resolved,
+        window_bounds=(low, high),
+        sync_name=sync_name,
+        windowed_backfill=True,
+    )

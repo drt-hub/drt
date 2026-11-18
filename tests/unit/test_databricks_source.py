@@ -129,6 +129,23 @@ def test_extract_passes_query_tags_to_connect(monkeypatch: pytest.MonkeyPatch) -
     mock_connect.assert_called_once_with(_profile(), query_tags={"sync": "s"})
 
 
+def test_windowed_extract_sets_utc_session_timezone() -> None:
+    cur = MagicMock()
+    cur.description = [("id",)]
+    cur.__iter__.side_effect = lambda: iter(())
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    query = "SELECT /* drt:windowed-backfill */ 1 AS id"
+
+    with patch.object(DatabricksSource, "_connect", return_value=conn):
+        list(DatabricksSource().extract(query, _profile()))
+
+    assert [call.args[0] for call in cur.execute.call_args_list] == [
+        "SET TIME ZONE 'UTC'",
+        query,
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Transient-failure retry (#766)
 # ---------------------------------------------------------------------------

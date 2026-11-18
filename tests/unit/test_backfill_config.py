@@ -71,6 +71,20 @@ def test_numeric_backfill_accepts_exact_integers_and_optional_end() -> None:
     assert BackfillConfig(window=10, start=-20, end=5).end == 5
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"window": 10, "start": -(2**63) - 1},
+        {"window": 10, "start": 0, "end": 2**63},
+    ],
+)
+def test_numeric_backfill_rejects_bounds_outside_signed_64_bit(
+    values: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="signed 64-bit integer range"):
+        BackfillConfig.model_validate(values)
+
+
 def test_backfill_config_forbids_extra_fields() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
         BackfillConfig.model_validate(
@@ -185,6 +199,23 @@ def test_generated_schema_accepts_consistent_backfill_arithmetic(
     assert list(Draft7Validator(schema).iter_errors(config)) == []
 
 
+@pytest.mark.parametrize("bound", [-(2**63) - 1, 2**63])
+def test_generated_schema_rejects_integer_bounds_outside_signed_64_bit(bound: int) -> None:
+    schema = generate_sync_schema()
+    config = {
+        "name": "users",
+        "model": "select * from users",
+        "destination": {"type": "rest_api", "url": "https://example.com"},
+        "sync": {
+            "mode": "incremental",
+            "cursor_field": "id",
+            "backfill": {"window": 100, "start": bound},
+        },
+    }
+
+    assert list(Draft7Validator(schema).iter_errors(config))
+
+
 def test_generated_schema_documents_backfill_shapes_and_runtime_eligibility() -> None:
     backfill_schema = generate_sync_schema()["$defs"]["BackfillConfig"]
 
@@ -241,6 +272,11 @@ def test_backfill_rejects_non_iso_timestamps(field: str) -> None:
         BackfillConfig.model_validate(values)
 
 
+def test_backfill_rejects_sub_microsecond_timestamp_bound() -> None:
+    with pytest.raises(ValidationError, match="sub-microsecond bounds are not supported"):
+        BackfillConfig.model_validate({"window": "1d", "start": "2025-01-01T00:00:00.1234567Z"})
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -287,6 +323,11 @@ def test_backfill_rejects_diff_strategy() -> None:
 def test_backfill_rejects_watermark_default_value() -> None:
     with pytest.raises(ValidationError, match="sync.backfill.*watermark.default_value"):
         _options(watermark={"default_value": "2024-01-01T00:00:00Z"})
+
+
+def test_backfill_rejects_nested_cursor_path() -> None:
+    with pytest.raises(ValidationError, match="nested cursor paths are not supported"):
+        _options(cursor_field="payload.updated_at")
 
 
 def _sync() -> SyncConfig:

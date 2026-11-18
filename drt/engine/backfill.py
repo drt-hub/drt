@@ -1,4 +1,4 @@
-"""Pure range arithmetic for windowed incremental backfills (ADR 0021).
+"""Pure planning and row validation for windowed backfills (ADR 0021).
 
 This module deliberately performs no I/O and imports no engine orchestration
 code. It is usable by config validation now and by the sequential engine loop
@@ -7,16 +7,24 @@ in a later ADR slice.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import re
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeAlias, overload
+from typing import Any, TypeAlias, cast, overload
 
 from drt.config.duration import parse_duration
+from drt.destinations.row_errors import RowError, record_preview
 
 BackfillBound: TypeAlias = str | int
 BackfillWindow: TypeAlias = tuple[BackfillBound, BackfillBound]
 
 MAX_BACKFILL_WINDOWS = 1_000_000
+MIN_INT64 = -(2**63)
+MAX_INT64 = 2**63 - 1
+
+
+class WindowCursorRangeError(ValueError):
+    """A source returned a non-null cursor outside its requested window."""
 
 
 def stringify_cursor_value(value: Any) -> str:
@@ -34,6 +42,12 @@ def _parse_timestamp(value: BackfillBound, *, field_name: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be an ISO-8601 timestamp.")
     text = value.strip()
+    fractional = re.search(r"[.,](\d+)", text)
+    if fractional is not None and len(fractional.group(1)) > 6:
+        raise ValueError(
+            f"{field_name} uses sub-microsecond precision; "
+            "sub-microsecond bounds are not supported."
+        )
     iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
     try:
         parsed = datetime.fromisoformat(iso)
@@ -47,6 +61,8 @@ def _parse_timestamp(value: BackfillBound, *, field_name: str) -> datetime:
 def _parse_integer(value: BackfillBound, *, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{field_name} must be an integer.")
+    if not MIN_INT64 <= value <= MAX_INT64:
+        raise ValueError(f"{field_name} must be within the signed 64-bit integer range.")
     return value
 
 
@@ -65,7 +81,7 @@ def canonicalize_bound(
     if isinstance(value, bool):
         raise ValueError(f"{field_name} must be an integer or ISO-8601 timestamp, not boolean.")
     if isinstance(value, int):
-        return value
+        return _parse_integer(value, field_name=field_name)
     return stringify_cursor_value(_parse_timestamp(value, field_name=field_name))
 
 
@@ -191,3 +207,88 @@ def plan_windows(
         high_dt = ceiling_dt if remaining <= step else low_dt + step
         yield (stringify_cursor_value(low_dt), stringify_cursor_value(high_dt))
         low_dt = high_dt
+
+
+def _canonicalize_row_cursor(value: Any, low: BackfillBound) -> BackfillBound:
+    """Canonicalize a source row cursor using the window's arithmetic family."""
+    if isinstance(low, int) and not isinstance(low, bool):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise WindowCursorRangeError(
+                "sync.backfill source returned a non-integral cursor value "
+                f"{value!r} for an integer window."
+            )
+        return cast(int, canonicalize_bound(value, field_name="source row cursor"))
+    if isinstance(value, datetime):
+        value = stringify_cursor_value(value)
+    if not isinstance(value, str):
+        raise WindowCursorRangeError(
+            "sync.backfill source returned a non-timestamp cursor value "
+            f"{value!r} for a timestamp window."
+        )
+    try:
+        return canonicalize_bound(value, field_name="source row cursor")
+    except ValueError as exc:
+        raise WindowCursorRangeError(str(exc)) from exc
+
+
+def validate_window_row(
+    record: dict[str, Any],
+    cursor_field: str,
+    low: BackfillBound,
+    high: BackfillBound,
+    *,
+    batch_index: int = 0,
+) -> RowError | None:
+    """Validate one extracted row before it reaches a destination load.
+
+    A missing or null cursor is a pinpointed row error that the slice-3 loop
+    can apply normal ``on_error``/DLQ handling to. Any non-null cursor outside
+    ``[low, high)`` indicates a broken source predicate/capability and raises:
+    continuing could certify a range the source did not actually honor.
+    """
+    canonical_low = canonicalize_bound(low, field_name="sync.backfill window low")
+    canonical_high = canonicalize_bound(high, field_name="sync.backfill window high")
+    if isinstance(canonical_low, int) != isinstance(canonical_high, int):
+        raise ValueError("sync.backfill window bounds must use the same timestamp or integer type.")
+    if isinstance(canonical_low, int):
+        assert isinstance(canonical_high, int)
+        if canonical_low >= canonical_high:
+            raise ValueError("sync.backfill window low must be less than high.")
+    else:
+        assert isinstance(canonical_high, str)
+        if canonical_low >= canonical_high:
+            raise ValueError("sync.backfill window low must be less than high.")
+
+    value: Any = record
+    for segment in cursor_field.split("."):
+        if not isinstance(value, Mapping) or segment not in value:
+            value = None
+            break
+        value = value[segment]
+    if value is None:
+        return RowError(
+            batch_index=batch_index,
+            record_preview=record_preview(record),
+            http_status=None,
+            error_message=(
+                f"sync.backfill row has null or missing cursor_field {cursor_field!r}; "
+                "the row cannot be assigned to a window."
+            ),
+        )
+
+    canonical_value = _canonicalize_row_cursor(value, canonical_low)
+    if isinstance(canonical_low, int):
+        assert isinstance(canonical_high, int)
+        assert isinstance(canonical_value, int)
+        in_range = canonical_low <= canonical_value < canonical_high
+    else:
+        assert isinstance(canonical_high, str)
+        assert isinstance(canonical_value, str)
+        in_range = canonical_low <= canonical_value < canonical_high
+    if not in_range:
+        raise WindowCursorRangeError(
+            "sync.backfill source returned cursor "
+            f"{canonical_value!r} outside requested half-open window "
+            f"[{canonical_low!r}, {canonical_high!r}); refusing to load the row."
+        )
+    return None

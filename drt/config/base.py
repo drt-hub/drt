@@ -11,7 +11,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    GetJsonSchemaHandler,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import JsonSchemaValue
 
 LITERAL_CREDENTIAL_KEY = "literal"
@@ -144,6 +151,17 @@ class OffsetPaginationConfig(BaseModel):
     limit_param: str = "limit"
     max_pages: int = 100
 
+    @field_validator("offset_param", "limit_param")
+    @classmethod
+    def _valid_param_name(cls, value: str) -> str:
+        return _validate_rest_param_name(value)
+
+    @model_validator(mode="after")
+    def _distinct_param_names(self) -> OffsetPaginationConfig:
+        if self.offset_param == self.limit_param:
+            raise ValueError("pagination.offset_param must differ from pagination.limit_param.")
+        return self
+
 
 class CursorPaginationConfig(BaseModel):
     type: Literal["cursor"]
@@ -152,6 +170,17 @@ class CursorPaginationConfig(BaseModel):
     limit_param: str = "limit"
     cursor_field: str
     max_pages: int = 100
+
+    @field_validator("cursor_param", "limit_param")
+    @classmethod
+    def _valid_param_name(cls, value: str) -> str:
+        return _validate_rest_param_name(value)
+
+    @model_validator(mode="after")
+    def _distinct_param_names(self) -> CursorPaginationConfig:
+        if self.cursor_param == self.limit_param:
+            raise ValueError("pagination.cursor_param must differ from pagination.limit_param.")
+        return self
 
 
 class LinkHeaderPaginationConfig(BaseModel):
@@ -169,13 +198,62 @@ class RestIncrementalConfig(BaseModel):
     """Incremental extraction for the REST API source (#767).
 
     ``start_param`` names the request query parameter that receives the last
-    watermark value (e.g. ``updated_since``). Cursor *tracking* stays
-    engine-side: ``sync.cursor_field`` names the record field whose max value
-    is persisted after each run — this config only tells the source where to
-    put that value on the request.
+    watermark value (e.g. ``updated_since``). Optional ``end_param`` receives
+    the exclusive upper bound for ``sync.backfill`` window extraction. Cursor
+    *tracking* stays engine-side: ``sync.cursor_field`` names the record field
+    whose progress is persisted — this config only tells the source where to
+    put range values on the request.
     """
 
     start_param: str
+    end_param: str | None = None
+
+    @field_validator("start_param", "end_param")
+    @classmethod
+    def _valid_param_name(cls, value: str | None) -> str | None:
+        return _validate_rest_param_name(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def _distinct_window_params(self) -> RestIncrementalConfig:
+        if self.end_param is not None and self.end_param == self.start_param:
+            raise ValueError("incremental.end_param must differ from incremental.start_param.")
+        return self
+
+
+def _validate_rest_param_name(value: str) -> str:
+    if not value or not value.strip() or value != value.strip():
+        raise ValueError(
+            "REST request parameter names must be non-empty and contain no surrounding whitespace."
+        )
+    return value
+
+
+def validate_rest_window_params(
+    incremental: RestIncrementalConfig,
+    pagination: OffsetPaginationConfig | CursorPaginationConfig | LinkHeaderPaginationConfig | None,
+) -> None:
+    """Reject window and pagination query-parameter collisions."""
+    if incremental.end_param is not None and isinstance(pagination, LinkHeaderPaginationConfig):
+        raise ValueError(
+            "sync.backfill does not support REST link_header pagination because followed "
+            "links may omit the required start_param/end_param bounds; use offset or cursor "
+            "pagination."
+        )
+    pagination_names: set[str] = set()
+    if isinstance(pagination, OffsetPaginationConfig):
+        pagination_names = {pagination.offset_param, pagination.limit_param}
+    elif isinstance(pagination, CursorPaginationConfig):
+        pagination_names = {pagination.cursor_param, pagination.limit_param}
+    window_names = {incremental.start_param}
+    if incremental.end_param is not None:
+        window_names.add(incremental.end_param)
+    collisions = sorted(window_names & pagination_names)
+    if collisions:
+        joined = ", ".join(repr(name) for name in collisions)
+        raise ValueError(
+            "REST incremental start_param/end_param must not collide with pagination "
+            f"parameter names; collision: {joined}."
+        )
 
 
 class SourceConfig(BaseModel):
