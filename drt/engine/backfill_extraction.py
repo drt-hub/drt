@@ -7,8 +7,6 @@ loop while the slice-1 execution gate keeps ``run_sync`` fail-closed.
 
 from __future__ import annotations
 
-from typing import cast
-
 from drt.config.profiles import ProfileConfigLike
 from drt.engine.backfill import MAX_INT64
 from drt.engine.resolver import build_numeric_ceiling_query, is_sql_source_profile
@@ -66,4 +64,4 @@ def snapshot_numeric_ceiling(
         raise ValueError(
             "Numeric sync.backfill cursor is at the 64-bit limit; set an explicit backfill.end."
         )
-    return cast(int, value) + 1
+    return int(value) + 1

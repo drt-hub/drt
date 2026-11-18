@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeAlias, cast, overload
+from typing import Any, TypeAlias, overload
 
 from drt.config.duration import parse_duration
 from drt.destinations.row_errors import RowError, record_preview
@@ -217,7 +217,7 @@ def _canonicalize_row_cursor(value: Any, low: BackfillBound) -> BackfillBound:
                 "sync.backfill source returned a non-integral cursor value "
                 f"{value!r} for an integer window."
             )
-        return cast(int, canonicalize_bound(value, field_name="source row cursor"))
+        return canonicalize_bound(int(value), field_name="source row cursor")
     if isinstance(value, datetime):
         value = stringify_cursor_value(value)
     if not isinstance(value, str):
