@@ -27,6 +27,7 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from dataclasses import asdict, is_dataclass, replace
 from inspect import signature
@@ -87,7 +88,8 @@ def resolve_profile_paths(
 ) -> ProfileConfigLike:
     """Resolve relative SQLite/DuckDB database paths against *project_dir*.
 
-    Preserves ``:memory:``, ``file:`` URIs, and explicit absolute paths.
+    Preserves ``:memory:``, ``file:`` URIs, DuckDB connection schemes,
+    and explicit absolute paths. URI paths are not checked for containment.
     Rejects relative paths (including ``..`` and symlinks) that escape
     *project_dir*.
     """
@@ -95,7 +97,16 @@ def resolve_profile_paths(
         return profile
     if isinstance(profile, (SQLiteProfile, DuckDBProfile)):
         db = profile.database
-        if not db or db == ":memory:" or db.startswith("file:") or Path(db).is_absolute():
+        if (
+            not db
+            or db == ":memory:"
+            or db.startswith("file:")
+            or Path(db).is_absolute()
+            or (
+                isinstance(profile, DuckDBProfile)
+                and re.match(r"^[A-Za-z][A-Za-z0-9+.-]+:|^[A-Za-z]://", db)
+            )
+        ):
             return profile
         base = project_dir.resolve()
         resolved = (base / db).resolve()

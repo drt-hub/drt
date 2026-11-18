@@ -248,8 +248,10 @@ and `approved_by` is recorded exactly as the caller supplied it. So:
   can also run other commands.
 - Relative local database paths (SQLite/DuckDB profiles) resolve against the
   project directory passed to the server (and relative paths that escape it are
-  rejected). Run `drt mcp run` from the project directory if you rely on a
-  project-local `.drt/secrets.toml`.
+  rejected). SQLite `file:` URIs are passed through unchanged and are **not**
+  covered by this containment guarantee; relative URI paths may depend on the
+  execution environment. Run `drt mcp run` from the project directory if you
+  rely on a project-local `.drt/secrets.toml`.
 
 **Recommended client setup.** Allow `drt_plan` without asking, and require an
 approval prompt for `drt_apply` (in Claude Code, leave `mcp__drt__drt_apply` out
