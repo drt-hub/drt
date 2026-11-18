@@ -290,6 +290,10 @@ sync:                       # optional: all fields have defaults
   diff:                     # only with incremental_strategy: diff; omitted means hash_columns: all
     hash_columns: all       # "all" or a non-empty list; key columns are excluded from all
   cursor_field: updated_at  # required when mode=incremental — column name for watermark
+  backfill:                 # optional ADR 0021 fixed half-open windows; cursor strategy only
+    window: 1d              # positive duration for timestamp cursors, positive int for numeric
+    start: "2025-01-01T00:00:00Z" # required first-run lower bound
+    end: "2025-04-01T00:00:00Z"   # optional fixed exclusive ceiling
   watermark:                # optional: remote watermark storage for stateless environments
     storage: local          # "local" (default) | "gcs" | "bigquery"
     bucket: my-bucket       # GCS only
@@ -399,6 +403,18 @@ tests:                      # optional: post-sync validation (DB destinations on
     query: "SELECT * FROM {{ table }} WHERE total < 0"  # arbitrary SQL: returns FAILING rows, 0 = pass
     severity: warn                    # optional on every type: "warn" | "error" (default)
 ```
+
+`sync.backfill` executes sequential `[low, high)` cursor windows and resumes
+from the exclusive boundary checkpoint written after each fully consumed,
+finalized, DLQ-flushed, destination-acknowledged window. Empty windows advance.
+Missing/null/out-of-range source cursors always fail the window; `on_error:
+skip` applies only to destination row failures. Slice 3 execution is limited to
+`drt run` and MCP `drt_run_sync`. Dry-run/diff, `--limit`, `--cursor-value`,
+`--full-refresh`, build, serve, library default, Airflow/Prefect/Dagster,
+test, plan/apply, exact replay, and retry are refused. Same-sync concurrent runs
+and downgrading drt against backfill-written state are unsupported. Use `drt
+state reset`, never hand-edit state; `--runs` retains the cursor/boundary pair
+and `--watermark` clears both. See `docs/guides/windowed-backfill.md`.
 
 ### Write policy (`sync.write_policy`, #1238)
 

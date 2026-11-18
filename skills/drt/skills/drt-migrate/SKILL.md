@@ -114,3 +114,7 @@ Then summarize:
 - `docs/llm/API_REFERENCE.md` — all destination types and fields
 - `docs/connectors/` — per-destination details (auth, supported modes)
 - `examples/postgres_to_postgres_mirror/` — runnable example for the `mirror` mode shape
+
+## Windowed backfill rollout
+
+`sync.backfill: {window, start, end?}` executes only through `drt run` and MCP `drt_run_sync` in ADR 0021 slice 3. Dry-run/diff, `--limit`, `--cursor-value`, `--full-refresh`, build, serve, library calls, Airflow/Prefect/Dagster, test, plan/apply, exact replay, and retry are unsupported and must be reported as refusals, not workarounds. Use `drt state reset`, never hand-edit checkpoint files; same-sync concurrent runs and downgrading against backfill-written state are unsupported.

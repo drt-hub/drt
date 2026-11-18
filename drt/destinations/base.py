@@ -97,6 +97,13 @@ class SyncResult:
     # that would execute. Additive and empty by default so existing result
     # serialization remains unchanged unless managed tables are involved.
     ddl: list[str] = field(default_factory=list)
+    # ADR 0021 windowed-backfill bookkeeping.  Both are absent/empty for
+    # ordinary runs so existing result serialization remains unchanged.
+    backfill: dict[str, Any] | None = None
+    windows: list[dict[str, Any]] = field(default_factory=list)
+    # Internal signal used by the sequential window driver.  It distinguishes
+    # a fully consumed stream from an on_error=fail/contract/interruption break.
+    _stream_consumed: bool = field(default=True, init=False, repr=False, compare=False)
 
     @property
     def total(self) -> int:
@@ -135,6 +142,22 @@ class Destination(Protocol):
                 than silently continuing past a failure the operator asked
                 to be fatal.
         """
+        ...
+
+
+@runtime_checkable
+class PendingFlushCapable(Protocol):
+    """Optional acknowledgement hook for destinations with asynchronous sends.
+
+    For windowed backfill, ``SyncResult.success`` means durably accepted by the
+    target before ``load()``/``finalize()`` returns. A destination that buffers
+    or asynchronously acknowledges writes implements this additive capability;
+    the engine calls it before every window checkpoint. This stays separate
+    from the frozen :class:`Destination` Protocol per ADR 0007.
+    """
+
+    def flush_pending(self) -> None:
+        """Wait for pending target acknowledgements, raising on any failure."""
         ...
 
 

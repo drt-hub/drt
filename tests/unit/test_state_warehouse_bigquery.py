@@ -224,6 +224,7 @@ class TestHelpersAndBootstrap:
             "status",
             "error",
             "last_cursor_value",
+            "cursor_boundary",
         ]
         client.query.assert_not_called()
 
@@ -264,6 +265,35 @@ class TestHelpersAndBootstrap:
 
 
 class TestBigQueryWarehouseStateStore:
+    def test_transient_marker_read_error_does_not_fall_back(self) -> None:
+        class TransientError(Exception):
+            code = 503
+            errors = [{"reason": "backendError"}]
+
+        client = MagicMock()
+        with (
+            patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch(
+                "drt.state.warehouse_bigquery._query",
+                side_effect=TransientError("temporary backend outage"),
+            ) as query,
+            pytest.raises(TransientError, match="temporary backend outage"),
+        ):
+            BigQueryWarehouseStateStore(_profile()).get_last_sync("s")
+        assert query.call_count == 1
+
+    def test_undefined_marker_error_is_the_only_legacy_fallback(self) -> None:
+        from drt.state.warehouse_bigquery import _is_undefined_cursor_boundary
+
+        class MissingColumn(Exception):
+            code = 400
+            errors = [{"reason": "invalidQuery"}]
+
+        assert _is_undefined_cursor_boundary(
+            MissingColumn("Unrecognized name: cursor_boundary at [1:2]")
+        )
+
     def test_empty_reads_and_reset_before_table_exists(self) -> None:
         store = BigQueryWarehouseStateStore(_profile())
         with patch("drt.state.warehouse_bigquery._table_exists", return_value=False):

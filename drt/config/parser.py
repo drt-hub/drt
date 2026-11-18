@@ -13,7 +13,6 @@ import yaml
 from pydantic import ValidationError
 
 from drt.config.models import ColumnConfig, ProjectConfig, SyncConfig
-from drt.config.sync_options import ensure_backfill_executable
 from drt.config.vars import expand_vars, has_var_template, render_vars, resolve_vars
 
 if TYPE_CHECKING:
@@ -299,7 +298,6 @@ def load_syncs(
         data = expand_env_vars(data)
         data = expand_sync_vars(data, resolved)
         sync = SyncConfig.model_validate(data)
-        ensure_backfill_executable(sync.sync)
         sync, _warning = _resolve_dbt_contract(sync, project_dir, manifest_path, manifest_cache)
         syncs.append(sync)
 
@@ -337,7 +335,6 @@ def load_syncs_safe(
             # Check for deprecated keys before validation
             deprecations = _check_deprecated_keys(data)
             sync = SyncConfig.model_validate(data)
-            ensure_backfill_executable(sync.sync)
             sync, dbt_warning = _resolve_dbt_contract(
                 sync, project_dir, manifest_path, manifest_cache
             )

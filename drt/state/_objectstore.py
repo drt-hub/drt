@@ -361,18 +361,30 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
         *,
         max_records: int = 10_000,
     ) -> int:
+        try:
+            return self._append_strict(sync_name, entries, max_records=max_records)
+        except Exception as exc:  # noqa: BLE001 — legacy best-effort DLQ contract
+            logger.warning("DLQ append failed for sync=%s: %s", sync_name, exc)
+            return self.depth(sync_name)
+
+    def _append_strict(
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+    ) -> int:
+        """Append or raise; used before an ADR 0021 window checkpoint."""
         key = self._dlq_key(sync_name)
         with self._lock:
             if not entries:
                 body, _ = self._client.read_for_update(key)
                 return len(self._decode(body))
             last_depth = 0
-            existing_depth = 0
             for attempt in range(1, self.MAX_WRITE_ATTEMPTS + 1):
                 try:
                     body, token = self._client.read_for_update(key)
                     combined = self._decode(body)
-                    existing_depth = len(combined)
                     combined.extend(entries)
                     if max_records > 0 and len(combined) > max_records:
                         combined = combined[-max_records:]
@@ -381,16 +393,11 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
                     return last_depth
                 except ObjectPreconditionError:
                     if attempt == self.MAX_WRITE_ATTEMPTS:
-                        logger.warning(
-                            "DLQ append failed for sync=%s after %s contention attempts",
-                            sync_name,
-                            self.MAX_WRITE_ATTEMPTS,
+                        raise ObjectPreconditionError(
+                            f"DLQ append for '{sync_name}' exhausted "
+                            f"{self.MAX_WRITE_ATTEMPTS} contention attempts"
                         )
-                        return existing_depth
                     self._backoff(attempt)
-                except Exception as exc:  # noqa: BLE001 — best-effort DLQ contract
-                    logger.warning("DLQ append failed for sync=%s: %s", sync_name, exc)
-                    return existing_depth
         return last_depth  # pragma: no cover
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:

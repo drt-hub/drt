@@ -202,7 +202,8 @@ class PostgresWarehouseStateStore:
             "records_synced BIGINT NOT NULL, "
             "status TEXT NOT NULL, "
             "error TEXT, "
-            "last_cursor_value TEXT",
+            "last_cursor_value TEXT, "
+            "cursor_boundary TEXT",
         )
 
     def get_last_sync(self, sync_name: str) -> SyncState | None:
@@ -210,10 +211,20 @@ class PostgresWarehouseStateStore:
         try:
             cur = conn.cursor()
             try:
-                cur.execute(
-                    _pgsql_select_runs().format(_qualified(self._profile, _RUNS_TABLE)),
-                    (sync_name,),
-                )
+                try:
+                    cur.execute(
+                        _pgsql_select_runs().format(_qualified(self._profile, _RUNS_TABLE)),
+                        (sync_name,),
+                    )
+                except Exception as exc:
+                    if getattr(exc, "pgcode", None) != "42703":
+                        raise
+                    conn.rollback()
+                    cur = conn.cursor()
+                    cur.execute(
+                        _pgsql_select_runs_legacy().format(_qualified(self._profile, _RUNS_TABLE)),
+                        (sync_name,),
+                    )
             except Exception as exc:
                 if _is_undefined_table(exc):
                     return None
@@ -230,7 +241,20 @@ class PostgresWarehouseStateStore:
         try:
             cur = conn.cursor()
             try:
-                cur.execute(_pgsql_select_all_runs().format(_qualified(self._profile, _RUNS_TABLE)))
+                try:
+                    cur.execute(
+                        _pgsql_select_all_runs().format(_qualified(self._profile, _RUNS_TABLE))
+                    )
+                except Exception as exc:
+                    if getattr(exc, "pgcode", None) != "42703":
+                        raise
+                    conn.rollback()
+                    cur = conn.cursor()
+                    cur.execute(
+                        _pgsql_select_all_runs_legacy().format(
+                            _qualified(self._profile, _RUNS_TABLE)
+                        )
+                    )
             except Exception as exc:
                 if _is_undefined_table(exc):
                     return {}
@@ -246,25 +270,52 @@ class PostgresWarehouseStateStore:
         try:
             self._ensure_table(conn)
             cur = conn.cursor()
-            cur.execute(
-                _pgsql.SQL(
-                    "INSERT INTO {} (sync_name, last_run_at, records_synced, status, "
-                    "error, last_cursor_value) VALUES (%s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT (sync_name) DO UPDATE SET "
-                    "last_run_at = EXCLUDED.last_run_at, "
-                    "records_synced = EXCLUDED.records_synced, "
-                    "status = EXCLUDED.status, "
-                    "error = EXCLUDED.error, "
-                    "last_cursor_value = EXCLUDED.last_cursor_value"
-                ).format(_qualified(self._profile, _RUNS_TABLE)),
-                (
+            parameters: tuple[Any, ...]
+            if state.cursor_boundary is not None:
+                cur.execute(
+                    _pgsql.SQL(
+                        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS cursor_boundary TEXT"
+                    ).format(_qualified(self._profile, _RUNS_TABLE))
+                )
+                columns = "error, last_cursor_value, cursor_boundary"
+                values = "%s, %s, %s, %s, %s, %s, %s"
+                update = (
+                    "last_cursor_value = EXCLUDED.last_cursor_value, "
+                    "cursor_boundary = EXCLUDED.cursor_boundary"
+                )
+                parameters = (
                     state.sync_name,
                     state.last_run_at,
                     state.records_synced,
                     state.status,
                     state.error,
                     state.last_cursor_value,
-                ),
+                    state.cursor_boundary,
+                )
+            else:
+                columns = "error, last_cursor_value"
+                values = "%s, %s, %s, %s, %s, %s"
+                update = "last_cursor_value = EXCLUDED.last_cursor_value"
+                parameters = (
+                    state.sync_name,
+                    state.last_run_at,
+                    state.records_synced,
+                    state.status,
+                    state.error,
+                    state.last_cursor_value,
+                )
+            cur.execute(
+                _pgsql.SQL(
+                    "INSERT INTO {} (sync_name, last_run_at, records_synced, status, "
+                    f"{columns}) VALUES ({values}) "
+                    "ON CONFLICT (sync_name) DO UPDATE SET "
+                    "last_run_at = EXCLUDED.last_run_at, "
+                    "records_synced = EXCLUDED.records_synced, "
+                    "status = EXCLUDED.status, "
+                    "error = EXCLUDED.error, "
+                    f"{update}"
+                ).format(_qualified(self._profile, _RUNS_TABLE)),
+                parameters,
             )
             conn.commit()
         finally:
@@ -301,7 +352,7 @@ def _pgsql_select_runs() -> Any:
     from psycopg2 import sql as _pgsql
 
     return _pgsql.SQL(
-        "SELECT last_run_at, records_synced, status, error, last_cursor_value "
+        "SELECT last_run_at, records_synced, status, error, last_cursor_value, cursor_boundary "
         "FROM {} WHERE sync_name = %s"
     )
 
@@ -310,12 +361,30 @@ def _pgsql_select_all_runs() -> Any:
     from psycopg2 import sql as _pgsql
 
     return _pgsql.SQL(
+        "SELECT sync_name, last_run_at, records_synced, status, error, last_cursor_value, "
+        "cursor_boundary FROM {}"
+    )
+
+
+def _pgsql_select_runs_legacy() -> Any:
+    from psycopg2 import sql as _pgsql
+
+    return _pgsql.SQL(
+        "SELECT last_run_at, records_synced, status, error, last_cursor_value "
+        "FROM {} WHERE sync_name = %s"
+    )
+
+
+def _pgsql_select_all_runs_legacy() -> Any:
+    from psycopg2 import sql as _pgsql
+
+    return _pgsql.SQL(
         "SELECT sync_name, last_run_at, records_synced, status, error, last_cursor_value FROM {}"
     )
 
 
 def _row_to_sync_state(sync_name: str, row: tuple[Any, ...]) -> SyncState:
-    last_run_at, records_synced, status, error, last_cursor_value = row
+    last_run_at, records_synced, status, error, last_cursor_value, *optional = row
     return SyncState(
         sync_name=sync_name,
         last_run_at=last_run_at,
@@ -323,6 +392,7 @@ def _row_to_sync_state(sync_name: str, row: tuple[Any, ...]) -> SyncState:
         status=status,
         error=error,
         last_cursor_value=last_cursor_value,
+        cursor_boundary=optional[0] if optional else None,
     )
 
 

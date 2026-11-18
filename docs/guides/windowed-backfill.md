@@ -1,0 +1,120 @@
+# Windowed backfills
+
+Windowed backfills split a large incremental history into fixed cursor ranges and
+save progress after every completed range. If a run fails, the next run starts at
+the last completed window instead of replaying the whole history.
+
+## Configure a timestamp backfill
+
+```yaml
+sync:
+  mode: incremental
+  cursor_field: updated_at
+  backfill:
+    window: 1d
+    start: "2025-01-01T00:00:00Z"
+    # end: "2025-04-01T00:00:00Z"  # optional, exclusive fixed ceiling
+```
+
+Timestamp windows are elapsed UTC durations. At the start of each run, drt
+captures UTC now once and uses it as the automatic exclusive ceiling. A final
+partial window is clipped to that ceiling.
+
+For an integral cursor, use an integer window and start:
+
+```yaml
+sync:
+  mode: incremental
+  cursor_field: event_id
+  backfill:
+    window: 100000
+    start: 0
+```
+
+For SQL sources, drt snapshots `MAX(cursor_field) + 1` once per run as the
+numeric exclusive ceiling. A numeric API source must set `backfill.end`. REST
+profiles must configure distinct `incremental.start_param` and
+`incremental.end_param` request keys.
+
+## Execution and resume behavior
+
+Each query covers one half-open range: `cursor >= low AND cursor < high`.
+Windows run sequentially. The existing transforms, destination lookups,
+idempotency ledger, batching, DLQ behavior, and destination finalizer apply to
+every window.
+
+After a window is fully consumed and finalized, drt writes a provisional
+`partial` StateStore record with `cursor_boundary: exclusive`, then writes a
+separate configured watermark store. A failure of either write stops the run.
+Completed windows are never rolled back. Empty windows also checkpoint, which
+allows sparse histories to make progress.
+
+`on_error: fail` leaves a window uncheckpointed. `on_error: skip` checkpoints a
+fully consumed window when the *destination* reports pinpointed failed/DLQ rows,
+matching ordinary incremental behavior. Missing, null, or out-of-range source
+cursors are source-contract violations and always fail the window. Before a
+checkpoint, drt verifies destination outcome cardinality, flushes the DLQ, and
+calls an async destination's optional `flush_pending()` acknowledgement hook.
+Any failure leaves the current window resumable.
+
+`watermark.lag` applies when resuming a durable checkpoint. drt subtracts the
+lag, clamps at `backfill.start`, replays ordinary-sized overlap windows, and
+never moves durable progress backward.
+
+The optional warehouse idempotency ledger retains entries for seven days. When
+a timestamp lag exceeds that retention, drt warns at run start: overlap rows
+whose keys were pruned may be delivered again.
+
+A fixed `backfill.end` makes later runs a no-op after that exclusive boundary is
+reached. To continue into live data, remove only `backfill.end`; keep the
+`backfill` block. Removing the whole block while an exclusive checkpoint exists
+is refused because legacy incremental `>` semantics would reinterpret the saved
+boundary unsafely.
+
+## Recovery and state safety
+
+Use `drt state reset`; hand-editing `.drt/state.json` or
+`.drt/watermarks.json` is unsupported and cannot repair remote state. The cursor
+and `cursor_boundary: exclusive` marker are one checkpoint:
+
+- `drt state reset NAME --runs --yes` clears run metadata but retains that
+  checkpoint pair, so removing `sync.backfill` remains refused.
+- `drt state reset NAME --watermark --yes` clears the configured watermark and
+  the fallback cursor/boundary pair. Use this only when deliberately restarting
+  from configured `backfill.start`.
+
+Local state writes are atomic. A missing file means first run; corrupt local
+JSON fails a backfill closed instead of silently restarting from `start`.
+
+Run only one process for a given backfill sync at a time. Never-regress storage
+is not a distributed lease or atomic compare-and-swap; single-flight is the
+operator/scheduler's responsibility (`drt serve` already coalesces same-sync
+triggers). Do not downgrade and run an older drt against state written by a
+backfill: older behavior is backend-dependent and may discard or reinterpret
+the exclusive marker.
+
+## Current limits
+
+- Backfill requires `mode: incremental`, cursor strategy, and a top-level
+  `cursor_field`. Replace, mirror, diff strategy, floating-point cursors, nested
+  cursor paths, and REST link-header pagination are unsupported.
+- `--limit`, `--cursor-value`, and `--full-refresh` cannot be combined with
+  `sync.backfill`.
+- Slice 3 executes backfills only through `drt run` and MCP `drt_run_sync`.
+  Library-default calls, `drt build`, `drt serve`, Airflow, Prefect, Dagster
+  resources/assets/sensor-triggered runs, `drt test`, `drt plan`, `drt apply`,
+  exact replay, and DLQ retry refuse before extraction.
+- Dry-run is not a backfill preview in slice 3: `drt run --dry-run`, MCP
+  `dry_run`, `drt build --dry-run`, `--diff`, and plan/apply do not query any
+  window. Dry-run/diff arrives with slice 4.
+- CLI `--backfill-start` and `--backfill-end` range overrides arrive in the next
+  operational-surfaces slice. For now, configure `start` and optional `end` in
+  YAML.
+- Windows are deliberately sequential. `--threads` can run different syncs in
+  parallel but never parallelizes windows inside one sync.
+- Calendar windows, adaptive sizing, split-on-timeout, and distributed leases
+  are not v1 features. Keep runner clocks synchronized and use lag for late
+  arrivals.
+- `run_results.json` window arrays, window OTel spans, backfill-specific alert
+  text, history summaries, and `--backfill-start`/`--backfill-end` remain slice
+  4 work.

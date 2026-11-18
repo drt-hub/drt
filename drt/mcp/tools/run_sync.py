@@ -31,10 +31,11 @@ def run_sync(
     force_guards: bool = False,
     approved_by: str | None = None,
 ) -> dict[str, Any]:
-    from drt.cli._helpers import resolve_profile_name
+    from drt.cli._helpers import get_watermark_storage, resolve_profile_name
     from drt.cli.main import _get_destination, _get_source
     from drt.config.credentials import load_profile
     from drt.config.parser import project_vars as resolve_project_vars
+    from drt.engine.observer import CompositeObserver, StatePersistingObserver
     from drt.engine.sync import run_sync as engine_run_sync
     from drt.state.factory import build_state_bundle
 
@@ -72,6 +73,8 @@ def run_sync(
     sync = ctx.find_sync(sync_name, vars=resolved_vars, manifest_path=manifest_path)
     if sync is None:
         return {"error": f"No sync named '{sync_name}' found."}
+    if sync.sync.backfill is not None and full_refresh:
+        return {"error": "full_refresh is not allowed with sync.backfill."}
 
     if limit is not None and sync.sync.mode in ("mirror", "replace"):
         # Same guard as `drt run --limit` (#774): a sampled mirror would
@@ -88,6 +91,7 @@ def run_sync(
     dest = _get_destination(sync)
     bundle = build_state_bundle(project, ctx.project_dir)
     state_mgr = bundle.state
+    watermark_storage = get_watermark_storage(sync, ctx.project_dir)
 
     if full_refresh and not dry_run:
         # Clear both watermark sources, mirroring `drt run --full-refresh`.
@@ -99,13 +103,11 @@ def run_sync(
         # preview, and a stored watermark is data — clearing it for real
         # under dry_run=True contradicted that contract (same bug as the
         # CLI's `drt run --full-refresh --dry-run`, fixed alongside this).
-        from drt.cli._helpers import get_watermark_storage
-
-        storage = get_watermark_storage(sync, ctx.project_dir)
-        if storage is not None:
-            storage.delete(sync_name)
+        if watermark_storage is not None:
+            watermark_storage.delete(sync_name)
         state_mgr.reset(sync_name)
 
+    checkpoint_observer = StatePersistingObserver(state_mgr, watermark_storage)
     try:
         result = engine_run_sync(
             sync,
@@ -115,6 +117,10 @@ def run_sync(
             ctx.project_dir,
             dry_run,
             state_mgr,
+            observer=CompositeObserver(
+                [checkpoint_observer], checkpoint_observer=checkpoint_observer
+            ),
+            watermark_storage=watermark_storage,
             cursor_value_override=(cursor_value if sync.sync.mode == "incremental" else None),
             compute_diff=compute_diff,
             diff_limit=diff_limit,
@@ -125,6 +131,8 @@ def run_sync(
             audit_fields=project.state.audit_trail.fields,
             audit_retain_days=project.state.audit_trail.retain_days or 30,
             force_guards=force_guards,
+            full_refresh=full_refresh,
+            allow_backfill_execution=True,
         )
     except Exception as exc:
         from drt.engine.guards import GuardTripped, guards_outcome_of

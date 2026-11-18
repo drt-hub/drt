@@ -184,7 +184,7 @@ def state_reset(
 
     project = Path(".")
     state_bundle = None
-    if runs:
+    if runs or watermark:
         from drt.config.base import ProjectConfig
         from drt.config.parser import load_project
         from drt.state.factory import build_state_bundle
@@ -196,7 +196,12 @@ def state_reset(
         )
         state_bundle = build_state_bundle(project_config, project)
 
+    current_state = (
+        state_bundle.state.get_last_sync(sync_name) if state_bundle is not None else None
+    )
+
     if watermark:
+        assert state_bundle is not None
         cleared = False
         # The configured backend, when the sync declares one.
         from drt.config.parser import load_syncs
@@ -208,18 +213,59 @@ def state_reset(
             if storage is not None:
                 storage.delete(sync_name)
                 cleared = True
+        if current_state is not None and (
+            current_state.last_cursor_value is not None or current_state.cursor_boundary is not None
+        ):
+            from dataclasses import replace
+
+            state_bundle.state.save_sync(
+                replace(current_state, last_cursor_value=None, cursor_boundary=None)
+            )
+            cleared = True
         console.print(
             "[green]✓[/green] watermark cleared"
             if cleared
-            else "[dim]  no watermark backend configured — "
-            "the fallback cursor is cleared by --runs.[/dim]"
+            else "[dim]  no stored watermark or boundary marker.[/dim]"
         )
 
     if runs:
         assert state_bundle is not None
-        removed = state_bundle.state.reset(sync_name)
+        if (
+            not watermark
+            and current_state is not None
+            and (
+                current_state.last_cursor_value is not None
+                or current_state.cursor_boundary is not None
+            )
+        ):
+            from drt.state.manager import SyncState
+
+            # Cursor and boundary are one semantic checkpoint. `--runs`
+            # clears the last-run metadata but deliberately preserves both;
+            # only `--watermark` may clear the pair.
+            state_bundle.state.save_sync(
+                SyncState(
+                    sync_name=sync_name,
+                    last_run_at="",
+                    records_synced=0,
+                    status="success",
+                    last_cursor_value=current_state.last_cursor_value,
+                    cursor_boundary=current_state.cursor_boundary,
+                )
+            )
+            removed = True
+        else:
+            removed = state_bundle.state.reset(sync_name)
         console.print(
-            "[green]✓[/green] run state cleared"
+            "[green]✓[/green] run state cleared (watermark/boundary retained)"
+            if removed
+            and not watermark
+            and current_state is not None
+            and (
+                current_state.last_cursor_value is not None
+                or current_state.cursor_boundary is not None
+            )
+            else "[green]✓[/green] run state cleared"
             if removed
             else f"[dim]  no run state recorded for '{sync_name}'.[/dim]"
         )

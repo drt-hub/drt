@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from drt.state.manager import StateManager, SyncState
 from tests.conftest import public_methods
@@ -58,6 +59,18 @@ def test_creates_drt_dir_on_demand(tmp_path: Path) -> None:
 
     mgr.save_sync(SyncState("s", "2024-01-01T00:00:00+00:00", 0, "success"))
     assert (tmp_path / ".drt" / "state.json").exists()
+
+
+def test_local_state_save_replaces_an_fsynced_temp_file(tmp_path: Path) -> None:
+    from drt.state import _atomic
+
+    with (
+        patch("drt.state._atomic.os.fsync", wraps=_atomic.os.fsync) as fsync,
+        patch("drt.state._atomic.os.replace", wraps=_atomic.os.replace) as replace,
+    ):
+        StateManager(tmp_path).save_sync(SyncState("s", "now", 1, "success"))
+    assert replace.call_count == 1
+    assert fsync.call_count >= 1
 
 
 class TestReset:

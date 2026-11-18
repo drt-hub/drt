@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from drt.state._atomic import atomic_write_json
 from drt.state._filelock import advisory_lock
 from drt.state._integrity import report_unreadable
 
@@ -35,6 +36,9 @@ class SyncState:
     status: str  # "success" | "failed" | "partial"
     error: str | None = None
     last_cursor_value: str | None = None  # watermark for incremental sync
+    # ``exclusive`` means every cursor below ``last_cursor_value`` completed
+    # as a window.  Missing/None is the legacy "maximum observed row" shape.
+    cursor_boundary: str | None = None
 
 
 @runtime_checkable
@@ -96,7 +100,7 @@ class LocalStateManager:
         self._state_file = self._state_dir / "state.json"
         self._lock = threading.Lock()
 
-    def _load_all(self) -> dict[str, Any]:
+    def _load_all(self, *, fail_on_corruption: bool = False) -> dict[str, Any]:
         if not self._state_file.exists():
             return {}
         try:
@@ -109,6 +113,11 @@ class LocalStateManager:
             result: dict[str, Any] = loaded
             return result
         except (json.JSONDecodeError, ValueError):
+            if fail_on_corruption:
+                raise ValueError(
+                    f"{self._state_file} is corrupt; refusing sync.backfill because its "
+                    "resume checkpoint cannot be trusted. Restore or reset state explicitly."
+                )
             import sys
 
             print(
@@ -122,9 +131,14 @@ class LocalStateManager:
             return {}
 
     def _save_all(self, data: dict[str, Any]) -> None:
-        self._state_dir.mkdir(exist_ok=True)
-        with self._state_file.open("w") as f:
-            json.dump(data, f, indent=2)
+        atomic_write_json(self._state_file, data)
+
+    def _get_last_sync_for_backfill(self, sync_name: str) -> SyncState | None:
+        with self._lock:
+            data = self._load_all(fail_on_corruption=True)
+        if sync_name not in data:
+            return None
+        return SyncState(**data[sync_name])
 
     def get_last_sync(self, sync_name: str) -> SyncState | None:
         with self._lock:

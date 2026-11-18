@@ -91,6 +91,29 @@ class TestEnsureTableExists:
 
 
 class TestDatabricksWarehouseStateStore:
+    def test_transient_marker_read_error_does_not_fall_back(self) -> None:
+        class TransientError(Exception):
+            sqlstate = "08006"
+            error_code = "TEMPORARY_UNAVAILABLE"
+
+        conn = _mock_conn()
+        conn.cursor.return_value.execute.side_effect = TransientError("connection lost")
+        with (
+            patch("drt.state.warehouse_databricks._table_exists", return_value=True),
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            pytest.raises(TransientError, match="connection lost"),
+        ):
+            DatabricksWarehouseStateStore(_profile()).get_last_sync("s")
+        assert conn.cursor.return_value.execute.call_count == 1
+
+    def test_undefined_marker_error_is_the_only_legacy_fallback(self) -> None:
+        from drt.state.warehouse_databricks import _is_undefined_cursor_boundary
+
+        server_error = type("ServerOperationError", (Exception,), {})
+        assert _is_undefined_cursor_boundary(
+            server_error("[UNRESOLVED_COLUMN.WITH_SUGGESTION] cursor_boundary; SQLSTATE: 42703")
+        )
+
     def test_get_last_sync_returns_none_before_any_table_exists(self) -> None:
         with patch("drt.state.warehouse_databricks._table_exists", return_value=False):
             assert DatabricksWarehouseStateStore(_profile()).get_last_sync("s") is None

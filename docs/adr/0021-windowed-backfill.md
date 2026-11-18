@@ -645,3 +645,85 @@ normative; the implementation PRs follow them.
    incremental after the first catch-up?** Recommended: persistent, with an
    exclusive-boundary marker and an explicit transition command. A silent change
    to legacy `cursor > watermark` can skip a row exactly equal to the saved high.
+
+## Amendment 2026-11-18 (slice 3 review)
+
+The maintainer delegated and approved the following adversarial-review
+decisions for slice 3. They supersede earlier text where the staged rollout is
+narrower than the final ADR design.
+
+1. **Execution is caller-opt-in and fail-closed.** `run_sync()` defaults
+   `allow_backfill_execution` to false. Only `drt run` and MCP
+   `drt_run_sync` opt in. Library calls, `drt build`, `drt serve`,
+   Airflow/Prefect, Dagster resources/assets/sensor-triggered runs, `drt test`,
+   plan/apply, retry, and exact replay refuse before extraction.
+2. **Dry-run is refused in slice 3.** CLI `--dry-run`, MCP `dry_run`, and
+   `build --dry-run` never query windows. Window preview/diff support remains
+   slice 4 work.
+3. **Source range violations are fatal to the window.** Out-of-range,
+   missing, and null cursors leave the window uncheckpointed regardless of
+   `on_error`; `on_error: skip` applies only to destination row failures.
+4. **One observer acknowledges checkpoints.** A composite designates exactly
+   one validated synchronous checkpoint observer. Its return value is
+   authoritative. Other and registered observers receive window events only;
+   they never receive checkpoint calls, avoiding cross-thread checkpoint
+   interleaving through shared extras.
+5. **Resume reads and writes are coupled.** The checkpoint capability reads
+   the resume cursor and boundary from the same StateStore/watermark pair it
+   writes. Supplying `StatePersistingObserver(store, None)` is sufficient even
+   when `state_manager=None`; a capability unable to read its own store is
+   refused.
+6. **Warehouse legacy fallback is narrow.** BigQuery falls back only for its
+   400 `invalidQuery` undefined-name error, Snowflake only for ProgrammingError
+   904/SQLSTATE 42000 invalid identifier, and Databricks only for SQLSTATE
+   42703/`UNRESOLVED_COLUMN`, all specifically naming `cursor_boundary`.
+   Authentication, permission, network, and transient failures propagate.
+7. **Outcome cardinality is a checkpoint invariant.** A window fails if a
+   load result does not report exactly one success/failed/skipped outcome per
+   submitted row, or staged finalization does not account for every staged
+   row. Under-reporting rows are never marked delivered in the idempotency
+   ledger.
+8. **DLQ persistence precedes checkpointing.** The DLQ buffer is flushed at
+   every window boundary. An append failure is fatal and the checkpoint is
+   not written; the unconditional end-of-run flush remains best-effort cleanup.
+9. **Staged partial success preserves skip semantics.** When finalization
+   reports pinpointed failures, `on_error: skip` records/DLQs them and may
+   checkpoint a fully consumed window; `on_error: fail` leaves it resumable.
+10. **Destination success means durable target acceptance.** For backfill,
+    `SyncResult.success` cannot mean merely queued locally. The additive
+    `PendingFlushCapable.flush_pending()` hook lets async destinations wait for
+    acknowledgement before every checkpoint; failure aborts the window.
+    `reset_write_state` remains best-effort cleanup, never acknowledgement.
+11. **Interrupted unfinished work is partial.** Cooperative cancellation with
+    remaining windows records `partial`, is selected by `drt run --failed`,
+    and triggers failure alerts without moving the safe checkpoint.
+12. **The cursor and exclusive marker are one checkpoint.** `drt state reset
+    --runs` clears run metadata but retains `last_cursor_value` and
+    `cursor_boundary` together. `--watermark` clears both. Hand-editing state
+    files is unsupported; use the command.
+13. **Local rewrites are atomic and corruption fails closed.** Local
+    `state.json` and `watermarks.json` writes use a same-directory temporary
+    file, file fsync, `os.replace`, and directory fsync. Missing files remain
+    normal first-run state. Corrupt JSON cannot be interpreted as an empty
+    checkpoint by a backfill.
+14. **Same-sync concurrency is unsupported.** Never-regress remains a
+    read/compare/write guard, not a distributed CAS. Operators and schedulers
+    must provide single-flight execution for a backfill sync; `drt serve`
+    already coalesces same-sync triggers. Do not run an older drt version
+    against state written by backfill; older behavior is backend-dependent and
+    may discard or reinterpret the additive marker. A local best-effort lease
+    is deferred rather than pretending to solve remote/concurrent execution.
+15. **Lag versus ledger retention is visible.** A timestamp
+    `watermark.lag` greater than the enabled ledger's seven-day retention emits
+    a run-start warning because pruned overlap keys may be delivered again.
+16. **Documentation names the rollout boundary.** Connector, MCP, LLM,
+    changelog, guide, and skill text must state the supported entry points,
+    recovery steps, and unsupported dry-run/diff/plan/limit/build/serve/
+    orchestrator combinations.
+17. **Tests are entry-point and failure-injection based.** Coverage inventories
+    every production `run_sync` call and exercises each invariant above,
+    including the executable SQLite three-window resume path.
+
+Slice 4 still owns `run_results.json` `windows[]`, window OTel spans, alert
+wording, aggregate history backfill summaries, and CLI
+`--backfill-start`/`--backfill-end`. This amendment does not pull them forward.

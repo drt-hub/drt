@@ -498,6 +498,11 @@ def unsupported_reason(sync: Any) -> str | None:
     the answer is "unavailable, with a reason" rather than a best effort.
     """
     options = sync.sync
+    if getattr(options, "backfill", None) is not None:
+        return (
+            "sync.backfill is not supported by drt plan/apply yet "
+            "(ADR 0021 slices 5-6 will seal and verify complete window ranges)"
+        )
     policy = getattr(options, "match_policy", "upsert")
     if policy != "upsert":
         return (

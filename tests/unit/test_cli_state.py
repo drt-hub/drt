@@ -78,7 +78,10 @@ class TestResetRuns:
         result = runner.invoke(app, ["state", "reset", "users", "--runs", "--yes"])
 
         assert result.exit_code == 0
-        assert StateManager(project).get_last_sync("users") is None
+        state = StateManager(project).get_last_sync("users")
+        assert state is not None
+        assert state.last_run_at == ""
+        assert state.last_cursor_value == "2026-01-01"
 
     def test_dry_run_changes_nothing(self, project: Path) -> None:
         result = runner.invoke(app, ["state", "reset", "users", "--runs", "--dry-run", "--yes"])
@@ -92,6 +95,27 @@ class TestResetRuns:
 
         assert result.exit_code != 0
         assert StateManager(project).get_last_sync("users") is not None
+
+    def test_runs_only_keeps_exclusive_checkpoint_pair(self, project: Path) -> None:
+        manager = StateManager(project)
+        manager.save_sync(
+            SyncState(
+                "users",
+                "2026-01-01T00:00:00Z",
+                42,
+                "partial",
+                last_cursor_value="2026-01-01",
+                cursor_boundary="exclusive",
+            )
+        )
+        result = runner.invoke(app, ["state", "reset", "users", "--runs", "--yes"])
+        assert result.exit_code == 0
+        state = manager.get_last_sync("users")
+        assert state is not None
+        assert (state.last_cursor_value, state.cursor_boundary) == (
+            "2026-01-01",
+            "exclusive",
+        )
 
 
 class TestResetTrackedMirrorIsOptIn:
@@ -131,9 +155,9 @@ class TestResetWatermark:
         result = runner.invoke(app, ["state", "reset", "users", "--watermark", "--yes"])
 
         assert result.exit_code == 0
-        assert "--runs" in result.output, (
-            "with no backend the fallback cursor is cleared by --runs; say so"
-        )
+        assert "watermark cleared" in result.output
+        state = StateManager(project).get_last_sync("users")
+        assert state is not None and state.last_cursor_value is None
 
     def test_clears_a_configured_backend(self, project: Path) -> None:
         storage = MagicMock()

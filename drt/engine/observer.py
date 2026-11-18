@@ -28,18 +28,22 @@ stage retrofit #544) a single seam to plug into.
 Method shape
 ------------
 
-All observer methods MUST be fire-and-forget — observers swallow their
-own errors (typically via ``try/except`` + a logged warning) and never
-raise back into the engine. A buggy observer must not crash a running
-sync.
+The frozen ``SyncObserver`` methods remain fire-and-forget — observers swallow
+their own errors (typically via ``try/except`` + a logged warning) and never
+raise back into the engine. ADR 0021's separate ``WindowCheckpointObserver``
+capability is the deliberate exception: its acknowledged checkpoint method may
+raise because continuing without durable progress would be unsafe.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeGuard, runtime_checkable
+
+from drt.engine.backfill import BackfillBound
 
 if TYPE_CHECKING:
     from drt.destinations.base import SyncResult
@@ -129,6 +133,62 @@ class SyncObserver(Protocol):
         so a crash mid-sync cannot silently drop already-buffered entries.
         Every other observer no-ops.
         """
+        ...
+
+
+@runtime_checkable
+class WindowCheckpointObserver(Protocol):
+    """Additive acknowledged persistence capability for ADR 0021.
+
+    This intentionally does not modify the frozen :class:`SyncObserver`.
+    Window events are fire-and-forget; ``checkpoint_window`` is the sole
+    acknowledged observer call and may raise to abort the run.
+    """
+
+    def window_started(
+        self, sync_name: str, index: int, low: BackfillBound, high: BackfillBound
+    ) -> None: ...
+
+    def window_completed(
+        self,
+        sync_name: str,
+        index: int,
+        low: BackfillBound,
+        high: BackfillBound,
+        result: SyncResult,
+    ) -> None: ...
+
+    def window_failed(
+        self,
+        sync_name: str,
+        index: int,
+        low: BackfillBound,
+        high: BackfillBound,
+        error: BaseException | None,
+    ) -> None: ...
+
+    def checkpoint_window(
+        self,
+        sync_name: str,
+        started_at: str,
+        result: SyncResult,
+        cursor_field: str,
+        high: BackfillBound,
+    ) -> str:
+        """Persist one completed exclusive boundary and return the durable value."""
+        ...
+
+    def read_window_checkpoint(self, sync_name: str) -> tuple[str | None, str | None]:
+        """Read the cursor and marker from the same stores this observer writes."""
+        ...
+
+
+@runtime_checkable
+class WindowBoundaryFlusher(Protocol):
+    """Optional observer capability for writes that must precede a checkpoint."""
+
+    def flush_window(self, sync_name: str) -> None:
+        """Durably flush one window's buffered observer data or raise."""
         ...
 
 
@@ -246,6 +306,105 @@ class StatePersistingObserver:
     def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None: ...
     def on_interrupted(self, sync_name: str, batches_processed: int) -> None: ...
     def on_sync_ended(self, sync_name: str) -> None: ...
+    def window_started(
+        self, sync_name: str, index: int, low: BackfillBound, high: BackfillBound
+    ) -> None: ...
+    def window_completed(
+        self,
+        sync_name: str,
+        index: int,
+        low: BackfillBound,
+        high: BackfillBound,
+        result: SyncResult,
+    ) -> None: ...
+    def window_failed(
+        self,
+        sync_name: str,
+        index: int,
+        low: BackfillBound,
+        high: BackfillBound,
+        error: BaseException | None,
+    ) -> None: ...
+
+    def checkpoint_window(
+        self,
+        sync_name: str,
+        started_at: str,
+        result: SyncResult,
+        cursor_field: str,
+        high: BackfillBound,
+    ) -> str:
+        """Persist StateStore first, then the authoritative watermark.
+
+        Unlike ``on_sync_completed``, failures deliberately propagate.  A
+        destination window must never be followed by later windows unless its
+        resume point is durable.
+        """
+        from drt.engine.backfill import stringify_cursor_value
+        from drt.engine.cursor import cursor_gt
+        from drt.state.manager import SyncState
+
+        if self._state_manager is None:
+            raise RuntimeError(
+                "Window checkpointing requires an always-present StateStore; "
+                "configure state persistence before running sync.backfill."
+            )
+
+        proposed = stringify_cursor_value(high)
+        current_state = self._state_manager.get_last_sync(sync_name)
+        state_value = proposed
+        if (
+            current_state is not None
+            and current_state.last_cursor_value is not None
+            and cursor_gt(current_state.last_cursor_value, proposed)
+        ):
+            state_value = current_state.last_cursor_value
+
+        self._state_manager.save_sync(
+            SyncState(
+                sync_name=sync_name,
+                last_run_at=started_at,
+                records_synced=result.success,
+                status="partial",
+                error=result.errors[0] if result.errors else None,
+                last_cursor_value=state_value,
+                cursor_boundary="exclusive",
+            )
+        )
+
+        durable = state_value
+        if self._watermark_storage is not None:
+            current_watermark = self._watermark_storage.get(sync_name)
+            if current_watermark is not None and cursor_gt(current_watermark, proposed):
+                durable = current_watermark
+            else:
+                self._watermark_storage.save(sync_name, proposed)
+                durable = proposed
+        return durable
+
+    def read_window_checkpoint(self, sync_name: str) -> tuple[str | None, str | None]:
+        """Read through the exact StateStore/WatermarkStorage pair used for writes."""
+        if self._state_manager is None:
+            raise RuntimeError(
+                "Window checkpointing requires an always-present StateStore; "
+                "configure state persistence before running sync.backfill."
+            )
+        strict_state_reader = getattr(self._state_manager, "_get_last_sync_for_backfill", None)
+        state = (
+            strict_state_reader(sync_name)
+            if callable(strict_state_reader)
+            else self._state_manager.get_last_sync(sync_name)
+        )
+        if self._watermark_storage is not None:
+            strict_watermark_reader = getattr(self._watermark_storage, "_get_for_backfill", None)
+            cursor = (
+                strict_watermark_reader(sync_name)
+                if callable(strict_watermark_reader)
+                else self._watermark_storage.get(sync_name)
+            )
+        else:
+            cursor = state.last_cursor_value if state is not None else None
+        return cursor, state.cursor_boundary if state is not None else None
 
     def on_sync_completed(
         self,
@@ -267,7 +426,13 @@ class StatePersistingObserver:
 
         if self._state_manager is not None:
             status = (
-                "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
+                "partial"
+                if result.interrupted
+                else "success"
+                if result.failed == 0
+                else "partial"
+                if result.success > 0
+                else "failed"
             )
             exact_replay = bool(getattr(result, "_exact_replay", False))
             persist_cursor_value = new_cursor_value if cursor_field else None
@@ -314,6 +479,14 @@ class StatePersistingObserver:
                         )
                     ):
                         persist_cursor_value = current.last_cursor_value
+                completed_checkpoint = (
+                    result.backfill.get("final_checkpoint") if result.backfill is not None else None
+                )
+                cursor_boundary = (
+                    "exclusive"
+                    if completed_checkpoint is not None
+                    else (current.cursor_boundary if cursor_field and current is not None else None)
+                )
                 self._state_manager.save_sync(
                     SyncState(
                         sync_name=sync_name,
@@ -322,6 +495,7 @@ class StatePersistingObserver:
                         status=status,
                         error=result.errors[0] if result.errors else None,
                         last_cursor_value=persist_cursor_value,
+                        cursor_boundary=cursor_boundary,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
@@ -332,6 +506,7 @@ class StatePersistingObserver:
             and cursor_field
             and new_cursor_value
             and not getattr(result, "_exact_replay", False)
+            and result.backfill is None
         ):
             try:
                 # Same never-regress guard as the state_manager branch above
@@ -357,9 +532,30 @@ class CompositeObserver:
     semantics even when an individual observer breaks the contract).
     """
 
-    def __init__(self, observers: Iterable[SyncObserver]) -> None:
+    def __init__(
+        self,
+        observers: Iterable[SyncObserver],
+        *,
+        checkpoint_observer: WindowCheckpointObserver | None = None,
+    ) -> None:
         self._observers = list(observers)
         self._logger = logging.getLogger("drt")
+        self._checkpoint_observer: WindowCheckpointObserver | None
+        if checkpoint_observer is not None:
+            checkpoint_id = id(checkpoint_observer)
+            if not any(id(observer) == checkpoint_id for observer in self._observers):
+                raise ValueError("checkpoint_observer must also be a CompositeObserver child.")
+            if not _is_window_checkpoint_observer(checkpoint_observer):
+                raise TypeError("checkpoint_observer has an incompatible or async capability.")
+            self._checkpoint_observer = checkpoint_observer
+        else:
+            capable = [obs for obs in self._observers if _is_window_checkpoint_observer(obs)]
+            if len(capable) > 1:
+                raise ValueError(
+                    "Multiple checkpoint-capable observers require one explicit "
+                    "checkpoint_observer; checkpoint acknowledgement cannot be fanned out."
+                )
+            self._checkpoint_observer = capable[0] if capable else None
 
     def _broadcast(self, method_name: str, *args: object, **kwargs: object) -> None:
         for obs in self._observers:
@@ -408,16 +604,129 @@ class CompositeObserver:
     def on_sync_ended(self, sync_name: str) -> None:
         self._broadcast("on_sync_ended", sync_name)
 
+    def _broadcast_window(self, method_name: str, *args: object) -> None:
+        for obs in self._observers:
+            method = getattr(obs, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method(*args)
+            except Exception as exc:  # noqa: BLE001 — fire-and-forget event
+                self._logger.warning(
+                    "Observer %s.%s raised: %s", type(obs).__name__, method_name, exc
+                )
+
+    def window_started(
+        self, sync_name: str, index: int, low: BackfillBound, high: BackfillBound
+    ) -> None:
+        self._broadcast_window("window_started", sync_name, index, low, high)
+
+    def window_completed(
+        self,
+        sync_name: str,
+        index: int,
+        low: BackfillBound,
+        high: BackfillBound,
+        result: SyncResult,
+    ) -> None:
+        self._broadcast_window("window_completed", sync_name, index, low, high, result)
+
+    def window_failed(
+        self,
+        sync_name: str,
+        index: int,
+        low: BackfillBound,
+        high: BackfillBound,
+        error: BaseException | None,
+    ) -> None:
+        self._broadcast_window("window_failed", sync_name, index, low, high, error)
+
+    def checkpoint_window(
+        self,
+        sync_name: str,
+        started_at: str,
+        result: SyncResult,
+        cursor_field: str,
+        high: BackfillBound,
+    ) -> str:
+        if self._checkpoint_observer is None:
+            raise RuntimeError(
+                "sync.backfill requires a checkpoint-capable observer before extraction."
+            )
+        return self._checkpoint_observer.checkpoint_window(
+            sync_name, started_at, result, cursor_field, high
+        )
+
+    def read_window_checkpoint(self, sync_name: str) -> tuple[str | None, str | None]:
+        if self._checkpoint_observer is None:
+            raise RuntimeError(
+                "sync.backfill requires a checkpoint-capable observer before extraction."
+            )
+        return self._checkpoint_observer.read_window_checkpoint(sync_name)
+
+    def flush_window(self, sync_name: str) -> None:
+        """Flush boundary-aware children; unlike normal events, failures propagate."""
+        for obs in self._observers:
+            method = getattr(obs, "flush_window", None)
+            if callable(method):
+                method(sync_name)
+
+
+def is_window_checkpoint_capable(observer: object) -> bool:
+    """Return whether an observer can acknowledge a checkpoint before extraction."""
+    if isinstance(observer, CompositeObserver):
+        return observer._checkpoint_observer is not None
+    return _is_window_checkpoint_observer(observer)
+
+
+def _has_sync_method(observer: object, name: str, positional_count: int) -> bool:
+    method = getattr(observer, name, None)
+    if not callable(method) or inspect.iscoroutinefunction(method):
+        return False
+    try:
+        parameters = list(inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    required = [
+        parameter for parameter in positional if parameter.default is inspect.Parameter.empty
+    ]
+    return (
+        len(required) <= positional_count
+        and len(positional) >= positional_count
+        and all(
+            parameter.default is not inspect.Parameter.empty
+            for parameter in positional[positional_count:]
+        )
+    )
+
+
+def _is_window_checkpoint_observer(
+    observer: object,
+) -> TypeGuard[WindowCheckpointObserver]:
+    """Validate acknowledged methods beyond runtime Protocol attribute presence."""
+    if isinstance(observer, StatePersistingObserver) and observer._state_manager is None:
+        return False
+    return _has_sync_method(observer, "checkpoint_window", 5) and _has_sync_method(
+        observer, "read_window_checkpoint", 1
+    )
+
 
 class DlqObserver:
     """Persists per-record load failures to the Dead Letter Queue (#278).
 
     Wired into the run path only for syncs that set ``sync.dlq.enabled``.
-    Like every other observer it is fire-and-forget: a DLQ write failure is
-    logged and swallowed so it can never fail an otherwise-OK sync. Failed
-    batches are buffered and written once at completion. This avoids a
-    remote read-modify-write for every failed batch while preserving record
-    order and identical local JSONL content.
+    Ordinary sync cleanup remains fire-and-forget: a final DLQ write failure is
+    logged and swallowed. ADR 0021 backfills are stricter: ``flush_window()``
+    propagates an append failure before the window checkpoint. Failed batches
+    are buffered until one of those boundaries, avoiding a remote
+    read-modify-write for every failed batch while preserving record order and
+    identical local JSONL content.
     """
 
     def __init__(self, store: DlqBackend, *, max_records: int = 10_000) -> None:
@@ -447,13 +756,30 @@ class DlqObserver:
         # fires on the normal-return path. The buffer must flush here, not
         # there, so a mid-sync crash cannot silently drop already-buffered
         # dead letters.
-        dead_letters = self._buffer.pop(sync_name, [])
+        self._flush(sync_name, strict=False)
+
+    def flush_window(self, sync_name: str) -> None:
+        """Durably append this window's failures; unlike final cleanup, raise."""
+        self._flush(sync_name, strict=True)
+
+    def _flush(self, sync_name: str, *, strict: bool) -> None:
+        dead_letters = self._buffer.get(sync_name, [])
         if not dead_letters:
             return
         try:
-            self._store.append(sync_name, dead_letters, max_records=self._max_records)
+            strict_append = getattr(self._store, "_append_strict", None)
+            if strict and callable(strict_append):
+                strict_append(sync_name, dead_letters, max_records=self._max_records)
+            else:
+                self._store.append(sync_name, dead_letters, max_records=self._max_records)
         except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
+            if strict:
+                raise RuntimeError(
+                    f"DLQ persist failure for window in '{sync_name}': {exc}"
+                ) from exc
             self._logger.warning("DLQ persist failure for '%s': %s", sync_name, exc)
+            return
+        self._buffer.pop(sync_name, None)
 
     def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None:
         if not dead_letters:

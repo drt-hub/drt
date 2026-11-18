@@ -188,6 +188,14 @@ class WebhookDestination:
 6. **`on_error` handling** -- if `"fail"`, return immediately on first error. If `"skip"` (default), log the error and continue.
 7. **Empty records** -- return `SyncResult()` early if `records` is empty (optional but clean).
 
+For `sync.backfill`, every submitted record must have exactly one reported
+outcome (`success + failed + skipped == len(records)`), and `success` means the
+target has durably accepted the record before `load()` or staged `finalize()`
+returns. A connector that queues/asynchronously sends work implements the
+additive `PendingFlushCapable.flush_pending()` hook; drt calls and acknowledges
+it before each window checkpoint. A raised flush leaves the window resumable.
+`reset_write_state()` is cleanup only and must not be used as acknowledgement.
+
 ### Database destinations
 
 For database connectors, the pattern differs slightly:

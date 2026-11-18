@@ -103,6 +103,32 @@ class TestEnsureTableExists:
 
 
 class TestSnowflakeWarehouseStateStore:
+    def test_transient_marker_read_error_does_not_fall_back(self) -> None:
+        class TransientError(Exception):
+            errno = 390100
+            sqlstate = "08001"
+
+        conn = _mock_conn()
+        conn.cursor.return_value.execute.side_effect = TransientError("connection lost")
+        with (
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            pytest.raises(TransientError, match="connection lost"),
+        ):
+            SnowflakeWarehouseStateStore(_profile()).get_last_sync("s")
+        assert conn.cursor.return_value.execute.call_count == 1
+
+    def test_undefined_marker_error_is_the_only_legacy_fallback(self) -> None:
+        from drt.state.warehouse_snowflake import _is_undefined_cursor_boundary
+
+        class MissingColumn(Exception):
+            errno = 904
+            sqlstate = "42000"
+
+        assert _is_undefined_cursor_boundary(
+            MissingColumn("SQL compilation error: invalid identifier 'CURSOR_BOUNDARY'")
+        )
+
     def test_get_last_sync_returns_none_before_any_table_exists(self) -> None:
         with patch("drt.state.warehouse_snowflake._table_exists", return_value=False):
             assert SnowflakeWarehouseStateStore(_profile()).get_last_sync("s") is None

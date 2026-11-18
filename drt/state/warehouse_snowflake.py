@@ -175,6 +175,16 @@ def _ensure_table_exists(
             raise
 
 
+def _is_undefined_cursor_boundary(exc: Exception) -> bool:
+    """Snowflake ProgrammingError 000904: invalid identifier."""
+    return (
+        getattr(exc, "errno", None) == 904
+        and getattr(exc, "sqlstate", None) == "42000"
+        and "cursor_boundary" in str(exc).lower()
+        and "invalid identifier" in str(exc).lower()
+    )
+
+
 class SnowflakeWarehouseStateStore:
     """``StateStore`` backed by a ``_drt_runs`` row per sync (#1106)."""
 
@@ -191,7 +201,8 @@ class SnowflakeWarehouseStateStore:
             "records_synced BIGINT NOT NULL, "
             "status TEXT NOT NULL, "
             "error TEXT, "
-            "last_cursor_value TEXT",
+            "last_cursor_value TEXT, "
+            "cursor_boundary TEXT",
         )
 
     def get_last_sync(self, sync_name: str) -> SyncState | None:
@@ -200,11 +211,22 @@ class SnowflakeWarehouseStateStore:
         conn = _connect(self._profile)
         try:
             cur = conn.cursor()
-            cur.execute(
-                f"SELECT last_run_at, records_synced, status, error, last_cursor_value "
-                f"FROM {_qualified(self._profile, _RUNS_TABLE)} WHERE sync_name = %s",
-                (sync_name,),
-            )
+            try:
+                cur.execute(
+                    "SELECT last_run_at, records_synced, status, error, "
+                    f"last_cursor_value, cursor_boundary FROM "
+                    f"{_qualified(self._profile, _RUNS_TABLE)} WHERE sync_name = %s",
+                    (sync_name,),
+                )
+            except Exception as exc:
+                if not _is_undefined_cursor_boundary(exc):
+                    raise
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT last_run_at, records_synced, status, error, last_cursor_value "
+                    f"FROM {_qualified(self._profile, _RUNS_TABLE)} WHERE sync_name = %s",
+                    (sync_name,),
+                )
             row = cur.fetchone()
             if row is None:
                 return None
@@ -218,10 +240,20 @@ class SnowflakeWarehouseStateStore:
         conn = _connect(self._profile)
         try:
             cur = conn.cursor()
-            cur.execute(
-                "SELECT sync_name, last_run_at, records_synced, status, error, "
-                f"last_cursor_value FROM {_qualified(self._profile, _RUNS_TABLE)}"
-            )
+            try:
+                cur.execute(
+                    "SELECT sync_name, last_run_at, records_synced, status, error, "
+                    f"last_cursor_value, cursor_boundary FROM "
+                    f"{_qualified(self._profile, _RUNS_TABLE)}"
+                )
+            except Exception as exc:
+                if not _is_undefined_cursor_boundary(exc):
+                    raise
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT sync_name, last_run_at, records_synced, status, error, "
+                    f"last_cursor_value FROM {_qualified(self._profile, _RUNS_TABLE)}"
+                )
             return {row[0]: _row_to_sync_state(row[0], row[1:]) for row in cur.fetchall()}
         finally:
             conn.close()
@@ -232,24 +264,35 @@ class SnowflakeWarehouseStateStore:
             self._ensure_table(conn)
             cur = conn.cursor()
             t = _qualified(self._profile, _RUNS_TABLE)
+            if state.cursor_boundary is not None:
+                cur.execute(f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS cursor_boundary TEXT")
+            boundary_select = ", %s AS cursor_boundary" if state.cursor_boundary is not None else ""
+            boundary_update = (
+                ", cursor_boundary = s.cursor_boundary" if state.cursor_boundary is not None else ""
+            )
+            boundary_columns = ", cursor_boundary" if state.cursor_boundary is not None else ""
+            boundary_values = ", s.cursor_boundary" if state.cursor_boundary is not None else ""
+            parameters = (
+                state.sync_name,
+                state.last_run_at,
+                state.records_synced,
+                state.status,
+                state.error,
+                state.last_cursor_value,
+            ) + ((state.cursor_boundary,) if state.cursor_boundary is not None else ())
             cur.execute(
                 f"MERGE INTO {t} AS t USING (SELECT %s AS sync_name, %s AS last_run_at, "
-                "%s AS records_synced, %s AS status, %s AS error, %s AS last_cursor_value) AS s "
+                "%s AS records_synced, %s AS status, %s AS error, %s AS last_cursor_value"
+                f"{boundary_select}) AS s "
                 "ON t.sync_name = s.sync_name "
                 "WHEN MATCHED THEN UPDATE SET last_run_at = s.last_run_at, "
                 "records_synced = s.records_synced, status = s.status, error = s.error, "
-                "last_cursor_value = s.last_cursor_value "
+                f"last_cursor_value = s.last_cursor_value{boundary_update} "
                 "WHEN NOT MATCHED THEN INSERT (sync_name, last_run_at, records_synced, "
-                "status, error, last_cursor_value) VALUES (s.sync_name, s.last_run_at, "
-                "s.records_synced, s.status, s.error, s.last_cursor_value)",
-                (
-                    state.sync_name,
-                    state.last_run_at,
-                    state.records_synced,
-                    state.status,
-                    state.error,
-                    state.last_cursor_value,
-                ),
+                f"status, error, last_cursor_value{boundary_columns}) VALUES "
+                "(s.sync_name, s.last_run_at, s.records_synced, s.status, s.error, "
+                f"s.last_cursor_value{boundary_values})",
+                parameters,
             )
         finally:
             conn.close()
@@ -273,7 +316,7 @@ class SnowflakeWarehouseStateStore:
 
 
 def _row_to_sync_state(sync_name: str, row: tuple[Any, ...]) -> SyncState:
-    last_run_at, records_synced, status, error, last_cursor_value = row
+    last_run_at, records_synced, status, error, last_cursor_value, *optional = row
     return SyncState(
         sync_name=sync_name,
         last_run_at=last_run_at,
@@ -281,6 +324,7 @@ def _row_to_sync_state(sync_name: str, row: tuple[Any, ...]) -> SyncState:
         status=status,
         error=error,
         last_cursor_value=last_cursor_value,
+        cursor_boundary=optional[0] if optional else None,
     )
 
 

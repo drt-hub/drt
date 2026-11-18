@@ -1,4 +1,4 @@
-"""Config validation and slice-1 execution guard for ADR 0021 backfills."""
+"""Config validation and execution preflight for ADR 0021 backfills."""
 
 from __future__ import annotations
 
@@ -345,7 +345,7 @@ def _sync() -> SyncConfig:
     )
 
 
-def test_config_loader_reports_backfill_as_not_yet_executable(tmp_path: Path) -> None:
+def test_config_loader_accepts_executable_backfill(tmp_path: Path) -> None:
     syncs_dir = tmp_path / "syncs"
     syncs_dir.mkdir()
     (syncs_dir / "users.yml").write_text(
@@ -366,20 +366,20 @@ sync:
 
     result = load_syncs_safe(tmp_path)
 
-    assert result.syncs == []
-    assert result.errors == {
-        "users": [
-            "sync.backfill is accepted by the schema but not executable yet (ADR 0021 slices 2-3)"
-        ]
-    }
+    assert [sync.name for sync in result.syncs] == ["users"]
+    assert result.errors == {}
 
 
-def test_run_sync_guard_fails_before_any_engine_io(tmp_path: Path) -> None:
+def test_run_sync_requires_checkpoint_observer_before_any_engine_io(tmp_path: Path) -> None:
     with pytest.raises(
-        ValueError,
-        match=(
-            r"sync\.backfill is accepted by the schema but not executable yet "
-            r"\(ADR 0021 slices 2-3\)"
-        ),
+        RuntimeError,
+        match=r"checkpoint-capable observer",
     ):
-        run_sync(_sync(), object(), object(), object(), tmp_path)
+        run_sync(
+            _sync(),
+            object(),
+            object(),
+            object(),
+            tmp_path,
+            allow_backfill_execution=True,
+        )
