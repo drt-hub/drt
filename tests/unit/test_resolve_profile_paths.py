@@ -44,9 +44,16 @@ def test_a_local_file_named_like_a_scheme_can_be_written_with_a_dot_slash(tmp_pa
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges on Windows")
-def test_a_symlink_loop_is_a_value_error_not_an_internal_error(tmp_path: Path) -> None:
+def test_a_symlink_loop_never_surfaces_an_internal_error(tmp_path: Path) -> None:
     os.symlink("loop_b", tmp_path / "loop_a")
     os.symlink("loop_a", tmp_path / "loop_b")
+    profile = SQLiteProfile(type="sqlite", database="loop_a/x.db")
 
-    with pytest.raises(ValueError, match="Cannot resolve relative database path"):
-        resolve_profile_paths(SQLiteProfile(type="sqlite", database="loop_a/x.db"), tmp_path)
+    # Python before 3.13 raises on a loop while resolving (-> ValueError here); 3.13+
+    # returns the path unresolved, which then stays inside the project directory.
+    try:
+        resolved = resolve_profile_paths(profile, tmp_path)
+    except ValueError as exc:
+        assert "Cannot resolve relative database path" in str(exc)
+    else:
+        assert Path(resolved.database).is_relative_to(tmp_path.resolve())
