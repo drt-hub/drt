@@ -498,7 +498,7 @@ class TestBigQueryWarehouseHistoryStore:
                 entries = BigQueryWarehouseHistoryStore(_profile()).read(sync_name, limit=7)
             assert entries == [_history_entry()]
             assert ("WHERE sync_name" in _sqls(client)[0]) is expected_where
-            assert "ORDER BY started_at DESC, run_id DESC LIMIT" in _sqls(client)[0]
+            assert "ORDER BY started_at DESC, run_id DESC NULLS LAST LIMIT" in _sqls(client)[0]
 
     def test_read_breaks_started_at_ties_by_run_id_before_limit(self) -> None:
         row_b = ("s", "t0", "t1", 1.5, "success", 2, 0, "[]", None, False, "run-b", "sr-b")
@@ -512,7 +512,7 @@ class TestBigQueryWarehouseHistoryStore:
             entries = BigQueryWarehouseHistoryStore(_profile()).read("s", limit=2)
 
         assert [entry.run_id for entry in entries] == ["run-b", "run-a"]
-        assert "ORDER BY started_at DESC, run_id DESC LIMIT" in _sqls(client)[0]
+        assert "ORDER BY started_at DESC, run_id DESC NULLS LAST LIMIT" in _sqls(client)[0]
 
     def test_prune_counts_then_deletes_or_skips(self) -> None:
         client = _client([(3,)], [])

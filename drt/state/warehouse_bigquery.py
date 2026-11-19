@@ -362,12 +362,13 @@ class BigQueryWarehouseHistoryStore:
         parameters = [_scalar("limit", "INT64", limit)]
         if sync_name is None:
             sql = (
-                f"SELECT {columns} FROM {table} ORDER BY started_at DESC, run_id DESC LIMIT @limit"
+                f"SELECT {columns} FROM {table} "
+                "ORDER BY started_at DESC, run_id DESC NULLS LAST LIMIT @limit"
             )
         else:
             sql = (
                 f"SELECT {columns} FROM {table} WHERE sync_name = @sync_name "
-                "ORDER BY started_at DESC, run_id DESC LIMIT @limit"
+                "ORDER BY started_at DESC, run_id DESC NULLS LAST LIMIT @limit"
             )
             parameters.insert(0, _scalar("sync_name", "STRING", sync_name))
         return [_row_to_history_entry(row, present) for row in _query(client, sql, parameters)]
