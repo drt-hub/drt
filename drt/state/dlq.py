@@ -80,6 +80,32 @@ class DeadLetter:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
+def backfill_dead_letter_id(
+    sync_name: str,
+    low: str | int,
+    high: str | int,
+    record: Mapping[str, Any],
+) -> str:
+    """Return the stable identity of one failed row in one backfill window.
+
+    A window may be delivered and DLQ-flushed before its checkpoint write
+    fails.  Retrying that uncheckpointed window must update the existing dead
+    letter, not append a second retryable copy of the same row.
+    """
+    payload = json.dumps(
+        {
+            "sync_name": sync_name,
+            "low": low,
+            "high": high,
+            "record": record,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _decode_dead_letter_line_with_origin(raw_line: str) -> tuple[DeadLetter, bool]:
     data = json.loads(raw_line)
     legacy = "id" not in data
@@ -279,7 +305,19 @@ class LocalDlqStore:
                 # earlier twin; otherwise the survivor is renumbered on the
                 # next read and a concurrent retry's confirmed id hits it.
                 lines = materialize_dead_letter_lines(self._read_raw(path))
-                lines.extend(json.dumps(asdict(e)) for e in entries)
+                pending = {entry.id: entry for entry in entries}
+                merged: list[str] = []
+                for line in lines:
+                    try:
+                        existing_id = json.loads(line).get("id")
+                    except (json.JSONDecodeError, AttributeError):
+                        existing_id = None
+                    replacement = pending.pop(existing_id, None)
+                    merged.append(
+                        json.dumps(asdict(replacement)) if replacement is not None else line
+                    )
+                merged.extend(json.dumps(asdict(entry)) for entry in pending.values())
+                lines = merged
                 if max_records > 0 and len(lines) > max_records:
                     lines = lines[-max_records:]
                 path.write_text("\n".join(lines) + "\n")

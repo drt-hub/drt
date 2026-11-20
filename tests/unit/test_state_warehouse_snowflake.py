@@ -128,6 +128,9 @@ class TestSnowflakeWarehouseStateStore:
         assert _is_undefined_cursor_boundary(
             MissingColumn("SQL compilation error: invalid identifier 'CURSOR_BOUNDARY'")
         )
+        assert not _is_undefined_cursor_boundary(
+            MissingColumn("SQL compilation error: invalid identifier 'SOME_OTHER_COLUMN'")
+        )
 
     def test_get_last_sync_returns_none_before_any_table_exists(self) -> None:
         with patch("drt.state.warehouse_snowflake._table_exists", return_value=False):

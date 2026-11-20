@@ -114,7 +114,8 @@ An explicit null remains a real null write (#1138).
 - **🔴 common failures:** 0 rows (the source query / `model` filters
   everything out, or `mode: incremental` already consumed the watermark —
   inspect it with `drt state show <name>`, which also covers remote
-  watermark backends; probe a value with `--cursor-value`, or start over
+  watermark backends; for a legacy/ad-hoc one-bound recovery probe use
+  `--cursor-value` (refused when `sync.backfill` is configured), or start over
   with `drt run --full-refresh` when the stored cursor is wrong rather than
   merely advanced, v0.8.4+); `{{ row.field }}`
   referencing a column the source doesn't return (use `tojson_safe` for

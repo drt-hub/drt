@@ -61,7 +61,7 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 | User wants | drt mode | Notes |
 |------------|----------|-------|
 | "Re-send everything every run" | `full` | Default. Idempotent destinations only — REST API / Slack / file outputs. |
-| "Append new rows since last run" | `incremental` + `cursor_field` | Watermark-based. `--cursor-value` overrides for backfill. |
+| "Append new rows since last run" | `incremental` + `cursor_field` | Watermark-based. `--cursor-value` is for legacy/ad-hoc one-bound recovery and is refused when `sync.backfill` is configured. |
 | "Send added/changed rows without a cursor" | `upsert` + `incremental_strategy: diff` + `upsert_key` | Postgres/Snowflake/Databricks/BigQuery sources. Needs writable `managed_schema`; same-sync runs must not overlap; `--limit` never advances the baseline. |
 | "Upsert by key" | `upsert` + `upsert_key` | Census's most common "Update" shape. |
 | "Upsert by key AND delete rows removed from source" | `mirror` + `upsert_key` | Census's "Full Sync with Deletion" / Hightouch's "Mirror" semantic. All six SQL warehouse destinations. Use `tracked` for co-written tables (not BigQuery), or pair source diff with `mirror.strategy: diff` for exact removal keys. |

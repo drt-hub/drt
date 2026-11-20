@@ -30,6 +30,7 @@ from drt.destinations.base import (
     PendingFlushCapable,
     StagedDestination,
     SyncResult,
+    ensure_windowed_backfill_destination,
 )
 from drt.destinations.lookup import (
     apply_lookups,
@@ -62,6 +63,7 @@ from drt.engine.metadata_columns import apply_metadata_columns
 from drt.engine.observer import (
     NullObserver,
     SyncObserver,
+    WindowCheckpointObserver,
     is_window_checkpoint_capable,
 )
 from drt.engine.resolver import (
@@ -78,7 +80,7 @@ from drt.sources.base import (
     is_window_capable,
 )
 from drt.state.audit_trail import AuditEntry, ComplianceAuditTrail, json_safe_audit_value
-from drt.state.dlq import DeadLetter
+from drt.state.dlq import DeadLetter, backfill_dead_letter_id
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.idempotency import (
     IdempotencyLedger,
@@ -223,6 +225,40 @@ def _build_audit_entries(
         record_key = ":".join(str(row[f]) for f in fields if f in row)
         entries.append(AuditEntry(record_key=record_key, fields=present))
     return entries
+
+
+def _dead_letter_for_record(
+    *,
+    sync_name: str,
+    record: dict[str, Any],
+    error_message: str,
+    http_status: int | None,
+    timestamp: str,
+    sync_run_id: str | None,
+    window_bounds: BackfillWindow | None,
+) -> DeadLetter:
+    """Build a stable backfill entry while preserving legacy random ids."""
+    if window_bounds is None:
+        return DeadLetter(
+            record=record,
+            error_message=error_message,
+            http_status=http_status,
+            timestamp=timestamp,
+            sync_run_id=sync_run_id,
+        )
+    return DeadLetter(
+        record=record,
+        error_message=error_message,
+        http_status=http_status,
+        timestamp=timestamp,
+        sync_run_id=sync_run_id,
+        id=backfill_dead_letter_id(
+            sync_name,
+            window_bounds[0],
+            window_bounds[1],
+            record,
+        ),
+    )
 
 
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
@@ -476,9 +512,22 @@ def run_sync(
                 "sync.backfill requires one designated checkpoint-capable observer; "
                 "compose StatePersistingObserver with CompositeObserver before extraction."
             )
-    elif state_manager is not None:
-        previous_state = state_manager.get_last_sync(sync.name)
-        if previous_state is not None and previous_state.cursor_boundary == "exclusive":
+        ensure_windowed_backfill_destination(destination, sync.destination)
+    else:
+        previous_boundary: str | None = None
+        if state_manager is not None:
+            previous_state = state_manager.get_last_sync(sync.name)
+            previous_boundary = (
+                previous_state.cursor_boundary if previous_state is not None else None
+            )
+        elif is_window_checkpoint_capable(observer):
+            # Some callers deliberately give the engine no direct StateStore and
+            # route both reads and writes through StatePersistingObserver.  The
+            # downgrade guard must consult that same capability or removing the
+            # backfill block would silently reinterpret an exclusive checkpoint.
+            assert isinstance(observer, WindowCheckpointObserver)
+            _, previous_boundary = observer.read_window_checkpoint(sync.name)
+        if previous_boundary == "exclusive":
             raise ValueError(
                 "This sync has an exclusive window checkpoint but sync.backfill was removed. "
                 "Refusing to reinterpret it with legacy cursor '>' semantics. Restore the "
@@ -974,6 +1023,24 @@ def _run_backfill_body(
             if isinstance(destination, PendingFlushCapable):
                 with _stage_ctx("destination"):
                     destination.flush_pending()
+                delivered_at = datetime.now(timezone.utc).isoformat()
+                if idempotency_ledger is not None and window_result._deferred_ledger_keys:
+                    with _stage_ctx("state"):
+                        idempotency_ledger.mark_delivered(
+                            sync.name,
+                            window_result._deferred_ledger_keys,
+                            delivered_at,
+                        )
+                if audit_trail is not None and window_result._deferred_audit_entries:
+                    with _stage_ctx("state"):
+                        audit_trail.log_delivered(
+                            sync.name,
+                            total_result.run_id,
+                            total_result.sync_run_id,
+                            sync.destination.type,
+                            window_result._deferred_audit_entries,
+                            delivered_at,
+                        )
             checkpoint_writer = getattr(observer, "checkpoint_window", None)
             if not callable(checkpoint_writer):
                 raise RuntimeError("The designated checkpoint observer is unavailable.")
@@ -1673,37 +1740,42 @@ def _run_sync_body(
                 # (drt.state.idempotency) is the same correlation
                 # `DeadLetter` construction below already relies on
                 # (result.row_errors[*].batch_index indexes into the
-                # record_batch just sent). Both writes happen here (not
-                # deferred to sync end) to keep the crash-loses-data window
-                # scoped to one batch, not the whole run — this fires on
-                # the common/success path, unlike DLQ's rare-path
-                # buffering.
+                # record_batch just sent). Ordinary destinations write both
+                # records here, keeping the crash-loses-data window scoped to
+                # one batch. A PendingFlushCapable backfill destination only
+                # queued these successes, so the window driver defers both
+                # mutations until flush_pending() acknowledges durable target
+                # acceptance.
                 needs_delivered_at = (
                     idempotency_ledger is not None
                     and any(k is not None for k in batch_idempotency_keys)
                 ) or _audit_enabled
                 if needs_delivered_at:
                     confirmed_indices = successful_indices(record_batch, result)
-                    delivered_at = datetime.now(timezone.utc).isoformat()
-
-                    if idempotency_ledger is not None:
-                        delivered_keys = [
-                            key
-                            for i, key in enumerate(batch_idempotency_keys)
-                            if key is not None and i in confirmed_indices
-                        ]
-                        if delivered_keys:
+                    delivered_keys = [
+                        key
+                        for i, key in enumerate(batch_idempotency_keys)
+                        if key is not None and i in confirmed_indices
+                    ]
+                    audit_entries = (
+                        _build_audit_entries(record_batch, confirmed_indices, audit_fields)
+                        if _audit_enabled and audit_fields is not None
+                        else []
+                    )
+                    defer_until_flush = window_bounds is not None and isinstance(
+                        destination, PendingFlushCapable
+                    )
+                    if defer_until_flush:
+                        total_result._deferred_ledger_keys.extend(delivered_keys)
+                        total_result._deferred_audit_entries.extend(audit_entries)
+                    else:
+                        delivered_at = datetime.now(timezone.utc).isoformat()
+                        if idempotency_ledger is not None and delivered_keys:
                             with _stage_ctx("state"):
                                 idempotency_ledger.mark_delivered(
                                     sync.name, delivered_keys, delivered_at
                                 )
-
-                    if _audit_enabled:
-                        assert audit_trail is not None and audit_fields is not None
-                        audit_entries = _build_audit_entries(
-                            record_batch, confirmed_indices, audit_fields
-                        )
-                        if audit_entries:
+                        if audit_trail is not None and audit_entries:
                             with _stage_ctx("state"):
                                 audit_trail.log_delivered(
                                     sync.name,
@@ -1721,12 +1793,14 @@ def _run_sync_body(
                 # only when the destination reported pinpointed per-record errors.
                 if result.row_errors:
                     dead_letters = [
-                        DeadLetter(
+                        _dead_letter_for_record(
+                            sync_name=sync.name,
                             record=record_batch[err.batch_index],
                             error_message=err.error_message,
                             http_status=err.http_status,
                             timestamp=err.timestamp,
                             sync_run_id=total_result.sync_run_id,
+                            window_bounds=window_bounds,
                         )
                         for err in result.row_errors
                         if 0 <= err.batch_index < len(record_batch)
@@ -1812,12 +1886,14 @@ def _run_sync_body(
 
         if finalize_result.row_errors:
             dead_letters = [
-                DeadLetter(
+                _dead_letter_for_record(
+                    sync_name=sync.name,
                     record=staged_records[error.batch_index],
                     error_message=error.error_message,
                     http_status=error.http_status,
                     timestamp=error.timestamp,
                     sync_run_id=total_result.sync_run_id,
+                    window_bounds=window_bounds,
                 )
                 for error in finalize_result.row_errors
                 if 0 <= error.batch_index < len(staged_records)

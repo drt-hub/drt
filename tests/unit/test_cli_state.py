@@ -74,14 +74,11 @@ class TestResetRequiresALevel:
 
 
 class TestResetRuns:
-    def test_clears_run_state(self, project: Path) -> None:
+    def test_clears_legacy_run_state_and_fallback_watermark(self, project: Path) -> None:
         result = runner.invoke(app, ["state", "reset", "users", "--runs", "--yes"])
 
         assert result.exit_code == 0
-        state = StateManager(project).get_last_sync("users")
-        assert state is not None
-        assert state.last_run_at == ""
-        assert state.last_cursor_value == "2026-01-01"
+        assert StateManager(project).get_last_sync("users") is None
 
     def test_dry_run_changes_nothing(self, project: Path) -> None:
         result = runner.invoke(app, ["state", "reset", "users", "--runs", "--dry-run", "--yes"])

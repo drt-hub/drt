@@ -845,7 +845,10 @@ def run(
     cursor_value: str = typer.Option(
         None,
         "--cursor-value",
-        help="Override cursor/watermark value for incremental syncs (backfill/recovery).",
+        help=(
+            "Override the cursor/watermark for legacy/ad-hoc one-bound recovery "
+            "(refused for sync.backfill)."
+        ),
     ),
     full_refresh: bool = typer.Option(
         False,

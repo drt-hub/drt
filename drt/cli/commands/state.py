@@ -230,19 +230,19 @@ def state_reset(
 
     if runs:
         assert state_bundle is not None
-        if (
+        preserve_exclusive_checkpoint = (
             not watermark
             and current_state is not None
-            and (
-                current_state.last_cursor_value is not None
-                or current_state.cursor_boundary is not None
-            )
-        ):
+            and current_state.cursor_boundary == "exclusive"
+        )
+        if preserve_exclusive_checkpoint:
             from drt.state.manager import SyncState
 
-            # Cursor and boundary are one semantic checkpoint. `--runs`
-            # clears the last-run metadata but deliberately preserves both;
-            # only `--watermark` may clear the pair.
+            # An exclusive boundary and its cursor are one semantic
+            # checkpoint. Legacy states have no boundary marker, so `--runs`
+            # retains its historical behavior and removes their fallback
+            # watermark together with the run metadata.
+            assert current_state is not None
             state_bundle.state.save_sync(
                 SyncState(
                     sync_name=sync_name,
@@ -258,13 +258,7 @@ def state_reset(
             removed = state_bundle.state.reset(sync_name)
         console.print(
             "[green]✓[/green] run state cleared (watermark/boundary retained)"
-            if removed
-            and not watermark
-            and current_state is not None
-            and (
-                current_state.last_cursor_value is not None
-                or current_state.cursor_boundary is not None
-            )
+            if removed and preserve_exclusive_checkpoint
             else "[green]✓[/green] run state cleared"
             if removed
             else f"[dim]  no run state recorded for '{sync_name}'.[/dim]"

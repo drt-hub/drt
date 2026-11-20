@@ -293,6 +293,9 @@ class TestBigQueryWarehouseStateStore:
         assert _is_undefined_cursor_boundary(
             MissingColumn("Unrecognized name: cursor_boundary at [1:2]")
         )
+        assert not _is_undefined_cursor_boundary(
+            MissingColumn("Unrecognized name: some_other_column at [1:2]")
+        )
 
     def test_empty_reads_and_reset_before_table_exists(self) -> None:
         store = BigQueryWarehouseStateStore(_profile())

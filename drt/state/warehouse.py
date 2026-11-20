@@ -119,6 +119,15 @@ def _is_undefined_table(exc: Exception) -> bool:
     return isinstance(exc, psycopg2.errors.UndefinedTable)
 
 
+def _is_undefined_cursor_boundary(exc: Exception) -> bool:
+    """PostgreSQL 42703 specifically for the additive marker column."""
+    import psycopg2
+
+    return isinstance(exc, psycopg2.errors.UndefinedColumn) and (
+        "cursor_boundary" in str(exc).lower()
+    )
+
+
 # Batches DlqBackend.append()/.replace()/.reconcile()'s per-entry writes into
 # bounded multi-row statements (#1121, caught in Codex review on #1120 as a
 # cross-dialect issue, not Snowflake-specific — see warehouse_snowflake.py's
@@ -217,7 +226,7 @@ class PostgresWarehouseStateStore:
                         (sync_name,),
                     )
                 except Exception as exc:
-                    if getattr(exc, "pgcode", None) != "42703":
+                    if not _is_undefined_cursor_boundary(exc):
                         raise
                     conn.rollback()
                     cur = conn.cursor()
@@ -246,7 +255,7 @@ class PostgresWarehouseStateStore:
                         _pgsql_select_all_runs().format(_qualified(self._profile, _RUNS_TABLE))
                     )
                 except Exception as exc:
-                    if getattr(exc, "pgcode", None) != "42703":
+                    if not _is_undefined_cursor_boundary(exc):
                         raise
                     conn.rollback()
                     cur = conn.cursor()

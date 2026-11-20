@@ -71,6 +71,31 @@ reached. To continue into live data, remove only `backfill.end`; keep the
 is refused because legacy incremental `>` semantics would reinterpret the saved
 boundary unsafely.
 
+## Destination support matrix
+
+Windowed backfill is fail-closed by destination. `drt validate` and the engine
+both reject a destination that has not declared the additive
+`WindowedBackfillCapable` safety capability; plugin destinations are therefore
+unsupported until their implementation opts in and proves the same contract.
+
+| Destination | v1 status | Required configuration or exclusion reason |
+|---|---|---|
+| PostgreSQL | Supported | A non-empty `destination.upsert_key`; `ON CONFLICT` makes replay keyed and synchronous. |
+| MySQL | Supported | A non-empty `destination.upsert_key`; `ON DUPLICATE KEY` makes replay keyed and synchronous. |
+| Snowflake | Supported | `destination.mode: merge` and a non-empty `upsert_key`. Insert mode is append-only. |
+| Databricks | Supported | `destination.mode: merge` and a non-empty `upsert_key`. Insert mode is append-only. |
+| BigQuery | Supported | `destination.mode: merge` and a non-empty `upsert_key`. Streaming insert mode is append-only. |
+| ClickHouse | Excluded | `upsert_key` is informational; writes remain inserts, and deduplication depends on target-engine settings drt does not verify. |
+| Elasticsearch | Excluded | Not admitted in v1; keyed API replay and row-error correlation have not completed the destination audit. |
+| Salesforce Bulk | Excluded | Failed rows currently report `batch_index=0`, so row attribution is not trustworthy. |
+| File, Parquet, Google Sheets | Excluded | Overwrite/first-write and append file semantics cannot safely replay an uncheckpointed window. |
+| S3, GCS, Azure Blob, staged upload | Excluded | Staged/object uploads are outside the v1 durable-acceptance proof. |
+| Airtable, Amplitude, Discord, email SMTP, GitHub Actions, Google Ads, HubSpot, Intercom, Jira, Klaviyo, Linear, Meta Conversions, Mixpanel, Notion, Pipedrive, REST API, SendGrid, Slack, SQS, Teams, Twilio, Zendesk | Excluded | API/message delivery has no v1 proof of keyed, synchronous, idempotent replay for every configured operation; blind creates and notifications can duplicate. |
+
+Unknown built-ins and newly installed plugins are excluded by default. The
+runtime refusal names the destination type, its reason, and the declared
+support list.
+
 ## Recovery and state safety
 
 Use `drt state reset`; hand-editing `.drt/state.json` or
@@ -98,6 +123,9 @@ the exclusive marker.
 - Backfill requires `mode: incremental`, cursor strategy, and a top-level
   `cursor_field`. Replace, mirror, diff strategy, floating-point cursors, nested
   cursor paths, and REST link-header pagination are unsupported.
+- Only the destination configurations listed as supported above may execute a
+  windowed backfill. This is checked by `drt validate` and again before source
+  extraction.
 - `--limit`, `--cursor-value`, and `--full-refresh` cannot be combined with
   `sync.backfill`.
 - Slice 3 executes backfills only through `drt run` and MCP `drt_run_sync`.

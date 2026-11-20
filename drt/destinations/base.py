@@ -14,6 +14,7 @@ from drt.config.models import DestinationConfig, SyncOptions
 if TYPE_CHECKING:
     from drt.destinations.row_errors import RowError
     from drt.engine.diff import DiffResult
+    from drt.state.audit_trail import AuditEntry
 
 
 @dataclass
@@ -104,6 +105,16 @@ class SyncResult:
     # Internal signal used by the sequential window driver.  It distinguishes
     # a fully consumed stream from an on_error=fail/contract/interruption break.
     _stream_consumed: bool = field(default=True, init=False, repr=False, compare=False)
+    # PendingFlushCapable destinations have not durably accepted a successful
+    # backfill batch until the window-boundary flush returns.  The engine keeps
+    # ledger/audit mutations here until that acknowledgement succeeds; ordinary
+    # destinations continue writing those records per batch.
+    _deferred_ledger_keys: list[str] = field(
+        default_factory=list, init=False, repr=False, compare=False
+    )
+    _deferred_audit_entries: list[AuditEntry] = field(
+        default_factory=list, init=False, repr=False, compare=False
+    )
 
     @property
     def total(self) -> int:
@@ -159,6 +170,53 @@ class PendingFlushCapable(Protocol):
     def flush_pending(self) -> None:
         """Wait for pending target acknowledgements, raising on any failure."""
         ...
+
+
+@runtime_checkable
+class WindowedBackfillCapable(Protocol):
+    """Destination whose replay behavior is safe for windowed backfill.
+
+    This is an additive capability rather than a change to the frozen
+    :class:`Destination` Protocol (ADR 0007). Destinations are unsupported by
+    default: built-ins and plugins must explicitly declare the capability and
+    may reject unsafe configuration modes with a specific reason.
+    """
+
+    @classmethod
+    def backfill_unsupported_reason(cls, config: DestinationConfig) -> str | None:
+        """Return ``None`` when ``config`` is replay-safe, otherwise why not."""
+
+        ...
+
+
+def windowed_backfill_unsupported_reason(
+    destination: object, config: DestinationConfig
+) -> str | None:
+    """Return a fail-closed windowed-backfill support decision."""
+    if not isinstance(destination, WindowedBackfillCapable):
+        return (
+            "the destination does not declare the WindowedBackfillCapable safety "
+            "capability; built-ins and plugins default to unsupported"
+        )
+    reason = destination.backfill_unsupported_reason(config)
+    if reason is not None and not isinstance(reason, str):
+        return "the destination returned an invalid windowed-backfill capability decision"
+    return reason
+
+
+def ensure_windowed_backfill_destination(destination: object, config: DestinationConfig) -> None:
+    """Raise with the destination type, reason, and declared support list."""
+    reason = windowed_backfill_unsupported_reason(destination, config)
+    if reason is None:
+        return
+
+    from drt.connectors.registry import windowed_backfill_destination_types
+
+    supported = ", ".join(windowed_backfill_destination_types()) or "none"
+    raise ValueError(
+        f"Windowed backfill does not support destination type {config.type!r}: "
+        f"{reason}. Supported destination types: {supported}."
+    )
 
 
 @dataclass

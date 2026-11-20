@@ -727,3 +727,80 @@ narrower than the final ADR design.
 Slice 4 still owns `run_results.json` `windows[]`, window OTel spans, alert
 wording, aggregate history backfill summaries, and CLI
 `--backfill-start`/`--backfill-end`. This amendment does not pull them forward.
+
+## Amendment 2026-11-19 (slice 3 round 3)
+
+The maintainer delegated the following round-3 decisions after two further
+adversarial reviews. They refine and supersede the slice-3 amendment where
+necessary.
+
+1. **Pending acknowledgement precedes delivery bookkeeping.** For a
+   `PendingFlushCapable` destination, successful batch keys and compliance
+   audit entries remain in memory for the current window. The engine calls
+   `flush_pending()` first, and writes the idempotency ledger and compliance
+   delivery log only after that acknowledgement succeeds. A failed flush
+   therefore leaves no false delivered key; retry re-sends the row. A
+   destination without this capability retains the established per-batch
+   ledger/audit behavior.
+2. **Destination support is an explicit, conservative allowlist.** The frozen
+   `Destination` Protocol is unchanged. An additive
+   `WindowedBackfillCapable.backfill_unsupported_reason(config)` declaration
+   admits a destination configuration; absence means unsupported for both
+   built-ins and plugins. `drt validate` and the engine before extraction both
+   refuse with the destination type, reason, and support list. The v1 proven
+   set is PostgreSQL and MySQL with a non-empty `upsert_key`, plus Snowflake,
+   Databricks, and BigQuery in keyed `merge` mode. PostgreSQL/MySQL writes are
+   synchronous keyed upserts; the three warehouse MERGE paths are synchronous
+   and keyed. Their append/insert variants are not admitted.
+3. **Every other built-in is excluded until proven.** ClickHouse remains an
+   insert path: its `upsert_key` is informational and server-side insert
+   deduplication depends on table settings drt neither verifies nor configures.
+   Salesforce Bulk is excluded because its current failure correlation always
+   uses `batch_index=0`. File, JSON/JSONL/CSV, Parquet, Google Sheets, object
+   storage, and staged-upload destinations are excluded because overwrite,
+   first-write, append, or staged-promotion behavior is unsafe to replay as a
+   window transaction. Elasticsearch and all remaining API/message
+   destinations are conservatively excluded because keyed synchronous replay
+   has not been proven for every operation; blind POST/create and notification
+   delivery can duplicate. The complete built-in matrix is maintained in
+   `docs/guides/windowed-backfill.md`; a registry inventory test makes a new
+   destination default to unsupported.
+4. **MCP matches CLI safety composition.** `drt_run_sync` installs a
+   `DlqObserver` when `sync.dlq.enabled` so `on_error: skip` cannot checkpoint
+   past an unpersisted failed row. MCP returns structured `{"error": ...}`
+   refusals for `dry_run`, `limit`, `cursor_value`, and `full_refresh` on a
+   backfill before credentials, connectors, or state are instantiated.
+5. **The downgrade marker is read through the owning capability.** When the
+   engine has no direct `state_manager` but the designated checkpoint observer
+   owns state, a non-backfill run reads `cursor_boundary` through
+   `read_window_checkpoint()`. An `exclusive` marker still refuses legacy `>`
+   execution before extraction.
+6. **Backfill DLQ identity is deterministic and append is idempotent.** A
+   backfill dead letter id hashes the sync name, canonical window bounds, and
+   destination-facing record content. Local, object-store, and warehouse DLQ
+   appends replace/upsert an existing id rather than append a duplicate. A
+   checkpoint failure followed by a window retry therefore leaves one retryable
+   entry. Non-backfill dead letters keep their legacy random UUID identity.
+7. **A committed atomic replacement never reports failure afterward.** Local
+   atomic JSON writes still fsync the file, replace it, and attempt the POSIX
+   directory fsync. Directory open/fsync/close errors after `os.replace` are
+   tolerated because Windows and some filesystems do not support that operation
+   and the replacement has already committed.
+8. **`state reset --runs` preserves only exclusive checkpoints.** The command
+   retains `(last_cursor_value, cursor_boundary)` only when the boundary is
+   exactly `exclusive`. A legacy state whose boundary is absent follows the
+   pre-backfill behavior: its run entry and fallback watermark are removed.
+9. **Only the DLQ can block a boundary flush.** Registered and other composite
+   observers receive window lifecycle events but are never called through
+   `flush_window`; a same-named method cannot veto checkpoint progress. The
+   designated `DlqObserver` alone performs the required strict pre-checkpoint
+   flush.
+10. **Warehouse legacy-column fallback remains error-specific.** PostgreSQL
+    falls back only for `psycopg2.errors.UndefinedColumn` (SQLSTATE 42703) whose
+    diagnostic names `cursor_boundary`. BigQuery, Snowflake, and Databricks
+    retain the slice-3 review's equivalent code/classification and marker-name
+    checks. An undefined different column, permission error, auth failure, or
+    transient failure propagates.
+11. **`--cursor-value` is not the windowed-backfill interface.** README, CLI,
+    LLM context, and generated skills call it a legacy/ad-hoc one-bound recovery
+    override and state that a sync declaring `sync.backfill` refuses it.

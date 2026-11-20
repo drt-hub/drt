@@ -62,6 +62,27 @@ def server(project_dir: Path) -> FastMCP:
     return create_server(project_dir)
 
 
+def _write_backfill_sync(project_dir: Path, *, dlq: bool = False) -> None:
+    dlq_config = "  on_error: skip\n  dlq:\n    enabled: true\n    max_records: 25\n" if dlq else ""
+    (project_dir / "syncs" / "backfill.yml").write_text(
+        "name: backfill\n"
+        "model: SELECT id FROM events\n"
+        "sync:\n"
+        "  mode: incremental\n"
+        "  cursor_field: id\n"
+        "  backfill:\n"
+        "    window: 10\n"
+        "    start: 0\n"
+        f"{dlq_config}"
+        "destination:\n"
+        "  type: postgres\n"
+        "  host: localhost\n"
+        "  dbname: test\n"
+        "  table: events\n"
+        "  upsert_key: [id]\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Server creation
 # ---------------------------------------------------------------------------
@@ -1201,6 +1222,80 @@ async def test_run_sync_limit_rejected_for_mirror_mode(tmp_path: Path, monkeypat
     result = await call(srv, "drt_run_sync", sync_name="mirror_sync", limit=5)
     assert "error" in result
     assert "mirror" in result["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"dry_run": True}, "dry_run"),
+        ({"limit": 1}, "limit"),
+        ({"cursor_value": "10"}, "cursor_value"),
+        ({"full_refresh": True}, "full_refresh"),
+    ],
+)
+async def test_run_sync_refuses_backfill_incompatible_options_before_setup(
+    project_dir: Path,
+    monkeypatch: Any,
+    arguments: dict[str, Any],
+    expected: str,
+) -> None:
+    """Slice-3 refusals happen before credentials, connectors, or state stores."""
+    _write_backfill_sync(project_dir)
+
+    def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("runtime setup must not run for a refused backfill")
+
+    monkeypatch.setattr("drt.config.credentials.load_profile", unexpected)
+    monkeypatch.setattr("drt.cli.main._get_source", unexpected)
+    monkeypatch.setattr("drt.cli.main._get_destination", unexpected)
+    monkeypatch.setattr("drt.state.factory.build_state_bundle", unexpected)
+
+    result = await call(
+        create_server(project_dir),
+        "drt_run_sync",
+        sync_name="backfill",
+        **arguments,
+    )
+
+    assert expected in result["error"]
+    assert "sync.backfill" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_backfill_with_skip_wires_dlq_observer(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """MCP must persist pinpointed skipped rows just like the CLI composition."""
+    from drt.config.parser import load_project
+    from drt.engine.sync import SyncResult
+    from drt.state.dlq import DeadLetter
+    from drt.state.factory import build_state_bundle
+
+    _write_backfill_sync(project_dir, dlq=True)
+
+    def fake_run_sync(*_args: Any, **kwargs: Any) -> SyncResult:
+        observer = kwargs["observer"]
+        observer.on_records_failed(
+            "backfill",
+            [DeadLetter(record={"id": 7}, error_message="destination rejected row")],
+        )
+        observer.on_sync_ended("backfill")
+        result = SyncResult()
+        result.failed = 1
+        result.skipped = 1
+        return result
+
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+
+    result = await call(create_server(project_dir), "drt_run_sync", sync_name="backfill")
+
+    queue = build_state_bundle(load_project(project_dir), project_dir)
+    assert result["failed"] == 1
+    assert queue.dlq.read("backfill")[0].record == {"id": 7}
 
 
 # ---------------------------------------------------------------------------

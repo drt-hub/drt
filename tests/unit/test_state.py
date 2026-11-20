@@ -73,6 +73,41 @@ def test_local_state_save_replaces_an_fsynced_temp_file(tmp_path: Path) -> None:
     assert fsync.call_count >= 1
 
 
+def test_local_state_save_ignores_unsupported_directory_fsync(tmp_path: Path) -> None:
+    from drt.state import _atomic
+
+    real_fsync = _atomic.os.fsync
+    calls = 0
+
+    def fail_directory_fsync(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError("directory fsync is unsupported")
+        real_fsync(fd)
+
+    with patch("drt.state._atomic.os.fsync", side_effect=fail_directory_fsync):
+        StateManager(tmp_path).save_sync(SyncState("s", "now", 1, "success"))
+
+    assert StateManager(tmp_path).get_last_sync("s") is not None
+
+
+def test_local_state_save_ignores_unsupported_directory_open(tmp_path: Path) -> None:
+    from drt.state import _atomic
+
+    real_open = _atomic.os.open
+
+    def fail_directory_open(path: object, flags: int, mode: int = 0o777) -> int:
+        if Path(path) == tmp_path / ".drt" and flags == _atomic.os.O_RDONLY:
+            raise PermissionError("directory open is unsupported")
+        return real_open(path, flags, mode)
+
+    with patch("drt.state._atomic.os.open", side_effect=fail_directory_open):
+        StateManager(tmp_path).save_sync(SyncState("s", "now", 1, "success"))
+
+    assert StateManager(tmp_path).get_last_sync("s") is not None
+
+
 class TestReset:
     """#776: `drt state reset --runs` clears one sync's recorded run state.
 

@@ -665,11 +665,15 @@ class CompositeObserver:
         return self._checkpoint_observer.read_window_checkpoint(sync_name)
 
     def flush_window(self, sync_name: str) -> None:
-        """Flush boundary-aware children; unlike normal events, failures propagate."""
+        """Flush the designated DLQ observer before a window checkpoint.
+
+        ``flush_window`` is not a general observer event.  A registered audit
+        or metrics observer must never gain veto power over durable source
+        progress merely by exposing a same-named method.
+        """
         for obs in self._observers:
-            method = getattr(obs, "flush_window", None)
-            if callable(method):
-                method(sync_name)
+            if isinstance(obs, DlqObserver):
+                obs.flush_window(sync_name)
 
 
 def is_window_checkpoint_capable(observer: object) -> bool:

@@ -385,7 +385,14 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
                 try:
                     body, token = self._client.read_for_update(key)
                     combined = self._decode(body)
-                    combined.extend(entries)
+                    positions = {entry.id: index for index, entry in enumerate(combined)}
+                    for entry in entries:
+                        index = positions.get(entry.id)
+                        if index is None:
+                            positions[entry.id] = len(combined)
+                            combined.append(entry)
+                        else:
+                            combined[index] = entry
                     if max_records > 0 and len(combined) > max_records:
                         combined = combined[-max_records:]
                     last_depth = len(combined)

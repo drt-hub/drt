@@ -21,12 +21,14 @@ from drt.destinations.row_errors import RowError
 from drt.engine.observer import (
     CompositeObserver,
     DlqObserver,
+    NullObserver,
     StatePersistingObserver,
     is_window_checkpoint_capable,
 )
 from drt.engine.plan import unsupported_reason
 from drt.engine.sync import run_sync as engine_run_sync
 from drt.sources.sqlite import SQLiteSource
+from drt.state.dlq import LocalDlqStore
 from drt.state.history import HistoryEntry
 from drt.state.manager import LocalStateManager, SyncState
 from drt.state.watermark import LocalWatermarkStorage
@@ -122,6 +124,10 @@ class RecordingDestination:
         self.calls: list[list[dict[str, Any]]] = []
         self.fail_call = fail_call
         self.failed_rows = failed_rows
+
+    @classmethod
+    def backfill_unsupported_reason(cls, config: DestinationConfig) -> str | None:
+        return None
 
     def load(
         self,
@@ -362,6 +368,30 @@ def test_exclusive_marker_refuses_legacy_execution_before_extract(tmp_path: Path
     assert source.extract_calls == 0
 
 
+def test_observer_only_exclusive_marker_refuses_legacy_execution_before_extract(
+    tmp_path: Path,
+) -> None:
+    state = MemoryState(
+        SyncState("events", "old", 1, "success", last_cursor_value="3", cursor_boundary="exclusive")
+    )
+    sync = _sync()
+    sync.sync.backfill = None
+    source = WindowSource([])
+
+    with pytest.raises(ValueError, match="exclusive window checkpoint.*backfill was removed"):
+        run_sync(
+            sync,
+            source,
+            RecordingDestination(),
+            _profile(),
+            tmp_path,
+            state_manager=None,
+            observer=_observer(state),
+        )
+
+    assert source.extract_calls == 0
+
+
 def test_runs_only_reset_then_backfill_removal_still_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -411,6 +441,26 @@ def test_null_observer_and_dry_run_are_refused_before_extraction(tmp_path: Path)
             tmp_path,
             dry_run=True,
         )
+    assert source.windows == []
+
+
+def test_unsupported_destination_is_refused_before_extraction(tmp_path: Path) -> None:
+    source = WindowSource([])
+    state = MemoryState()
+
+    with pytest.raises(
+        ValueError,
+        match=r"destination type 'rest_api'.*Supported destination types",
+    ):
+        run_sync(
+            _sync(),
+            source,
+            object(),
+            _profile(),
+            tmp_path,
+            observer=_observer(state),
+        )
+
     assert source.windows == []
 
 
@@ -708,6 +758,33 @@ def test_only_designated_observer_checkpoints_but_all_receive_events(tmp_path: P
     assert primary.started == extra.started == 3
 
 
+def test_extra_observer_flush_window_cannot_block_checkpoint(tmp_path: Path) -> None:
+    class ExtraObserver(NullObserver):
+        def __init__(self) -> None:
+            self.flush_calls = 0
+
+        def flush_window(self, sync_name: str) -> None:
+            self.flush_calls += 1
+            raise RuntimeError("extra observer must not veto progress")
+
+    state = MemoryState()
+    checkpoint = StatePersistingObserver(state, None)
+    extra = ExtraObserver()
+    observer = CompositeObserver([checkpoint, extra], checkpoint_observer=checkpoint)
+
+    result = run_sync(
+        _sync(end=3),
+        WindowSource([]),
+        RecordingDestination(),
+        _profile(),
+        tmp_path,
+        observer=observer,
+    )
+
+    assert result.backfill is not None and result.backfill["windows_completed"] == 1
+    assert extra.flush_calls == 0
+
+
 def test_async_or_incompatible_checkpoint_capability_is_refused() -> None:
     class AsyncCheckpoint:
         async def checkpoint_window(self, *args: Any) -> str:
@@ -813,7 +890,7 @@ def test_dlq_append_failure_is_fatal_before_checkpoint(tmp_path: Path) -> None:
     assert state.value is None
 
 
-def test_staged_partial_success_checkpoints_on_skip_and_dlqs_failed_row(tmp_path: Path) -> None:
+def test_staged_destination_is_excluded_before_staging(tmp_path: Path) -> None:
     class Staged:
         def __init__(self) -> None:
             self.records: list[dict[str, Any]] = []
@@ -839,29 +916,24 @@ def test_staged_partial_success_checkpoints_on_skip_and_dlqs_failed_row(tmp_path
                 )
             return SyncResult()
 
-    class RecordingDlq:
-        def __init__(self) -> None:
-            self.entries: list[Any] = []
-
-        def append(self, sync_name: str, entries: list[Any], *, max_records: int = 10_000) -> int:
-            self.entries.extend(entries)
-            return len(self.entries)
-
     state = MemoryState()
-    dlq = RecordingDlq()
     checkpoint = StatePersistingObserver(state, None)
-    observer = CompositeObserver([checkpoint, DlqObserver(dlq)], checkpoint_observer=checkpoint)
-    result = run_sync(
-        _sync(on_error="skip"),
-        WindowSource([{"cursor": 0}, {"cursor": 1}, {"cursor": 2}]),
-        Staged(),
-        _profile(),
-        tmp_path,
-        observer=observer,
-    )
-    assert result.failed == 1
-    assert state.value is not None and state.value.last_cursor_value == "9"
-    assert len(dlq.entries) == 1
+    observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
+    destination = Staged()
+
+    with pytest.raises(ValueError, match="does not declare"):
+        run_sync(
+            _sync(on_error="skip"),
+            WindowSource([{"cursor": 0}, {"cursor": 1}, {"cursor": 2}]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+    assert destination.records == []
+    assert destination.finalize_calls == 0
+    assert state.value is None
 
 
 def test_async_destination_flush_failure_prevents_checkpoint(tmp_path: Path) -> None:
@@ -880,6 +952,156 @@ def test_async_destination_flush_failure_prevents_checkpoint(tmp_path: Path) -> 
             observer=_observer(state),
         )
     assert state.value is None
+
+
+def test_async_flush_failure_defers_ledger_and_audit_and_retry_resends(
+    tmp_path: Path,
+) -> None:
+    class AsyncDestination(RecordingDestination):
+        def __init__(self) -> None:
+            super().__init__()
+            self.flush_calls = 0
+
+        def flush_pending(self) -> None:
+            self.flush_calls += 1
+            if self.flush_calls == 1:
+                raise RuntimeError("async acknowledgement failed")
+
+    class Ledger:
+        def __init__(self) -> None:
+            self.delivered: set[str] = set()
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return keys & self.delivered
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            self.delivered.update(keys)
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            return 0
+
+    class Audit:
+        def __init__(self) -> None:
+            self.logged = 0
+
+        def log_delivered(
+            self,
+            sync_name: str,
+            run_id: str | None,
+            sync_run_id: str | None,
+            destination_type: str,
+            entries: list[Any],
+            delivered_at: str,
+        ) -> None:
+            self.logged += len(entries)
+
+        def prune(self, sync_name: str, retain_days: int) -> int:
+            return 0
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    destination = AsyncDestination()
+    state = MemoryState()
+    ledger = Ledger()
+    audit = Audit()
+
+    with pytest.raises(RuntimeError, match="async acknowledgement failed"):
+        run_sync(
+            sync,
+            WindowSource([{"cursor": 1}]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(state),
+            idempotency_ledger=ledger,
+            audit_trail=audit,
+            audit_fields=["cursor"],
+        )
+
+    assert destination.calls == [[{"cursor": 1}]]
+    assert ledger.delivered == set()
+    assert audit.logged == 0
+
+    result = run_sync(
+        sync,
+        WindowSource([{"cursor": 1}]),
+        destination,
+        _profile(),
+        tmp_path,
+        observer=_observer(state),
+        idempotency_ledger=ledger,
+        audit_trail=audit,
+        audit_fields=["cursor"],
+    )
+
+    assert result.success == 1
+    assert destination.calls == [[{"cursor": 1}], [{"cursor": 1}]]
+    assert ledger.delivered == {"1"}
+    assert audit.logged == 1
+
+
+def test_checkpoint_failure_then_retry_keeps_one_backfill_dead_letter(tmp_path: Path) -> None:
+    class RowFailingDestination(RecordingDestination):
+        def load(
+            self,
+            records: list[dict[str, Any]],
+            config: DestinationConfig,
+            sync_options: SyncOptions,
+        ) -> SyncResult:
+            return SyncResult(
+                failed=len(records),
+                row_errors=[RowError(0, "row", None, "rejected")],
+            )
+
+    class FailingCheckpoint(StatePersistingObserver):
+        def checkpoint_window(
+            self,
+            sync_name: str,
+            started_at: str,
+            result: SyncResult,
+            cursor_field: str,
+            high: str | int,
+        ) -> str:
+            raise RuntimeError("checkpoint unavailable")
+
+    store = LocalDlqStore(tmp_path)
+    state = MemoryState()
+    failing_checkpoint = FailingCheckpoint(state, None)
+    first_observer = CompositeObserver(
+        [failing_checkpoint, DlqObserver(store)], checkpoint_observer=failing_checkpoint
+    )
+    sync = _sync(end=3, on_error="skip")
+    source_rows = [{"cursor": 1, "payload": "same"}]
+
+    with pytest.raises(RuntimeError, match="checkpoint unavailable"):
+        run_sync(
+            sync,
+            WindowSource(source_rows),
+            RowFailingDestination(),
+            _profile(),
+            tmp_path,
+            observer=first_observer,
+        )
+
+    first = store.read("events")
+    assert len(first) == 1
+
+    checkpoint = StatePersistingObserver(state, None)
+    retry_observer = CompositeObserver(
+        [checkpoint, DlqObserver(store)], checkpoint_observer=checkpoint
+    )
+    run_sync(
+        sync,
+        WindowSource(source_rows),
+        RowFailingDestination(),
+        _profile(),
+        tmp_path,
+        observer=retry_observer,
+    )
+
+    retried = store.read("events")
+    assert len(retried) == 1
+    assert retried[0].id == first[0].id
 
 
 def test_interrupted_backfill_history_and_state_are_partial(tmp_path: Path) -> None:

@@ -113,6 +113,9 @@ class TestDatabricksWarehouseStateStore:
         assert _is_undefined_cursor_boundary(
             server_error("[UNRESOLVED_COLUMN.WITH_SUGGESTION] cursor_boundary; SQLSTATE: 42703")
         )
+        assert not _is_undefined_cursor_boundary(
+            server_error("[UNRESOLVED_COLUMN.WITH_SUGGESTION] some_other_column; SQLSTATE: 42703")
+        )
 
     def test_get_last_sync_returns_none_before_any_table_exists(self) -> None:
         with patch("drt.state.warehouse_databricks._table_exists", return_value=False):

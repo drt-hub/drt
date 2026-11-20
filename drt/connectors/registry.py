@@ -133,6 +133,24 @@ def registered_destination_types() -> tuple[str, ...]:
     return tuple(sorted(_destination_registry))
 
 
+def windowed_backfill_destination_types() -> tuple[str, ...]:
+    """Destination types that explicitly declare the backfill capability.
+
+    This is the support-list portion of the fail-closed diagnostic. A listed
+    connector may still reject a particular config (for example an append-only
+    warehouse mode); callers must ask its capability method for the final
+    decision.
+    """
+    _ensure_plugins_loaded()
+    return tuple(
+        sorted(
+            type_name
+            for type_name, (_, destination_class) in _destination_registry.items()
+            if callable(getattr(destination_class, "backfill_unsupported_reason", None))
+        )
+    )
+
+
 def registered_source_types() -> tuple[str, ...]:
     """Every source type the registry can resolve, sorted (#997).
 

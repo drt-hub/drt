@@ -201,7 +201,7 @@ drt run --verbose           # show row-level error details
 drt run --output json       # structured JSON output for CI/scripting
 drt run --log-format json   # structured JSON logging to stderr
 drt run --profile prd       # override profile (or DRT_PROFILE env var)
-drt run --cursor-value '…'  # override watermark cursor for backfill
+drt run --cursor-value '…'  # legacy/ad-hoc one-bound recovery; refused by sync.backfill
 drt run --force-guards      # explicitly override a tripped run-time delete guard
 drt test                    # run post-sync validation tests
 drt test --select <name>    # test a specific sync
