@@ -730,6 +730,30 @@ def test_dlq_observer_swallows_store_errors(caplog: pytest.LogCaptureFixture) ->
     assert any("DLQ persist failure" in r.message for r in caplog.records)
 
 
+def test_dlq_observer_strict_local_append_keeps_old_file_on_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = DlqStore(tmp_path)
+    store.append("s", [_dead(1)])
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    original = path.read_bytes()
+    observer = DlqObserver(store)
+    observer.on_records_failed("s", [_dead(2)])
+
+    def fail_fsync(_fd: int) -> None:
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr("drt.state.dlq.os.fsync", fail_fsync)
+
+    with pytest.raises(RuntimeError, match="injected fsync failure"):
+        observer.flush_window("s")
+
+    assert path.read_bytes() == original
+    assert [entry.record["id"] for entry in store.read("s")] == [1]
+    assert [entry.record["id"] for entry in observer._buffer["s"]] == [2]
+    assert list(path.parent.glob(".s.jsonl.*")) == []
+
+
 def test_dlq_observer_flushes_only_buffered_failures_on_completion(tmp_path: Path) -> None:
     store = DlqStore(tmp_path)
     obs = DlqObserver(store)

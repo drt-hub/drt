@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import threading
 import uuid
 from collections.abc import Collection, Iterable, Mapping
@@ -282,6 +284,47 @@ class LocalDlqStore:
 
     # -- writes -------------------------------------------------------------
 
+    def _merge_lines(
+        self, path: Path, entries: list[DeadLetter], max_records: int
+    ) -> list[str]:
+        # Persist unique ids (#1147) before the FIFO cap can evict an
+        # earlier twin; otherwise the survivor is renumbered on the next
+        # read and a concurrent retry's confirmed id hits it.
+        lines = materialize_dead_letter_lines(self._read_raw(path))
+        pending = {entry.id: entry for entry in entries}
+        merged: list[str] = []
+        for line in lines:
+            try:
+                existing_id = json.loads(line).get("id")
+            except (json.JSONDecodeError, AttributeError):
+                existing_id = None
+            replacement = pending.pop(existing_id, None)
+            merged.append(json.dumps(asdict(replacement)) if replacement is not None else line)
+        merged.extend(json.dumps(asdict(entry)) for entry in pending.values())
+        if max_records > 0 and len(merged) > max_records:
+            return merged[-max_records:]
+        return merged
+
+    @staticmethod
+    def _write_lines_strict(path: Path, lines: list[str]) -> None:
+        """Durably replace one queue using a same-directory temporary file."""
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write("\n".join(lines) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
     def append(
         self,
         sync_name: str,
@@ -301,26 +344,26 @@ class LocalDlqStore:
         with advisory_lock(path):
             with self._lock:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                # Persist unique ids (#1147) before the FIFO cap can evict an
-                # earlier twin; otherwise the survivor is renumbered on the
-                # next read and a concurrent retry's confirmed id hits it.
-                lines = materialize_dead_letter_lines(self._read_raw(path))
-                pending = {entry.id: entry for entry in entries}
-                merged: list[str] = []
-                for line in lines:
-                    try:
-                        existing_id = json.loads(line).get("id")
-                    except (json.JSONDecodeError, AttributeError):
-                        existing_id = None
-                    replacement = pending.pop(existing_id, None)
-                    merged.append(
-                        json.dumps(asdict(replacement)) if replacement is not None else line
-                    )
-                merged.extend(json.dumps(asdict(entry)) for entry in pending.values())
-                lines = merged
-                if max_records > 0 and len(lines) > max_records:
-                    lines = lines[-max_records:]
+                lines = self._merge_lines(path, entries, max_records)
                 path.write_text("\n".join(lines) + "\n")
+                return len(lines)
+
+    def _append_strict(
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+    ) -> int:
+        """Durably append or raise before a backfill window checkpoint."""
+        if not entries:
+            return self.depth(sync_name)
+        path = self._path(sync_name)
+        with advisory_lock(path):
+            with self._lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                lines = self._merge_lines(path, entries, max_records)
+                self._write_lines_strict(path, lines)
                 return len(lines)
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:

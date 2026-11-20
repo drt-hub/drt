@@ -513,6 +513,9 @@ def run_sync(
                 "compose StatePersistingObserver with CompositeObserver before extraction."
             )
         ensure_windowed_backfill_destination(destination, sync.destination)
+        validate_backfill_target = getattr(destination, "validate_backfill_target", None)
+        if callable(validate_backfill_target):
+            validate_backfill_target(sync.destination)
     else:
         previous_boundary: str | None = None
         if state_manager is not None:
@@ -1485,12 +1488,14 @@ def _run_sync_body(
                     observer.on_records_failed(
                         sync.name,
                         [
-                            DeadLetter(
+                            _dead_letter_for_record(
+                                sync_name=sync.name,
                                 record=record_batch[error.batch_index],
                                 error_message=error.error_message,
                                 http_status=error.http_status,
                                 timestamp=error.timestamp,
                                 sync_run_id=total_result.sync_run_id,
+                                window_bounds=window_bounds,
                             )
                             for error in range_errors
                         ],

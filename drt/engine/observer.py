@@ -772,7 +772,11 @@ class DlqObserver:
             return
         try:
             strict_append = getattr(self._store, "_append_strict", None)
-            if strict and callable(strict_append):
+            if strict:
+                if not callable(strict_append):
+                    raise RuntimeError(
+                        f"{type(self._store).__name__} does not support durable DLQ append"
+                    )
                 strict_append(sync_name, dead_letters, max_records=self._max_records)
             else:
                 self._store.append(sync_name, dead_letters, max_records=self._max_records)

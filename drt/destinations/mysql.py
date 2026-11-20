@@ -103,6 +103,15 @@ class MySQLDestination(BaseSqlDestination):
             return "destination.upsert_key must contain at least one column"
         return None
 
+    def validate_backfill_target(self, config: DestinationConfig) -> None:
+        """Require the configured key to be enforced before source extraction."""
+        assert isinstance(config, MySQLDestinationConfig)
+        conn = self._connect(config)
+        try:
+            self._managed_validate_upsert_constraint(conn.cursor(), config, config.upsert_key)
+        finally:
+            conn.close()
+
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
 

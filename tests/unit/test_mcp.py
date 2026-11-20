@@ -1803,6 +1803,71 @@ async def test_state_reset_watermark_level(server: FastMCP, project_dir: Path) -
 
 
 @pytest.mark.asyncio
+async def test_state_reset_runs_preserves_exclusive_checkpoint_pair(
+    server: FastMCP, project_dir: Path
+) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    manager = StateManager(project_dir)
+    manager.save_sync(
+        SyncState(
+            "notify",
+            "2026-01-01T00:00:00Z",
+            42,
+            "partial",
+            last_cursor_value="30",
+            cursor_boundary="exclusive",
+        )
+    )
+
+    await call(server, "drt_state_reset", sync_name="notify", runs=True)
+
+    state = manager.get_last_sync("notify")
+    assert state is not None
+    assert (state.last_cursor_value, state.cursor_boundary) == ("30", "exclusive")
+    assert (state.last_run_at, state.records_synced, state.status) == ("", 0, "success")
+
+
+@pytest.mark.asyncio
+async def test_state_reset_watermark_clears_storage_and_fallback_pair(
+    project_dir: Path,
+) -> None:
+    from drt.state.manager import StateManager, SyncState
+    from drt.state.watermark import LocalWatermarkStorage
+
+    sync_path = project_dir / "syncs" / "notify.yml"
+    sync_path.write_text(
+        sync_path.read_text()
+        + "sync:\n"
+        + "  mode: incremental\n"
+        + "  cursor_field: id\n"
+        + "  watermark:\n"
+        + "    storage: local\n"
+    )
+    manager = StateManager(project_dir)
+    manager.save_sync(
+        SyncState(
+            "notify",
+            "2026-01-01T00:00:00Z",
+            42,
+            "partial",
+            last_cursor_value="30",
+            cursor_boundary="exclusive",
+        )
+    )
+    storage = LocalWatermarkStorage(project_dir)
+    storage.save("notify", "30")
+    server = create_server(project_dir)
+
+    await call(server, "drt_state_reset", sync_name="notify", watermark=True)
+
+    state = manager.get_last_sync("notify")
+    assert storage.get("notify") is None
+    assert state is not None
+    assert (state.last_cursor_value, state.cursor_boundary) == (None, None)
+
+
+@pytest.mark.asyncio
 async def test_state_reset_tracked_mirror_warns(server: FastMCP, project_dir: Path) -> None:
     """An agent has no help text, so the re-baseline consequence has to be in
     the response itself (#686)."""

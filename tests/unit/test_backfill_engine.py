@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -17,6 +18,7 @@ from drt.cli.main import app
 from drt.config.credentials import BigQueryProfile, RestApiProfile, SQLiteProfile
 from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.base import SyncResult
+from drt.destinations.mysql import MySQLDestination
 from drt.destinations.row_errors import RowError
 from drt.engine.observer import (
     CompositeObserver,
@@ -261,6 +263,52 @@ def test_failure_resumes_at_last_completed_window(tmp_path: Path) -> None:
     assert source.windows[-2:] == [(3, 6), (6, 9)]
     assert result.backfill is not None and result.backfill["windows_completed"] == 2
     assert len(history.entries) == 2
+
+
+def test_mysql_backfill_retry_without_unique_index_is_refused_before_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync = SyncConfig.model_validate(
+        {
+            "name": "events",
+            "model": "events",
+            "destination": {
+                "type": "mysql",
+                "host": "localhost",
+                "dbname": "test",
+                "table": "events",
+                "upsert_key": ["id"],
+            },
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "cursor",
+                "backfill": {"window": 3, "start": 0, "end": 9},
+            },
+        }
+    )
+    state = MemoryState(
+        SyncState("events", "old", 3, "partial", "", "3", "exclusive")
+    )
+    source = WindowSource([{"cursor": 3, "id": 1}])
+    connection = MagicMock()
+    connection.cursor.return_value.fetchall.return_value = []
+    destination = MySQLDestination()
+    monkeypatch.setattr(destination, "_connect", lambda _config: connection)
+
+    with pytest.raises(ValueError, match="PRIMARY or UNIQUE"):
+        run_sync(
+            sync,
+            source,
+            destination,
+            _profile(),
+            tmp_path,
+            state_manager=state,
+            observer=_observer(state),
+        )
+
+    assert source.extract_calls == 0
+    assert source.windows == []
+    connection.close.assert_called_once_with()
 
 
 @pytest.mark.parametrize(("on_error", "checkpoint"), [("skip", "9"), ("fail", None)])
@@ -717,6 +765,40 @@ def test_null_cursor_fails_window_even_with_on_error_skip(tmp_path: Path) -> Non
     assert result.failed == 1
     assert result.skipped == 0
     assert result.backfill is not None and result.backfill["failed_window"] == 0
+
+
+def test_same_null_cursor_violation_across_runs_has_one_dead_letter(tmp_path: Path) -> None:
+    class MissingCursorSource(WindowSource):
+        def extract_window(
+            self,
+            query: str,
+            profile: RestApiProfile,
+            low: str | int,
+            high: str | int,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            yield {"payload": "missing cursor"}
+
+    store = LocalDlqStore(tmp_path)
+    state = MemoryState()
+    for _ in range(2):
+        checkpoint = StatePersistingObserver(state, None)
+        observer = CompositeObserver(
+            [checkpoint, DlqObserver(store)], checkpoint_observer=checkpoint
+        )
+        run_sync(
+            _sync(on_error="skip"),
+            MissingCursorSource([]),
+            RecordingDestination(),
+            _profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+    entries = store.read("events")
+    assert len(entries) == 1
+    assert entries[0].record == {"payload": "missing cursor"}
 
 
 def test_only_designated_observer_checkpoints_but_all_receive_events(tmp_path: Path) -> None:

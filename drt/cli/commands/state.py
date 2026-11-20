@@ -196,71 +196,41 @@ def state_reset(
         )
         state_bundle = build_state_bundle(project_config, project)
 
-    current_state = (
-        state_bundle.state.get_last_sync(sync_name) if state_bundle is not None else None
-    )
+    reset_result = None
+    if state_bundle is not None:
+        from drt.config.parser import load_syncs
+        from drt.state.reset import reset_watermark_and_runs
+
+        storages = []
+        if watermark:
+            for sync in load_syncs(project / "syncs"):
+                if sync.name == sync_name:
+                    storage = get_watermark_storage(sync, project)
+                    if storage is not None:
+                        storages.append(storage)
+        reset_result = reset_watermark_and_runs(
+            state_bundle.state,
+            sync_name,
+            watermark_storages=storages,
+            watermark=watermark,
+            runs=runs,
+        )
 
     if watermark:
-        assert state_bundle is not None
-        cleared = False
-        # The configured backend, when the sync declares one.
-        from drt.config.parser import load_syncs
-
-        for s in load_syncs(project / "syncs"):
-            if s.name != sync_name:
-                continue
-            storage = get_watermark_storage(s, project)
-            if storage is not None:
-                storage.delete(sync_name)
-                cleared = True
-        if current_state is not None and (
-            current_state.last_cursor_value is not None or current_state.cursor_boundary is not None
-        ):
-            from dataclasses import replace
-
-            state_bundle.state.save_sync(
-                replace(current_state, last_cursor_value=None, cursor_boundary=None)
-            )
-            cleared = True
+        assert reset_result is not None
         console.print(
             "[green]✓[/green] watermark cleared"
-            if cleared
+            if reset_result.watermark_cleared
             else "[dim]  no stored watermark or boundary marker.[/dim]"
         )
 
     if runs:
-        assert state_bundle is not None
-        preserve_exclusive_checkpoint = (
-            not watermark
-            and current_state is not None
-            and current_state.cursor_boundary == "exclusive"
-        )
-        if preserve_exclusive_checkpoint:
-            from drt.state.manager import SyncState
-
-            # An exclusive boundary and its cursor are one semantic
-            # checkpoint. Legacy states have no boundary marker, so `--runs`
-            # retains its historical behavior and removes their fallback
-            # watermark together with the run metadata.
-            assert current_state is not None
-            state_bundle.state.save_sync(
-                SyncState(
-                    sync_name=sync_name,
-                    last_run_at="",
-                    records_synced=0,
-                    status="success",
-                    last_cursor_value=current_state.last_cursor_value,
-                    cursor_boundary=current_state.cursor_boundary,
-                )
-            )
-            removed = True
-        else:
-            removed = state_bundle.state.reset(sync_name)
+        assert reset_result is not None
         console.print(
             "[green]✓[/green] run state cleared (watermark/boundary retained)"
-            if removed and preserve_exclusive_checkpoint
+            if reset_result.runs_removed and reset_result.exclusive_checkpoint_preserved
             else "[green]✓[/green] run state cleared"
-            if removed
+            if reset_result.runs_removed
             else f"[dim]  no run state recorded for '{sync_name}'.[/dim]"
         )
 
