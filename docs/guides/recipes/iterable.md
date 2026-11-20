@@ -1,5 +1,7 @@
 # Iterable (`/api/users/bulkUpdate` & `/api/events/trackBulk`)
 
+> Request shape verified against a local mock; not verified against the live API.
+
 Sync user profiles or bulk events from your warehouse to [Iterable's `/api/users/bulkUpdate`](https://api.iterable.com/api/docs#users_bulkUpdate) and [`/api/events/trackBulk`](https://api.iterable.com/api/docs#events_trackBulk) using [`rest_api`](../../connectors/rest-api.md).
 
 ## Prerequisites
@@ -64,8 +66,8 @@ To sync custom events instead, point `url` to `https://api.iterable.com/api/even
 
 ## Limits & Gotchas
 
-- **Authentication header:** Iterable uses `Api-Key: <key>` (`auth.type: api_key`, `header: Api-Key`), not `Authorization: Bearer`.
-- **EU endpoint:** Use `https://api.eu.iterable.com/api/...` for EU-hosted projects.
-- **Batch size & rate limits:** Iterable caps `/api/users/bulkUpdate` and `/api/events/trackBulk` per-request record counts and payload sizes; check the [Iterable API Docs](https://api.iterable.com/api/docs) for current limits.
-- **Partial failures (`failedUpdates`):** `/api/users/bulkUpdate` reports failed records in `failedUpdates` (on `/api/events/trackBulk`, check `disallowedEventNames` / `failCount`).
-- **Event deduplication:** On `/api/events/trackBulk`, include a deterministic `id` field per event so retries do not create duplicate events.
+- **Authentication header:** Iterable uses `Api-Key: <key>` (`auth.type: api_key`, `header: Api-Key`), not `Authorization: Bearer` ([Iterable API Keys](https://support.iterable.com/hc/en-us/articles/360043464871-API-Keys)).
+- **EU endpoint:** Use `https://api.eu.iterable.com/api/...` for EU-hosted projects ([Iterable EU API Docs](https://api.eu.iterable.com/api/docs)).
+- **Batch size & rate limits:** Iterable enforces a 4 MB request body cap ([Iterable API Overview](https://support.iterable.com/hc/en-us/articles/360045695832-API-Overview-and-Sample-Payloads)) and endpoint-specific batch/rate limits on [`/api/users/bulkUpdate`](https://api.iterable.com/api/docs#users_bulkUpdate) and [`/api/events/trackBulk`](https://api.iterable.com/api/docs#events_trackBulk); exceeding project rate limits returns `429 Too Many Requests`.
+- **Partial failures (`failedUpdates`):** [`/api/users/bulkUpdate`](https://api.iterable.com/api/docs#users_bulkUpdate) reports failed records in `failedUpdates` (on [`/api/events/trackBulk`](https://api.iterable.com/api/docs#events_trackBulk), check `disallowedEventNames` / `failCount`).
+- **Event deduplication:** On [`/api/events/trackBulk`](https://api.iterable.com/api/docs#events_trackBulk), include a deterministic `id` field per event so retries do not create duplicate events.

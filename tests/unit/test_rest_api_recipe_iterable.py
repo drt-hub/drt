@@ -54,9 +54,7 @@ def test_iterable_recipe_request_shape(
             content_type="application/json",
         )
 
-    httpserver.expect_request("/api/users/bulkUpdate", method="POST").respond_with_handler(
-        handler
-    )
+    httpserver.expect_request("/api/users/bulkUpdate", method="POST").respond_with_handler(handler)
 
     raw_cfg = _extract_first_yaml_block(_RECIPE_PATH)
     raw_cfg["destination"]["url"] = httpserver.url_for("/api/users/bulkUpdate")
