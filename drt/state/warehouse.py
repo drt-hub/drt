@@ -714,6 +714,12 @@ class PostgresWarehouseDlqBackend:
         finally:
             conn.close()
 
+    def _append_strict(
+        self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000
+    ) -> int:
+        """Synchronously append or propagate the warehouse write failure."""
+        return self.append(sync_name, entries, max_records=max_records)
+
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:
         """Wholesale-replace the queue in one transaction.
 

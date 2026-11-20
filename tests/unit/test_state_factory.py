@@ -49,6 +49,51 @@ def test_different_project_dirs_return_different_instances(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
+def test_every_factory_supported_dlq_backend_has_strict_flush_capability(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.config.credentials import (
+        BigQueryProfile,
+        DatabricksProfile,
+        PostgresProfile,
+        SnowflakeProfile,
+    )
+
+    if backend in {"local", "gcs", "s3"}:
+        state = (
+            StateConfig()
+            if backend == "local"
+            else StateConfig(backend=backend, bucket="state-bucket")
+        )
+    else:
+        profiles = {
+            "postgres": PostgresProfile(type="postgres", host="h", dbname="d", user="u"),
+            "snowflake": SnowflakeProfile(
+                type="snowflake", account="a", user="u", database="d"
+            ),
+            "databricks": DatabricksProfile(
+                type="databricks", server_hostname="h", http_path="/p", catalog="main"
+            ),
+            "bigquery": BigQueryProfile(type="bigquery", project="p", dataset="analytics"),
+        }
+        profile = profiles[backend]
+        monkeypatch.setattr(
+            "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+        )
+        state = StateConfig(backend="warehouse", connection_profile=f"{backend}_main")
+
+    bundle = build_state_bundle(ProjectConfig(name="test", state=state), tmp_path)
+
+    assert callable(getattr(bundle.dlq, "_append_strict", None)), (
+        f"{type(bundle.dlq).__name__} must either provide a propagating strict append "
+        "or be explicitly refused for windowed backfill"
+    )
+
+
+@pytest.mark.parametrize(
     "field",
     [
         "bucket",

@@ -184,32 +184,65 @@ class MySQLDestination(BaseSqlDestination):
             schema_predicate = "DATABASE()"
             params = [table]
         cur.execute(
-            "SELECT index_name, column_name, seq_in_index, sub_part "
-            "FROM information_schema.statistics WHERE table_name = %s "
-            f"AND table_schema = {schema_predicate} AND non_unique = 0 "
-            "ORDER BY index_name, seq_in_index",
+            "SELECT s.index_name, s.column_name, s.seq_in_index, s.sub_part, c.is_nullable "
+            "FROM information_schema.statistics AS s "
+            "JOIN information_schema.columns AS c "
+            "ON c.table_schema = s.table_schema AND c.table_name = s.table_name "
+            "AND c.column_name = s.column_name WHERE s.table_name = %s "
+            f"AND s.table_schema = {schema_predicate} AND s.non_unique = 0 "
+            "ORDER BY s.index_name, s.seq_in_index",
             params,
         )
-        indexes: dict[str, list[tuple[int, str, int | None]]] = {}
+        indexes: dict[str, list[tuple[int, str, int | None, bool]]] = {}
         for row in cur.fetchall():
             values = list(row.values()) if isinstance(row, dict) else list(row)
             sub_part = None if values[3] is None else int(values[3])
             indexes.setdefault(str(values[0]), []).append(
-                (int(values[2]), str(values[1]).lower(), sub_part)
+                (
+                    int(values[2]),
+                    str(values[1]).lower(),
+                    sub_part,
+                    str(values[4]).upper() == "YES",
+                )
             )
         expected = sorted(column.lower() for column in upsert_keys)
         if any(
-            sorted(column for _, column, _ in columns) == expected
-            and all(sub_part is None for _, _, sub_part in columns)
-            for columns in indexes.values()
+            sorted(column for _, column, _, _ in columns) == expected
+            and all(sub_part is None for _, _, sub_part, _ in columns)
+            and (
+                index_name.upper() == "PRIMARY"
+                or all(not nullable for _, _, _, nullable in columns)
+            )
+            for index_name, columns in indexes.items()
         ):
             return
         raise ValueError(
             f"Destination table {config.table!r} must have a full-column PRIMARY or UNIQUE "
-            f"index exactly covering destination.upsert_key {upsert_keys} before MySQL can "
-            "upsert. Prefix indexes are not valid upsert keys. Add the index manually; drt "
-            "never changes constraints on an existing table."
+            f"index exactly covering destination.upsert_key {upsert_keys}, with every UNIQUE "
+            "key column declared NOT NULL, before MySQL can upsert. Prefix indexes and nullable "
+            "UNIQUE keys are not valid upsert keys. Add the index or NOT NULL constraints "
+            "manually; drt never changes constraints on an existing table."
         )
+
+    def _validate_upsert_keys_present(
+        self,
+        records: list[dict[str, Any]],
+        config: Any,
+        sync_options: SyncOptions,
+    ) -> None:
+        super()._validate_upsert_keys_present(records, config, sync_options)
+        if sync_options.backfill is None or not config.upsert_key:
+            return
+        null_key_indices = [
+            index
+            for index, record in enumerate(records)
+            if any(record[key] is None for key in config.upsert_key)
+        ]
+        if null_key_indices:
+            raise ValueError(
+                "sync.backfill does not support NULL MySQL destination.upsert_key "
+                f"values (record indexes: {null_key_indices})"
+            )
 
     @staticmethod
     def _managed_is_duplicate_column_error(exc: Exception) -> bool:

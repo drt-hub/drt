@@ -9,6 +9,7 @@ guarantee: ``engine/sync.py`` no longer imports ``logging`` and the
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -752,6 +753,61 @@ def test_dlq_observer_strict_local_append_keeps_old_file_on_fsync_failure(
     assert [entry.record["id"] for entry in store.read("s")] == [1]
     assert [entry.record["id"] for entry in observer._buffer["s"]] == [2]
     assert list(path.parent.glob(".s.jsonl.*")) == []
+
+
+def test_dlq_observer_strict_local_append_tolerates_unsupported_directory_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = DlqStore(tmp_path)
+    observer = DlqObserver(store)
+    observer.on_records_failed("s", [_dead(1)])
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    real_open = os.open
+
+    def fail_directory_open(target: str | bytes | os.PathLike[str], flags: int, *args: int) -> int:
+        if Path(target) == path.parent:
+            raise OSError("directory open unsupported")
+        return real_open(target, flags, *args)
+
+    monkeypatch.setattr("drt.state._atomic.os.open", fail_directory_open)
+
+    observer.flush_window("s")
+
+    assert [entry.record["id"] for entry in store.read("s")] == [1]
+    assert "s" not in observer._buffer
+
+
+def test_dlq_observer_strict_local_append_tolerates_directory_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = DlqStore(tmp_path)
+    observer = DlqObserver(store)
+    observer.on_records_failed("s", [_dead(1)])
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    real_open = os.open
+    real_fsync = os.fsync
+    directory_fds: set[int] = set()
+
+    def track_directory_open(
+        target: str | bytes | os.PathLike[str], flags: int, *args: int
+    ) -> int:
+        fd = real_open(target, flags, *args)
+        if Path(target) == path.parent:
+            directory_fds.add(fd)
+        return fd
+
+    def fail_directory_fsync(fd: int) -> None:
+        if fd in directory_fds:
+            raise OSError("directory fsync unsupported")
+        real_fsync(fd)
+
+    monkeypatch.setattr("drt.state._atomic.os.open", track_directory_open)
+    monkeypatch.setattr("drt.state._atomic.os.fsync", fail_directory_fsync)
+
+    observer.flush_window("s")
+
+    assert [entry.record["id"] for entry in store.read("s")] == [1]
+    assert "s" not in observer._buffer
 
 
 def test_dlq_observer_flushes_only_buffered_failures_on_completion(tmp_path: Path) -> None:

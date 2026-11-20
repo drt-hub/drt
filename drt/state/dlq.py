@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from drt.state._atomic import _fsync_parent_directory
 from drt.state._filelock import advisory_lock
 
 
@@ -316,11 +317,7 @@ class LocalDlqStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary_path, path)
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            _fsync_parent_directory(path)
         except BaseException:
             temporary_path.unlink(missing_ok=True)
             raise

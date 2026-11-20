@@ -9,6 +9,25 @@ from pathlib import Path
 from typing import Any
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    """Best-effort fsync of ``path``'s parent after an atomic replace."""
+    try:
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+    except OSError:
+        # The replacement has already committed. Some platforms do not
+        # permit opening or fsyncing directories, so this best-effort
+        # durability step must never turn a successful write into an
+        # apparent failure. POSIX systems still take the normal fsync path.
+        pass
+
+
 def atomic_write_json(path: Path, data: Any) -> None:
     """Write JSON through a same-directory temp file, fsync, and replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -20,21 +39,7 @@ def atomic_write_json(path: Path, data: Any) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                try:
-                    os.close(directory_fd)
-                except OSError:
-                    pass
-        except OSError:
-            # The replacement has already committed. Some platforms do not
-            # permit opening or fsyncing directories, so this best-effort
-            # durability step must never turn a successful write into an
-            # apparent failure. POSIX systems still take the normal fsync path.
-            pass
+        _fsync_parent_directory(path)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
