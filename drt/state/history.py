@@ -34,9 +34,20 @@ from drt.state._integrity import report_unreadable
 logger = logging.getLogger(__name__)
 
 
-def _history_order_key(entry: HistoryEntry) -> tuple[str, str]:
-    """Stable recency key shared by local and object-store history."""
-    return entry.started_at, entry.run_id or ""
+def _history_order_key(entry: HistoryEntry) -> tuple[str, bool, str, bool, str]:
+    """Stable recency key shared by local and object-store history.
+
+    Mirrors the warehouse stores' ``ORDER BY started_at DESC, run_id DESC NULLS LAST,
+    sync_run_id DESC NULLS LAST``: a missing id sorts below any present id (even an
+    empty string), so every store keeps and shows the same tied rows.
+    """
+    return (
+        entry.started_at,
+        entry.run_id is not None,
+        entry.run_id or "",
+        entry.sync_run_id is not None,
+        entry.sync_run_id or "",
+    )
 
 
 @dataclass
