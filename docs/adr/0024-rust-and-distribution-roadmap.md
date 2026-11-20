@@ -491,8 +491,9 @@ normative for the implementation PRs.
    **Recommendation: yes.** It prevents a packaging problem or external narrative
    from being used as performance evidence.
 2. **Should #1017 be unparked as a lazy-import plus packaging spike before Rust
-   engine work?** **Recommendation: yes.** Current imports expose roughly 111 ms
-   of non-essential CLI-module loading, a cheaper and reversible first target.
+   engine work?** **Recommendation: yes.** At the measurement commit `301c48f`, imports exposed roughly 111 ms
+   (about 120 ms on `ac35308`, re-measured 2026-11-20) of non-essential CLI-module
+   loading, a cheaper and reversible first target.
 3. **Should the speed thresholds in this ADR be the gates for native work?**
    **Recommendation: yes, provisionally.** They price PyO3/dual-engine maintenance
    against end-to-end benefit and can be amended before a funded prototype.
