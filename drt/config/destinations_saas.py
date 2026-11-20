@@ -1241,5 +1241,5 @@ class KafkaDestinationConfig(DescribableConfig):
             raise ValueError("Kafka field names and references must not be blank.")
         return value
 
-    def _describe_detail(self) -> str:
-        return self.topic
+    def describe(self) -> str:
+        return self.describe_safe()
