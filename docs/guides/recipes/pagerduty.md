@@ -1,14 +1,12 @@
 # PagerDuty (Events API v2)
 
+> Request shape verified against a local mock; not verified against the live API.
+
 Trigger or resolve PagerDuty incidents from a warehouse condition (such as SLA breaches, failed pipeline checks, or anomaly rows) using [`rest_api`](../../connectors/rest-api.md) and [PagerDuty Events API v2](https://developer.pagerduty.com/api-reference/368ae3d938c9e-send-an-event-to-pagerduty).
 
 ## Prerequisites
 
-Set your PagerDuty Events v2 Integration / Routing Key in your environment or `.drt/secrets.toml`:
-
-```bash
-export PAGERDUTY_ROUTING_KEY="your-32-char-routing-key"
-```
+Obtain your 32-character PagerDuty Events API v2 **Integration / Routing Key** from your PagerDuty service integration settings. PagerDuty expects `routing_key` in the JSON request body (not as an HTTP header), so provide it as a `routing_key` column in your model (for example from a service-routing mapping table or warehouse secret).
 
 ## Sync YAML
 
@@ -25,13 +23,10 @@ destination:
   method: POST
   headers:
     Content-Type: application/json
-  auth:
-    type: api_key
-    header: X-Routing-Key
-    value_env: PAGERDUTY_ROUTING_KEY
   body_mode: record
   body_template: |
     {
+      "routing_key": "{{ row.routing_key }}",
       "event_action": "{{ row.event_action | default('trigger') }}",
       "dedup_key": "{{ row.dedup_key }}",
       "payload": {
@@ -55,6 +50,7 @@ Example `models/sla_breaches.sql`:
 
 ```sql
 SELECT
+  routing_key,
   breach_id AS dedup_key,
   'trigger' AS event_action,
   CONCAT('SLA breach on ', pipeline_name, ': ', delay_minutes, 'm late') AS summary,
@@ -66,8 +62,8 @@ FROM analytics.pipeline_sla_breaches
 
 ## Limits & Gotchas
 
-- **One event per request:** PagerDuty Events API v2 `/v2/enqueue` accepts a single event object per `POST`, so keep `body_mode: record`.
-- **Idempotency via `dedup_key`:** Always pass a deterministic `dedup_key` (up to 255 characters) so retries or repeated incremental runs update the same open incident instead of paging on-call multiple times.
-- **Routing key authentication:** Using `auth.type: api_key` with `header: X-Routing-Key` keeps the integration key out of your SQL model and YAML templates.
-- **Rate limits & payload caps:** Events API v2 enforces per-integration rate limits and payload size limits; keep `rate_limit.requests_per_second` conservative and check the [PagerDuty Events API v2 Rate Limits](https://developer.pagerduty.com/docs/ZG9jOjExMDI5NTgw-events-api-v2-overview#rate-limiting) and [API Reference](https://developer.pagerduty.com/api-reference/368ae3d938c9e-send-an-event-to-pagerduty) for current quotas.
-- **`202 Accepted` responses:** PagerDuty returns `202 Accepted` on valid events; `rest_api` treats all `2xx` statuses as successful deliveries.
+- **One event per request:** PagerDuty Events API v2 `/v2/enqueue` accepts a single event object per `POST` ([Send an event to PagerDuty](https://developer.pagerduty.com/api-reference/368ae3d938c9e-send-an-event-to-pagerduty)), so keep `body_mode: record`.
+- **Routing key in JSON body:** `/v2/enqueue` authenticates via the `routing_key` field inside the JSON body rather than an HTTP header ([Send an event to PagerDuty](https://developer.pagerduty.com/api-reference/368ae3d938c9e-send-an-event-to-pagerduty)).
+- **Idempotency via `dedup_key`:** Always pass a deterministic `dedup_key` (up to 255 characters) so retries or repeated incremental runs update the same open incident instead of paging on-call multiple times ([Alert De-duplication](https://developer.pagerduty.com/docs/ZG9jOjExMDI5NTgw-events-api-v2-overview#alert-de-duplication)).
+- **Rate limits & payload caps:** Events API v2 enforces per-integration rate limits and a **512 KB** event payload limit; keep `rate_limit.requests_per_second` conservative and check the [PagerDuty Events API v2 Rate Limits](https://developer.pagerduty.com/docs/ZG9jOjExMDI5NTgw-events-api-v2-overview#rate-limiting) and [API Reference](https://developer.pagerduty.com/api-reference/368ae3d938c9e-send-an-event-to-pagerduty) for current quotas.
+- **`202 Accepted` responses:** PagerDuty returns `202 Accepted` on valid events ([Send an event to PagerDuty](https://developer.pagerduty.com/api-reference/368ae3d938c9e-send-an-event-to-pagerduty)); `rest_api` treats all `2xx` statuses as successful deliveries.

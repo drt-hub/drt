@@ -39,9 +39,7 @@ def _extract_first_yaml_block(markdown_path: Path) -> dict[str, Any]:
 def test_pagerduty_recipe_request_shape(
     httpserver: Any,
     tmp_path: Path,
-    monkeypatch: Any,
 ) -> None:
-    monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "pd-routing-key-test")
     received: list[tuple[dict[str, str], dict[str, Any]]] = []
 
     def handler(request: Any) -> Any:
@@ -64,6 +62,7 @@ def test_pagerduty_recipe_request_shape(
     source = _StaticSource(
         [
             {
+                "routing_key": "pd-routing-key-test",
                 "dedup_key": "breach-orders-2026-11-16",
                 "event_action": "trigger",
                 "summary": "SLA breach on orders: 45m late",
@@ -86,9 +85,9 @@ def test_pagerduty_recipe_request_shape(
     assert len(received) == 1
 
     headers, payload = received[0]
-    assert headers.get("X-Routing-Key") == "pd-routing-key-test"
     assert headers.get("Content-Type") == "application/json"
     assert payload == {
+        "routing_key": "pd-routing-key-test",
         "event_action": "trigger",
         "dedup_key": "breach-orders-2026-11-16",
         "payload": {
