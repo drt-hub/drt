@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Not yet usable — REST API backfill upper-bound configuration:** REST source profiles accept optional `incremental.end_param` alongside `start_param`, the source-side capability needed to send ADR 0021 half-open window bounds. `drt run` still refuses `sync.backfill` until the sequential checkpoint slice lands.
 
+### Changed
+
+- **Faster CLI start-up: built-in connectors and heavy config dependencies are imported lazily** ([#1017](https://github.com/drt-hub/drt/issues/1017), [ADR 0024](docs/adr/0024-rust-and-distribution-roadmap.md)). `drt --help` drops from about 167 ms to 88 ms (median of 20 fresh processes, CPython 3.12, macOS arm64) and `drt validate` on `examples/review-demo` from about 225 ms to 192 ms. Built-in implementations are imported when first instantiated; config classes stay eagerly registered and plugin registration is unchanged. `scripts/measure_import_time.py` reproduces the numbers. No config or behaviour changes.
+
 ### Fixed
 
 - **MCP relative database paths: narrower DuckDB scheme detection and structured symlink errors** (follow-up to #1337): only `md:`/`motherduck:` and `scheme://` DuckDB connection strings are left untouched, so a relative file such as `data:warehouse.duckdb` or `localhost:5432` is resolved under the project directory like any other (write a local file literally named `md:x` as `./md:x`); a symlink loop while resolving a database path raises the same `ValueError` as an escaping path (where the Python version detects loops) instead of an internal `RuntimeError`/`OSError`.
