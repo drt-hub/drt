@@ -322,8 +322,7 @@ class TestPostgresWarehouseHistoryStore:
             )
             assert (
                 "ORDER BY started_at DESC, run_id DESC NULLS LAST, "
-                "sync_run_id DESC NULLS LAST LIMIT"
-                in select
+                "sync_run_id DESC NULLS LAST LIMIT" in select
             )
 
     def test_read_never_alters_the_schema_and_omits_a_missing_column(self) -> None:

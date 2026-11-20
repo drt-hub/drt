@@ -235,8 +235,7 @@ class TestSnowflakeWarehouseHistoryStore:
         assert "WHERE sync_name" not in sql
         assert (
             "ORDER BY started_at DESC, run_id DESC NULLS LAST, "
-            "sync_run_id DESC NULLS LAST LIMIT"
-            in sql
+            "sync_run_id DESC NULLS LAST LIMIT" in sql
         )
 
     def test_read_breaks_started_at_ties_by_run_id_before_limit(self) -> None:
@@ -253,8 +252,7 @@ class TestSnowflakeWarehouseHistoryStore:
         sql = str(conn.cursor.return_value.execute.call_args.args[0])
         assert (
             "ORDER BY started_at DESC, run_id DESC NULLS LAST, "
-            "sync_run_id DESC NULLS LAST LIMIT"
-            in sql
+            "sync_run_id DESC NULLS LAST LIMIT" in sql
         )
 
     def test_prune_returns_zero_before_any_table_exists(self) -> None:
