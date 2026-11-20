@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rest_api` `BasicAuth` now accepts an explicitly empty password env var** ([#1339](https://github.com/drt-hub/drt/pull/1339)): `AuthHandler` previously checked `if not password:`, which rejected `""` and blocked Basic Auth endpoints that expect an empty password (such as Segment's HTTP Tracking API `Basic base64("<write_key>:")`). It now checks `if password is None:`, so an unset env var still raises `ValueError` while an explicitly empty one is accepted.
 - **`incremental_strategy: diff` on PostgreSQL: a concurrent run of the same sync now says so** ([#1330](https://github.com/drt-hub/drt/issues/1330)): when two runs of the same sync raced on the snapshot scratch table, the losing run could see the table vanish between its `CREATE` and its column introspection and report a misleading `upsert_key column(s) [...] not found in the model's output columns []` error. An empty introspection now raises the same "another run of sync ... appears to be building the same snapshot table concurrently" error as the other race outcomes; a genuinely missing key column is still a `ValueError`.
 
 ## [1.3.3] - 2026-11-14

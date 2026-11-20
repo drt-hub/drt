@@ -9,10 +9,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from drt.config.credentials import SQLiteProfile
-from drt.config.models import RestApiDestinationConfig, SyncConfig
+from drt.config.models import BasicAuth, RestApiDestinationConfig, SyncConfig
+from drt.destinations.auth import AuthHandler
 from drt.destinations.rest_api import RestApiDestination
 from drt.engine.sync import run_sync
 
@@ -117,3 +119,21 @@ def test_segment_batch_recipe_request_shape(
     }
     assert received[1][1]["batch"][0]["messageId"] == "msg-3"
     httpserver.check_assertions()
+
+
+def test_basic_auth_allows_empty_password_but_rejects_unset(monkeypatch: Any) -> None:
+    auth = BasicAuth(
+        type="basic",
+        username_env="TEST_BASIC_USER",
+        password_env="TEST_BASIC_PASS",
+    )
+    monkeypatch.setenv("TEST_BASIC_USER", "write-key-only")
+
+    monkeypatch.delenv("TEST_BASIC_PASS", raising=False)
+    with pytest.raises(ValueError, match="TEST_BASIC_PASS"):
+        AuthHandler(auth).get_headers()
+
+    monkeypatch.setenv("TEST_BASIC_PASS", "")
+    headers = AuthHandler(auth).get_headers()
+    expected = "Basic " + base64.b64encode(b"write-key-only:").decode("ascii")
+    assert headers == {"Authorization": expected}

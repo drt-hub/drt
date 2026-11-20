@@ -1,5 +1,7 @@
 # Segment (HTTP Tracking API `batch`)
 
+> Request shape verified against a local mock; not verified against the live API.
+
 Send warehouse events or user traits to [Segment's HTTP Tracking API](https://segment.com/docs/connections/sources/catalog/libraries/server/http-api/) (`/v1/batch`) using [`rest_api`](../../connectors/rest-api.md).
 
 ## Prerequisites
@@ -61,7 +63,7 @@ sync:
 
 ## Limits & Gotchas
 
-- **Basic Auth with empty password:** Segment expects `Basic base64("<write_key>:")`. Keep `SEGMENT_WRITE_PASSWORD=""` (an empty string) in your environment or `.drt/secrets.toml`.
-- **Batch payload size limits:** Segment enforces a maximum total payload size per `/v1/batch` request and a per-message size cap; keep `max_records_per_request` conservative (e.g., `100` or lower if `properties` are large) and check the [Segment HTTP API Batch docs](https://segment.com/docs/connections/sources/catalog/libraries/server/http-api/#batch) for current limits.
-- **Deduplication via `messageId`:** Always include a deterministic `messageId` per row so Segment deduplicates retries within its deduplication window instead of double-counting events.
-- **Partial failures:** `/v1/batch` returns `200 OK` on accepted batches and does not return per-record error arrays for valid JSON batches, so `error_path` is not used here.
+- **Basic Auth with empty password:** Segment expects `Basic base64("<write_key>:")` ([Segment HTTP API Authentication](https://segment.com/docs/connections/sources/catalog/libraries/server/http-api/#authentication)). Keep `SEGMENT_WRITE_PASSWORD=""` (an empty string) in your environment or `.drt/secrets.toml`.
+- **Batch payload size limits:** Segment caps `/v1/batch` requests at **500 KB** total and **32 KB** per event ([Segment HTTP API Max Request Size](https://segment.com/docs/connections/sources/catalog/libraries/server/http-api/#max-request-size)); keep `max_records_per_request` conservative (e.g., `100` or lower if `properties` are large).
+- **Deduplication via `messageId`:** Always include a deterministic `messageId` per row so Segment deduplicates retries within its deduplication window instead of double-counting events ([Segment HTTP API Deduplication](https://segment.com/docs/connections/sources/catalog/libraries/server/http-api/#deduplication)).
+- **Partial failures:** `/v1/batch` returns `200 OK` on accepted batches and does not return per-record error arrays for valid JSON batches ([Segment HTTP API Batch](https://segment.com/docs/connections/sources/catalog/libraries/server/http-api/#batch)), so `error_path` is not used here.
