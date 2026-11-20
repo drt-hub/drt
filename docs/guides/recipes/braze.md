@@ -1,5 +1,7 @@
 # Braze (`/users/track`)
 
+> Request shape verified against a local mock; not verified against the live API.
+
 Sync user attributes or custom events from your warehouse to [Braze's `/users/track` endpoint](https://www.braze.com/docs/api/endpoints/user_data/post_user_track/) using [`rest_api`](../../connectors/rest-api.md).
 
 ## Prerequisites
@@ -61,6 +63,6 @@ sync:
 ## Limits & Gotchas
 
 - **Cluster-specific base URL:** Braze assigns different REST API hosts per instance (`rest.iad-01.braze.com`, `rest.fra-01.braze.eu`, etc.). Check your dashboard and [Braze API Endpoints](https://www.braze.com/docs/api/basics/#endpoints).
-- **Per-request object caps:** `/users/track` caps each request's `attributes` (and `events`/`purchases`) arrays; keep `max_records_per_request: 75` or lower per the [Braze `/users/track` docs](https://www.braze.com/docs/api/endpoints/user_data/post_user_track/#rate-limit).
-- **Rate limits & data points:** Braze enforces rate limits per endpoint and bills custom attributes/events as data points—only include changed columns in your model query and set `_update_existing_only: true` if you don't want to create new profiles.
-- **Per-record errors (`error_path: errors`):** Braze can return an `errors` array on `4xx` responses; `error_path: errors` surfaces those messages in `drt`'s DLQ/error summary.
+- **Per-request object cap (75 total):** `/users/track` caps each request at **75 objects total** combined across `attributes`, `events`, and `purchases`; keep `max_records_per_request: 75` or lower ([Braze `/users/track` Request Parameters](https://www.braze.com/docs/api/endpoints/user_data/post_user_track/#request-parameters)).
+- **Rate limits & data points:** Braze enforces per-endpoint rate limits ([Braze `/users/track` Rate Limit](https://www.braze.com/docs/api/endpoints/user_data/post_user_track/#rate-limit)) and bills custom attributes/events as [data points](https://www.braze.com/docs/user_guide/data/data_points/)—only include changed columns in your model query and set `_update_existing_only: true` if you don't want to create new profiles.
+- **Per-record errors (`error_path: errors`):** For non-fatal per-object validation failures, Braze returns an `errors` array in the JSON response body alongside processed counts (see [Braze `/users/track` Responses](https://www.braze.com/docs/api/endpoints/user_data/post_user_track/#responses) and [Braze API Errors](https://www.braze.com/docs/api/errors/)); `error_path: errors` surfaces those messages in `drt`'s DLQ/error summary.
