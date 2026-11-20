@@ -189,6 +189,13 @@ effects. Importing the connector registry imports and registers every built-in
 source and destination, including optional driver paths that happen to be
 installed.
 
+*Reproducibility note (fact-check 2026-11-20):* the cold-start and import numbers in this
+section were measured ad hoc on one machine and are not backed by a checked-in
+runner or raw results; a fresh run on `ac35308` (`python -X importtime -c "import
+drt.cli.main"`) gave about 143-145 ms for `drt.cli.main` (median 144.6 ms over five
+fresh processes), roughly 13-23% below the historical trace. Gate 1 must therefore
+start by checking in a benchmark script and its raw output.
+
 A lower-bound import probe does not implement a usable CLI, but it shows the
 available order of magnitude. Across 20 fresh processes, `import drt` took
 31.3 ms median and importing `drt` plus the shared Typer app took 39.0 ms,
