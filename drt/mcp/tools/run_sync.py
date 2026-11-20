@@ -33,7 +33,7 @@ def run_sync(
 ) -> dict[str, Any]:
     from drt.cli._helpers import resolve_profile_name
     from drt.cli.main import _get_destination, _get_source
-    from drt.config.credentials import load_profile
+    from drt.config.credentials import load_profile, resolve_profile_paths
     from drt.config.parser import project_vars as resolve_project_vars
     from drt.engine.sync import run_sync as engine_run_sync
     from drt.state.factory import build_state_bundle
@@ -63,7 +63,10 @@ def run_sync(
         return {"error": "limit must be a positive integer."}
 
     project = ctx.load_project()
-    profile = load_profile(resolve_profile_name(profile_name, project.profile))
+    profile = resolve_profile_paths(
+        load_profile(resolve_profile_name(profile_name, project.profile)),
+        ctx.project_dir,
+    )
 
     # vars: `vars:` block < DRT_VAR_* < this call's `vars` (#870/#783) — same
     # precedence `drt run --vars` resolves, minus the string-parsing step

@@ -27,8 +27,9 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from inspect import signature
 from pathlib import Path
 from typing import Any, Literal, TextIO
@@ -80,6 +81,42 @@ class ObservabilityConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def resolve_profile_paths(
+    profile: ProfileConfigLike,
+    project_dir: Path | None = None,
+) -> ProfileConfigLike:
+    """Resolve relative SQLite/DuckDB database paths against *project_dir*.
+
+    Preserves ``:memory:``, ``file:`` URIs, DuckDB connection schemes,
+    and explicit absolute paths. URI paths are not checked for containment.
+    Rejects relative paths (including ``..`` and symlinks) that escape
+    *project_dir*.
+    """
+    if project_dir is None:
+        return profile
+    if isinstance(profile, (SQLiteProfile, DuckDBProfile)):
+        db = profile.database
+        if (
+            not db
+            or db == ":memory:"
+            or db.startswith("file:")
+            or Path(db).is_absolute()
+            or (
+                isinstance(profile, DuckDBProfile)
+                and re.match(r"^[A-Za-z][A-Za-z0-9+.-]+:|^[A-Za-z]://", db)
+            )
+        ):
+            return profile
+        base = project_dir.resolve()
+        resolved = (base / db).resolve()
+        if not resolved.is_relative_to(base):
+            raise ValueError(
+                f"Relative database path {db!r} escapes project directory {project_dir}."
+            )
+        return replace(profile, database=str(resolved))
+    return profile
 
 
 def _config_dir(override: Path | None = None) -> Path:
@@ -988,6 +1025,7 @@ __all__ = [
     "remove_profile",
     "resolve_env",
     "resolve_env_dict",
+    "resolve_profile_paths",
     "save_profile",
     "write_raw_profile",
 ]
