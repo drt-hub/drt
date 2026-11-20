@@ -1,6 +1,8 @@
 # Customer.io (Track API v2 `batch`)
 
-Identify customers or send events from your warehouse to [Customer.io's Track API v2 (`/api/v2/batch`)](https://customer.io/docs/api/track/#operation/batch) using [`rest_api`](../../connectors/rest-api.md).
+> Request shape verified against a local mock; not verified against the live API.
+
+Identify customers or send events from your warehouse to [Customer.io's Track API v2 (`/api/v2/batch`)](https://docs.customer.io/api/track/#operation/batch) using [`rest_api`](../../connectors/rest-api.md).
 
 ## Prerequisites
 
@@ -67,6 +69,6 @@ sync:
 
 ## Limits & Gotchas
 
-- **EU data center URL:** Use `https://track-eu.customer.io/api/v2/batch` for EU workspaces instead of `track.customer.io`.
-- **Batch payload & item size caps:** `/api/v2/batch` enforces a maximum total request size and per-item payload size; keep `max_records_per_request` conservative (e.g., `100` or lower) and check the [Customer.io Track API Batch docs](https://customer.io/docs/api/track/#operation/batch) for current limits.
-- **Rate limits & partial failures:** Customer.io returns `207 Multi-Status` or `400` with an `errors` array when individual items in a batch fail validation; `error_path: errors` surfaces those per-item errors in `drt`. See the [Customer.io Track API Rate Limits](https://customer.io/docs/api/track/#section/Limits) for current quotas.
+- **EU data center URL:** Use `https://track-eu.customer.io/api/v2/batch` for EU workspaces instead of `track.customer.io` ([Customer.io Track API Regions](https://docs.customer.io/api/track/#section/Regions)).
+- **Batch payload & item size caps:** `/api/v2/batch` caps total request size at **500 KB** and individual items at **32 KB** ([Customer.io Track API `/api/v2/batch`](https://docs.customer.io/api/track/#operation/batch)); keep `max_records_per_request` conservative (e.g., `100` or lower) so batches stay under 500 KB.
+- **Rate limits & partial failures:** Per the [Customer.io Track API `/api/v2/batch` response docs](https://docs.customer.io/api/track/#operation/batch), partial batch validation failures return `207 Multi-Status` with an `errors` array (while malformed requests return `400`); setting `error_path: errors` surfaces those per-item errors in `drt`. See [Customer.io Track API Limits](https://docs.customer.io/api/track/#section/Limits) for current rate quotas.
