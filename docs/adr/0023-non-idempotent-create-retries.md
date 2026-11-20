@@ -164,9 +164,11 @@ operation keyed merely because the payload contains an identifier: the vendor
 must use it for deduplication or address the same resource.
 
 The key is computed outside the retry closure. Generic REST record mode already
-does that. Its batch mode's random request id is sufficient for immediate attempts
-but not DLQ/cross-run replay; it is classified keyed only for the immediate loop
-and documented accordingly. Google Ads with `orderId`, Meta `event_id`, Klaviyo
+does that. Its batch mode sends the same generated request id on every attempt of one
+chunk, but nothing proves an arbitrary target honours that header, and the value
+changes on every run, so generic REST batch mode **stays classified blind** unless the
+operator asserts that the configured endpoint deduplicates on it (an explicit
+configuration contract); a stable value is necessary but not sufficient. Google Ads with `orderId`, Meta `event_id`, Klaviyo
 `unique_id`, Mixpanel/Amplitude insert ids, FIFO SQS dedup ids and Elasticsearch
 `_id` each receive explicit connector tests before being classified safe. A vendor
 claim that is still “unverified” in the audit defaults to blind.
@@ -467,7 +469,9 @@ normative for the implementation PRs.
    Recommendation: no; keep it opt-in defense in depth because it cannot protect
    the immediate retry window and is unavailable on most state backends.
 7. **Is generic REST batch mode safe with its random per-chunk request id?**
-   Recommendation: only for attempts inside one `load()` call; require an
+   Recommendation: no — keep it blind by default. The id is only stable across the
+   attempts of one chunk and no vendor behaviour is proven; classify it keyed only
+   when the operator asserts the endpoint honours the header, and require an
    operator-supplied stable batch key before claiming DLQ/cross-run safety, because
    the current value changes on every run.
 8. **What gates each destination rollout?** Recommendation: do not classify a
