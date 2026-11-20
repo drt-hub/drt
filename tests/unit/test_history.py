@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from drt.state.history import HistoryEntry, HistoryManager
 from tests.conftest import public_methods
 
@@ -72,6 +74,48 @@ class TestHistoryAppendAndRead:
                 )
             )
         assert len(mgr.read(sync_name="s", limit=3)) == 3
+
+    @pytest.mark.parametrize("append_newer_first", [True, False])
+    def test_read_breaks_started_at_ties_by_run_id(
+        self, tmp_path: Path, append_newer_first: bool
+    ) -> None:
+        # Both insertion orders: the tie-break, not append order, decides the survivor.
+        mgr = HistoryManager(tmp_path)
+        started_at = "2026-05-01T10:00:00+00:00"
+        older_tie = _entry(sync_name="s", started_at=started_at)
+        older_tie.run_id = "run-a"
+        newer_tie = _entry(sync_name="s", started_at=started_at)
+        newer_tie.run_id = "run-b"
+        for entry in (newer_tie, older_tie) if append_newer_first else (older_tie, newer_tie):
+            mgr.append(entry)
+
+        assert [entry.run_id for entry in mgr.read("s", limit=1)] == ["run-b"]
+
+    def test_a_missing_run_id_sorts_below_an_empty_one_like_nulls_last(
+        self, tmp_path: Path
+    ) -> None:
+        mgr = HistoryManager(tmp_path)
+        started_at = "2026-05-01T10:00:00+00:00"
+        missing = _entry(sync_name="s", started_at=started_at)
+        missing.run_id = None
+        empty = _entry(sync_name="s", started_at=started_at)
+        empty.run_id = ""
+        mgr.append(missing)
+        mgr.append(empty)
+
+        assert [entry.run_id for entry in mgr.read("s", limit=1)] == [""]
+
+    def test_sync_run_id_breaks_ties_when_run_ids_are_missing(self, tmp_path: Path) -> None:
+        mgr = HistoryManager(tmp_path)
+        started_at = "2026-05-01T10:00:00+00:00"
+        first = _entry(sync_name="s", started_at=started_at)
+        first.sync_run_id = "sync-a"
+        second = _entry(sync_name="s", started_at=started_at)
+        second.sync_run_id = "sync-b"
+        mgr.append(second)
+        mgr.append(first)
+
+        assert [entry.sync_run_id for entry in mgr.read("s", limit=1)] == ["sync-b"]
 
     def test_read_all_syncs_merges_and_sorts(self, tmp_path: Path) -> None:
         mgr = HistoryManager(tmp_path)

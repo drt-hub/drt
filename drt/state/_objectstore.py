@@ -22,7 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 from drt.state._integrity import report_unreadable
 from drt.state.dlq import DeadLetter, decode_dead_letter_lines
 from drt.state.errors import StateContentionError
-from drt.state.history import HistoryEntry
+from drt.state.history import HistoryEntry, _history_order_key
 from drt.state.manager import SyncState
 
 logger = logging.getLogger(__name__)
@@ -263,7 +263,7 @@ class ObjectStoreHistoryStore(_ObjectStoreBase):
             for key in keys:
                 body, _ = self._client.read_for_update(key)
                 entries.extend(self._decode(body, key))
-        entries.sort(key=lambda item: item.started_at, reverse=True)
+        entries.sort(key=_history_order_key, reverse=True)
         return entries[:limit]
 
     def _pruned(
@@ -281,12 +281,12 @@ class ObjectStoreHistoryStore(_ObjectStoreBase):
                 kept.append(entry)
 
         if len(kept) > self._max_entries:
-            # Cap by recency (started_at), not append/file order: two
+            # Cap by the same recency key read() uses, not append/file order: two
             # overlapping runs of the same sync can complete out of start
-            # order, and read() itself defines "newest" by started_at, not
-            # by position in the object. Sorting ascending first makes the
-            # tail slice below the actual newest max_entries.
-            kept.sort(key=lambda item: item.started_at)
+            # order, and equal timestamps need the same run_id tie-break at
+            # the keep boundary. Sorting ascending first makes the tail slice
+            # below the actual newest max_entries.
+            kept.sort(key=_history_order_key)
             kept = kept[-self._max_entries :]
         return kept, len(entries) - len(kept)
 

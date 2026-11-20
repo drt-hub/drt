@@ -405,12 +405,16 @@ class SnowflakeWarehouseHistoryStore:
             if sync_name is not None:
                 cur.execute(
                     f"SELECT {columns} FROM {t} WHERE sync_name = %s "
-                    "ORDER BY started_at DESC LIMIT %s",
+                    "ORDER BY started_at DESC, run_id DESC NULLS LAST, "
+                    "sync_run_id DESC NULLS LAST LIMIT %s",
                     (sync_name, limit),
                 )
             else:
                 cur.execute(
-                    f"SELECT {columns} FROM {t} ORDER BY started_at DESC LIMIT %s", (limit,)
+                    f"SELECT {columns} FROM {t} "
+                    "ORDER BY started_at DESC, run_id DESC NULLS LAST, "
+                    "sync_run_id DESC NULLS LAST LIMIT %s",
+                    (limit,),
                 )
             return [_row_to_history_entry(row, present) for row in cur.fetchall()]
         finally:
