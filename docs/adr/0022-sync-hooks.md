@@ -45,9 +45,11 @@ before snapshot promotion and `on_sync_completed`. That ordering lets a hook
 failure remain retryable without claiming that the source checkpoint or diff
 baseline completed.
 
-The outer `finally` is also part of the contract. It sends failure alerts and
-appends one history entry even when the body raises, then prunes ledgers, resets
-destination write state and unconditionally calls `on_sync_ended`
+The outer `finally` is also part of the contract. In a non-dry run it sends failure
+alerts and appends one history entry (best-effort, and only when a history manager
+is configured) even when the body raises, then prunes ledgers, resets destination
+write state (only when `not dry_run` or the destination is
+`ManagedDestinationTableCapable`) and calls `on_sync_ended` (non-dry runs only)
 (`drt/engine/sync.py:506-587`, `drt/engine/sync.py:589-658`). The last event is
 the DLQ flush point on exceptional exits (`drt/engine/observer.py:119-130`,
 `drt/engine/observer.py:444-456`). Hook errors must flow through this path; they
@@ -570,6 +572,21 @@ when hooks are absent; no existing artifact ever gains SQL text.
 | 5 | Apply and exact replay | Keep plan/replan hook-free; run source hooks only after claim, reverify after them, prevent double execution, skip source hooks for exact replay, run destination `post_load`, and bind hook digests without storing SQL. |
 | 6 | Safe observability and docs | Add safe hook outcomes to results/history/run-results/alerts/spans, optional `HookObserver`, invocation summaries, and structural omission of hook SQL from docs raw YAML, manifest and every full-label path. Add leak-focused tests using secrets in templates, driver errors and block scalars. |
 | 7 | Connector smoke coverage and documentation | Exercise one local transactional source/destination and representative BigQuery-source, Snowflake/Databricks/ClickHouse timeout/tag paths; document grants, idempotence, warehouse query-history exposure and unsupported connectors. |
+
+## Amendment 2026-11-20 (fact-check)
+
+A fact-check against the code and ADR 0021 found one design conflict, resolved here:
+
+- **Windowed backfill and hooks (ADR 0021):** `post_load` is defined as once per sync,
+  after all finalizers and before state/watermark advancement. A windowed backfill
+  checkpoints each window, so earlier windows have already advanced state when a
+  once-per-sync `post_load` runs; running it per window would break the
+  once-per-sync definition. **Decision: `sync.hooks` and run-level hooks are rejected
+  for syncs that set `sync.backfill` in v1** (validation error naming both features);
+  the ordering for windows (hook per window before its checkpoint) can be designed in a
+  separate ADR once backfill has real usage. This keeps both ADRs internally true.
+- The description of the outer `finally` above was corrected: its effects are
+  non-dry-run, conditional and best-effort, not unconditional.
 
 ## Decisions (owner-approved 2026-11-20)
 
