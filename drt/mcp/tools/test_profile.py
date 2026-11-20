@@ -1,8 +1,8 @@
 """Implementation for the ``drt_test_profile`` MCP tool.
 
 Public docstring lives on the ``@mcp.tool()`` wrapper in
-``drt/mcp/server.py``. Takes no context — the original tool never touched
-``project_dir``.
+``drt/mcp/server.py``. Relative SQLite/DuckDB database paths are resolved against the
+server's ``project_dir`` before connecting (#1243).
 """
 
 from __future__ import annotations

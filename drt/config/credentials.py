@@ -83,6 +83,13 @@ class ObservabilityConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# DuckDB connection strings that are not local files: MotherDuck (``md:`` /
+# ``motherduck:``) and ``scheme://`` URLs (s3, https, gcs, ...). Anything else, such
+# as ``data:warehouse.duckdb`` or ``localhost:5432``, is a relative local path; write a
+# local file literally named ``md:x`` as ``./md:x``.
+_DUCKDB_REMOTE_DATABASE = re.compile(r"^(?:md|motherduck):|^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
 def resolve_profile_paths(
     profile: ProfileConfigLike,
     project_dir: Path | None = None,
@@ -103,14 +110,18 @@ def resolve_profile_paths(
             or db == ":memory:"
             or db.startswith("file:")
             or Path(db).is_absolute()
-            or (
-                isinstance(profile, DuckDBProfile)
-                and re.match(r"^[A-Za-z][A-Za-z0-9+.-]+:|^[A-Za-z]://", db)
-            )
+            or (isinstance(profile, DuckDBProfile) and _DUCKDB_REMOTE_DATABASE.match(db))
         ):
             return profile
-        base = project_dir.resolve()
-        resolved = (base / db).resolve()
+        try:
+            base = project_dir.resolve()
+            resolved = (base / db).resolve()
+        except (OSError, RuntimeError) as exc:
+            # A symlink loop (or a filesystem error while resolving) must surface
+            # as the same structured error as an escaping path, not an internal one.
+            raise ValueError(
+                f"Cannot resolve relative database path {db!r} under {project_dir}: {exc}"
+            ) from exc
         if not resolved.is_relative_to(base):
             raise ValueError(
                 f"Relative database path {db!r} escapes project directory {project_dir}."
