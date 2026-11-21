@@ -101,6 +101,12 @@ Unknown built-ins and newly installed plugins are excluded by default. The
 runtime refusal names the destination type, its reason, and the declared
 support list.
 
+Every extracted row must also produce a non-NULL value for every configured
+`destination.upsert_key` column after field mappings, computed fields, and
+masking. The engine checks this before the destination write; if a key is
+missing or NULL, it reports the sync, column, and window and leaves that window
+uncheckpointed so an operator can correct the source data and retry safely.
+
 ## Recovery and state safety
 
 Use `drt state reset`; hand-editing `.drt/state.json` or

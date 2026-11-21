@@ -813,3 +813,12 @@ current-window failures with a finite `dlq.max_records`. An overflow fails the
 window before its checkpoint and leaves the queue unchanged; the operator must
 raise the cap or drain the queue with `drt retry`. The ordinary non-backfill
 append contract remains FIFO-capped.
+
+## Amendment 2026-11-21 (slice 3 round 7)
+
+**Every destination-facing upsert-key component must be present and non-NULL.**
+The shared backfill engine validates this after payload transforms and before a
+window batch reaches any `WindowedBackfillCapable` destination. A violation
+names the sync, key column, and half-open window, aborts the write, and leaves
+the window uncheckpointed; this is required because SQL uniqueness and `MERGE`
+equality generally treat NULL keys as distinct, making replay duplicate rows.

@@ -73,26 +73,6 @@ class TestMySQLDestinationConfig:
             _config(dbname=None, dbname_env=None)
 
 
-def test_backfill_rejects_null_upsert_key_before_opening_write_connection() -> None:
-    destination = MySQLDestination()
-    options = _options(
-        mode="incremental",
-        cursor_field="cursor",
-        backfill={"window": 10, "start": 0, "end": 10},
-    )
-    with (
-        patch.object(destination, "_dialect_connect") as connect,
-        pytest.raises(ValueError, match=r"sync\.backfill.*NULL.*upsert_key.*\[0\]"),
-    ):
-        destination.load(
-            [{"id": None, "score": 1}],
-            _config(upsert_key=["id"]),
-            options,
-        )
-
-    connect.assert_not_called()
-
-
 # ---------------------------------------------------------------------------
 # SQL generation
 # ---------------------------------------------------------------------------

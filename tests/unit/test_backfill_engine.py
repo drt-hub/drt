@@ -16,7 +16,17 @@ from typer.testing import CliRunner
 from drt.cli.commands.retry import replay_dead_letters
 from drt.cli.main import app
 from drt.config.credentials import BigQueryProfile, RestApiProfile, SQLiteProfile
-from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
+from drt.config.models import (
+    BigQueryDestinationConfig,
+    DatabricksDestinationConfig,
+    DestinationConfig,
+    MySQLDestinationConfig,
+    PostgresDestinationConfig,
+    SnowflakeDestinationConfig,
+    SyncConfig,
+    SyncOptions,
+)
+from drt.connectors.registry import get_destination, windowed_backfill_destination_types
 from drt.destinations.base import SyncResult
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.row_errors import RowError
@@ -203,6 +213,181 @@ def _profile() -> RestApiProfile:
 
 def _observer(state: MemoryState, watermark: MemoryWatermark | None = None) -> CompositeObserver:
     return CompositeObserver([StatePersistingObserver(state, watermark)])
+
+
+def _capable_destination_config(destination_type: str) -> Any:
+    configs = {
+        "bigquery": BigQueryDestinationConfig(
+            type="bigquery",
+            project="project",
+            dataset="dataset",
+            table="events",
+            mode="merge",
+            upsert_key=["tenant_id", "id"],
+        ),
+        "databricks": DatabricksDestinationConfig(
+            type="databricks",
+            host_env="DBX_HOST",
+            http_path_env="DBX_PATH",
+            token_env="DBX_TOKEN",
+            catalog="main",
+            schema="default",
+            table="events",
+            mode="merge",
+            upsert_key=["tenant_id", "id"],
+        ),
+        "mysql": MySQLDestinationConfig(
+            type="mysql",
+            connection_string_env="MYSQL_URL",
+            table="events",
+            upsert_key=["tenant_id", "id"],
+        ),
+        "postgres": PostgresDestinationConfig(
+            type="postgres",
+            connection_string_env="PG_URL",
+            table="events",
+            upsert_key=["tenant_id", "id"],
+        ),
+        "snowflake": SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="DB",
+            schema="PUBLIC",
+            table="EVENTS",
+            warehouse="WH",
+            mode="merge",
+            upsert_key=["tenant_id", "id"],
+        ),
+    }
+    if destination_type not in configs:
+        raise AssertionError(
+            f"Add a contract-test config for new WindowedBackfillCapable "
+            f"destination {destination_type!r}."
+        )
+    return configs[destination_type]
+
+
+def _sync_for_destination(config: Any) -> SyncConfig:
+    payload = _sync(end=3).model_dump(mode="json", by_alias=True, exclude_none=True)
+    payload["destination"] = config.model_dump(
+        mode="json", by_alias=True, exclude_none=True, exclude_defaults=True
+    )
+    return SyncConfig.model_validate(payload)
+
+
+class CountingCheckpoint(StatePersistingObserver):
+    def __init__(self, state: MemoryState) -> None:
+        super().__init__(state, None)
+        self.checkpoints = 0
+
+    def checkpoint_window(
+        self,
+        sync_name: str,
+        started_at: str,
+        result: SyncResult,
+        cursor_field: str,
+        high: str | int,
+    ) -> str:
+        self.checkpoints += 1
+        return super().checkpoint_window(sync_name, started_at, result, cursor_field, high)
+
+
+@pytest.mark.parametrize("destination_type", windowed_backfill_destination_types())
+@pytest.mark.parametrize("bad_row", [{"id": None}, {}], ids=["null", "missing"])
+def test_every_backfill_destination_rejects_invalid_key_before_write_and_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_type: str,
+    bad_row: dict[str, Any],
+) -> None:
+    config = _capable_destination_config(destination_type)
+    sync = _sync_for_destination(config)
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=1))
+    monkeypatch.setattr(destination, "load", load)
+    if destination_type == "mysql":
+        monkeypatch.setattr(destination, "validate_backfill_target", lambda _config: None)
+    state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
+    row = {"cursor": 1, "tenant_id": "tenant", **bad_row}
+
+    with pytest.raises(ValueError) as exc_info:
+        run_sync(
+            sync,
+            WindowSource([row]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+    message = str(exc_info.value)
+    assert "events" in message
+    assert "'id'" in message
+    assert "[0, 3)" in message
+    load.assert_not_called()
+    assert checkpoint.checkpoints == 0
+    assert state.value is None
+
+
+@pytest.mark.parametrize("destination_type", windowed_backfill_destination_types())
+def test_every_backfill_destination_replay_after_checkpoint_failure_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_type: str,
+) -> None:
+    config = _capable_destination_config(destination_type)
+    sync = _sync_for_destination(config)
+    destination = get_destination(config)
+    if destination_type == "mysql":
+        monkeypatch.setattr(destination, "validate_backfill_target", lambda _config: None)
+    destination_rows: dict[tuple[Any, ...], dict[str, Any]] = {}
+    write_calls = 0
+
+    def keyed_load(
+        records: list[dict[str, Any]],
+        _config: DestinationConfig,
+        _options: SyncOptions,
+    ) -> SyncResult:
+        nonlocal write_calls
+        write_calls += 1
+        for record in records:
+            key = tuple(record[column] for column in config.upsert_key)
+            destination_rows[key] = dict(record)
+        return SyncResult(success=len(records))
+
+    monkeypatch.setattr(destination, "load", keyed_load)
+    state = MemoryState()
+
+    class FailingOnceCheckpoint(CountingCheckpoint):
+        def checkpoint_window(
+            self,
+            sync_name: str,
+            started_at: str,
+            result: SyncResult,
+            cursor_field: str,
+            high: str | int,
+        ) -> str:
+            if self.checkpoints == 0:
+                self.checkpoints += 1
+                raise RuntimeError("checkpoint unavailable")
+            return super().checkpoint_window(sync_name, started_at, result, cursor_field, high)
+
+    checkpoint = FailingOnceCheckpoint(state)
+    observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
+    source = WindowSource([{"cursor": 1, "tenant_id": "tenant", "id": 7}])
+
+    with pytest.raises(RuntimeError, match="checkpoint unavailable"):
+        run_sync(sync, source, destination, _profile(), tmp_path, observer=observer)
+    assert state.value is None
+
+    run_sync(sync, source, destination, _profile(), tmp_path, observer=observer)
+
+    assert write_calls == 2
+    assert list(destination_rows) == [("tenant", 7)]
 
 
 def test_happy_path_and_empty_windows_checkpoint_sequentially(tmp_path: Path) -> None:

@@ -292,3 +292,28 @@ def validate_window_row(
             f"[{canonical_low!r}, {canonical_high!r}); refusing to load the row."
         )
     return None
+
+
+def validate_window_upsert_keys(
+    records: list[dict[str, Any]],
+    upsert_key: list[str],
+    *,
+    sync_name: str,
+    low: BackfillBound,
+    high: BackfillBound,
+) -> None:
+    """Reject destination-facing null/missing keys before a backfill write.
+
+    SQL uniqueness and ``MERGE`` equality do not generally consider ``NULL``
+    equal to itself. Letting one through would therefore make an uncheckpointed
+    window unsafe to replay after its destination write committed.
+    """
+    for record_index, record in enumerate(records):
+        for column in upsert_key:
+            if column not in record or record[column] is None:
+                raise ValueError(
+                    f"Windowed backfill sync {sync_name!r} cannot replay safely: "
+                    f"destination.upsert_key column {column!r} is null or missing "
+                    f"in record {record_index} for window [{low!r}, {high!r}); "
+                    "refusing the destination write and checkpoint."
+                )

@@ -44,6 +44,7 @@ from drt.engine.backfill import (
     canonicalize_bound,
     plan_windows,
     validate_window_row,
+    validate_window_upsert_keys,
 )
 from drt.engine.backfill import (
     stringify_cursor_value as _stringify_cursor_value,
@@ -1620,6 +1621,17 @@ def _run_sync_body(
                 run_id=total_result.run_id,
                 sync_name=sync.name,
             )
+
+            if window_bounds is not None:
+                upsert_key = getattr(sync.destination, "upsert_key", None)
+                if upsert_key:
+                    validate_window_upsert_keys(
+                        record_batch,
+                        upsert_key,
+                        sync_name=sync.name,
+                        low=window_bounds[0],
+                        high=window_bounds[1],
+                    )
 
             # Managed destination tables (#760): the check runs on the first
             # destination-facing batch, after every transform and before plan

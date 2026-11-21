@@ -224,26 +224,6 @@ class MySQLDestination(BaseSqlDestination):
             "manually; drt never changes constraints on an existing table."
         )
 
-    def _validate_upsert_keys_present(
-        self,
-        records: list[dict[str, Any]],
-        config: Any,
-        sync_options: SyncOptions,
-    ) -> None:
-        super()._validate_upsert_keys_present(records, config, sync_options)
-        if sync_options.backfill is None or not config.upsert_key:
-            return
-        null_key_indices = [
-            index
-            for index, record in enumerate(records)
-            if any(record[key] is None for key in config.upsert_key)
-        ]
-        if null_key_indices:
-            raise ValueError(
-                "sync.backfill does not support NULL MySQL destination.upsert_key "
-                f"values (record indexes: {null_key_indices})"
-            )
-
     @staticmethod
     def _managed_is_duplicate_column_error(exc: Exception) -> bool:
         return bool(exc.args) and exc.args[0] == _MYSQL_DUPLICATE_COLUMN
