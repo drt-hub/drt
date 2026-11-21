@@ -195,11 +195,21 @@ def windowed_backfill_destination_types() -> tuple[str, ...]:
     decision.
     """
     _ensure_plugins_loaded()
+    # Built-ins register lazily; this diagnostic is the error path, so paying
+    # the imports here keeps the normal start-up path import-free.
     return tuple(
         sorted(
             type_name
             for type_name, (_, destination_class) in _destination_registry.items()
-            if callable(getattr(destination_class, "backfill_unsupported_reason", None))
+            if callable(
+                getattr(
+                    destination_class.resolve()
+                    if isinstance(destination_class, _LazyConnector)
+                    else destination_class,
+                    "backfill_unsupported_reason",
+                    None,
+                )
+            )
         )
     )
 
