@@ -8,3 +8,4 @@ Tested, copy-paste sync recipes for SaaS destinations using `drt`'s built-in [`r
 - [Braze (`/users/track`)](braze.md) — sync user attributes and custom events
 - [Customer.io (Track API v2 `batch`)](customer_io.md) — identify customers and send events
 - [Iterable (`bulkUpdate` / `trackBulk`)](iterable.md) — sync user profiles and bulk events
+- [Segment (HTTP Tracking API `batch`)](segment.md) — send warehouse events or user traits
