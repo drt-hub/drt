@@ -109,8 +109,11 @@ mentions() {
 # Registrations may span multiple lines (e.g. salesforce_bulk), so collapse
 # newlines before matching — a single-line regex silently drops those entries
 # and skips every downstream check for them (doc / skill / README / MCP).
-destinations=$(tr '\n' ' ' < "$REGISTRY" | grep -oE 'register_destination\(\s*"[a-z_0-9]+"' | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
-sources=$(tr '\n' ' ' < "$REGISTRY" | grep -oE 'register_source\(\s*"[a-z_0-9]+"' | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
+# Built-ins are registered from tables (lazy imports), so ask the registry itself
+# rather than grepping call sites. Private dicts are read on purpose: the public
+# listing helpers also load third-party plugins, which are not repo surfaces.
+destinations=$(PYTHONPATH="$PWD" python -c 'from drt.connectors import registry as r; print("\n".join(sorted(r._destination_registry)))')
+sources=$(PYTHONPATH="$PWD" python -c 'from drt.connectors import registry as r; print("\n".join(sorted(r._source_registry)))')
 mcp_tools=$(grep -oE '    def (drt_[a-z_]+)\(' "$MCP_SERVER" | grep -oE 'drt_[a-z_]+' | sort)
 
 echo "== drift check: $(echo "$destinations" | wc -l | tr -d ' ') destinations, $(echo "$sources" | wc -l | tr -d ' ') sources, $(echo "$mcp_tools" | wc -l | tr -d ' ') MCP tools =="

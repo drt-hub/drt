@@ -13,13 +13,12 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from drt.config.models import SyncConfig
-from drt.config.profiles import ProfileConfigLike
-from drt.destinations.base import SyncResult
-from drt.state.manager import SyncState
-
 if TYPE_CHECKING:
+    from drt.config.models import SyncConfig
+    from drt.config.profiles import ProfileConfigLike
+    from drt.destinations.base import SyncResult
     from drt.destinations.row_errors import RowError
+    from drt.state.manager import SyncState
 
 console = Console()
 

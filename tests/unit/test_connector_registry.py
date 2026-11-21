@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
 from drt.config.credentials import DuckDBProfile, PostgresProfile
@@ -83,6 +86,36 @@ class TestConnectorRegistry:
         source = get_source(profile)
         assert source is not None
         assert type(source).__name__ == "DuckDBSource"
+
+    def test_builtin_implementations_are_imported_only_when_selected(self):
+        """Config registration must not eagerly import every connector implementation."""
+        code = """
+import sys
+from drt.config.models import SlackDestinationConfig
+from drt.config.profiles import SQLiteProfile
+from drt.connectors import registry
+
+assert "drt.destinations.airtable" not in sys.modules
+assert "drt.destinations.slack" not in sys.modules
+assert "drt.sources.bigquery" not in sys.modules
+assert "drt.sources.sqlite" not in sys.modules
+registry.get_destination(
+    SlackDestinationConfig(type="slack", webhook_url_env="SLACK_WEBHOOK_URL")
+)
+registry.get_source(SQLiteProfile(type="sqlite", database=":memory:"))
+assert "drt.destinations.slack" in sys.modules
+assert "drt.destinations.airtable" not in sys.modules
+assert "drt.sources.sqlite" in sys.modules
+assert "drt.sources.bigquery" not in sys.modules
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert completed.returncode == 0, completed.stderr
 
     def test_unknown_destination_error_message(self):
         """Error message for unknown destination lists available options."""
