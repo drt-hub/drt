@@ -107,6 +107,16 @@ masking. The engine checks this before the destination write; if a key is
 missing or NULL, it reports the sync, column, and window and leaves that window
 uncheckpointed so an operator can correct the source data and retry safely.
 
+Upsert keys must be unique within each window as well. drt tracks a canonical,
+type-tagged 16-byte BLAKE2b digest for every destination-facing composite key
+across all streamed batches in the window. This distinguishes values such as
+integer `1`, string `"1"`, and float `1.0` without buffering records or retaining
+raw keys. A repeat fails before its batch is written, reports only the sync, key
+columns, window, and one-based destination-row ordinal, and leaves the window
+uncheckpointed. The set resets for the next window. Budget approximately 16
+bytes per row plus Python set/object overhead; for very large windows, dedupe
+the model on the upsert key or shrink `sync.backfill.window`.
+
 ## Recovery and state safety
 
 Use `drt state reset`; hand-editing `.drt/state.json` or

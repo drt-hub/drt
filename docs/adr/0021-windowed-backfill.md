@@ -822,3 +822,21 @@ window batch reaches any `WindowedBackfillCapable` destination. A violation
 names the sync, key column, and half-open window, aborts the write, and leaves
 the window uncheckpointed; this is required because SQL uniqueness and `MERGE`
 equality generally treat NULL keys as distinct, making replay duplicate rows.
+
+## Amendment 2026-11-22 (slice 3 round 8)
+
+**Destination-facing upsert keys must also be unique within each window.** The
+shared engine incrementally tracks keys across all streamed batches in the
+current window and rejects the first repeat before its batch is written. The
+error names the sync, key columns, half-open window, and the repeat's one-based
+destination-row ordinal, but never includes raw key values. The window remains
+uncheckpointed, so any earlier keyed batches are safe to replay.
+
+Tracking retains only a 16-byte BLAKE2b digest per row, plus Python set/object
+overhead; records and raw keys are not buffered. The canonical digest input is
+type-tagged: integers, strings, and floats are deliberately distinct (`1`,
+`"1"`, and `1.0` do not collide by coercion), composite components retain their
+order, and common warehouse scalar types have stable encodings. A digest
+collision fails closed as a duplicate. The set resets after every window.
+Operators whose window cardinality makes this memory cost too high must dedupe
+the model on `destination.upsert_key` or shrink `sync.backfill.window`.

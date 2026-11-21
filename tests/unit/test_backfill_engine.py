@@ -334,6 +334,117 @@ def test_every_backfill_destination_rejects_invalid_key_before_write_and_checkpo
 
 
 @pytest.mark.parametrize("destination_type", windowed_backfill_destination_types())
+def test_every_backfill_destination_rejects_duplicate_composite_key_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_type: str,
+) -> None:
+    config = _capable_destination_config(destination_type)
+    sync = _sync_for_destination(config)
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=2))
+    monkeypatch.setattr(destination, "load", load)
+    if destination_type == "mysql":
+        monkeypatch.setattr(destination, "validate_backfill_target", lambda _config: None)
+    state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
+    rows = [
+        {"cursor": 1, "tenant_id": "tenant-secret", "id": "id-secret", "value": "first"},
+        {"cursor": 2, "tenant_id": "tenant-secret", "id": "id-secret", "value": "second"},
+    ]
+
+    with pytest.raises(ValueError) as exc_info:
+        run_sync(sync, WindowSource(rows), destination, _profile(), tmp_path, observer=observer)
+
+    message = str(exc_info.value)
+    assert "events" in message
+    assert "['tenant_id', 'id']" in message
+    assert "row ordinal 2" in message
+    assert "[0, 3)" in message
+    assert "tenant-secret" not in message
+    assert "id-secret" not in message
+    load.assert_not_called()
+    assert checkpoint.checkpoints == 0
+    assert state.value is None
+
+
+def test_duplicate_key_across_batches_fails_before_second_batch_write(tmp_path: Path) -> None:
+    config = _capable_destination_config("postgres")
+    sync = _sync_for_destination(config)
+    sync.sync.batch_size = 1
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=1))
+    destination.load = load
+    state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
+    rows = [
+        {"cursor": 1, "tenant_id": "tenant", "id": 7},
+        {"cursor": 2, "tenant_id": "tenant", "id": 7},
+    ]
+
+    with pytest.raises(ValueError, match="row ordinal 2"):
+        run_sync(sync, WindowSource(rows), destination, _profile(), tmp_path, observer=observer)
+
+    load.assert_called_once_with([rows[0]], config, sync.sync)
+    assert checkpoint.checkpoints == 0
+    assert state.value is None
+
+
+def test_window_key_digest_keeps_numeric_and_text_types_distinct(tmp_path: Path) -> None:
+    config = _capable_destination_config("postgres")
+    sync = _sync_for_destination(config)
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=3))
+    destination.load = load
+    state = MemoryState()
+    rows = [
+        {"cursor": 0, "tenant_id": "tenant", "id": 1},
+        {"cursor": 1, "tenant_id": "tenant", "id": "1"},
+        {"cursor": 2, "tenant_id": "tenant", "id": 1.0},
+    ]
+
+    run_sync(
+        sync,
+        WindowSource(rows),
+        destination,
+        _profile(),
+        tmp_path,
+        observer=_observer(state),
+    )
+
+    load.assert_called_once_with(rows, config, sync.sync)
+    assert state.value is not None and state.value.last_cursor_value == "3"
+
+
+def test_duplicate_key_set_resets_between_windows(tmp_path: Path) -> None:
+    config = _capable_destination_config("postgres")
+    sync = _sync_for_destination(config)
+    sync.sync.backfill.end = 6
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=1))
+    destination.load = load
+    state = MemoryState()
+    rows = [
+        {"cursor": 1, "tenant_id": "tenant", "id": 7},
+        {"cursor": 4, "tenant_id": "tenant", "id": 7},
+    ]
+
+    run_sync(
+        sync,
+        WindowSource(rows),
+        destination,
+        _profile(),
+        tmp_path,
+        observer=_observer(state),
+    )
+
+    assert load.call_count == 2
+    assert state.value is not None and state.value.last_cursor_value == "6"
+
+
+@pytest.mark.parametrize("destination_type", windowed_backfill_destination_types())
 def test_every_backfill_destination_replay_after_checkpoint_failure_is_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

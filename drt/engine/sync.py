@@ -1453,6 +1453,8 @@ def _run_sync_body(
     # source/destination error.
     extract_span = tracer.start_span("drt.sync.extract")
     stream_consumed = True
+    window_key_digests: set[bytes] = set()
+    window_key_row_ordinal = 0
     try:
         for record_batch in batch(records_iter, sync.sync.batch_size):
             # Cooperative shutdown — break before processing this batch.
@@ -1625,12 +1627,14 @@ def _run_sync_body(
             if window_bounds is not None:
                 upsert_key = getattr(sync.destination, "upsert_key", None)
                 if upsert_key:
-                    validate_window_upsert_keys(
+                    window_key_row_ordinal = validate_window_upsert_keys(
                         record_batch,
                         upsert_key,
                         sync_name=sync.name,
                         low=window_bounds[0],
                         high=window_bounds[1],
+                        seen_key_digests=window_key_digests,
+                        row_ordinal=window_key_row_ordinal,
                     )
 
             # Managed destination tables (#760): the check runs on the first
