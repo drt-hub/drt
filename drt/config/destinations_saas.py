@@ -334,6 +334,8 @@ class PipedriveDestinationConfig(DescribableConfig):
     base_url: str | None = None
     object: Literal["person"] = "person"  # organization / deal come in follow-up PRs
     match_field: Literal["email", "name", "phone"] = "email"
+    # Blind replay after create reconciliation misses is an explicit duplicate-risk opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 

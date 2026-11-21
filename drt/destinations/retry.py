@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from datetime import timezone
 from email.utils import parsedate_to_datetime
+from enum import Enum
 from typing import TypeVar
 
 import httpx
@@ -17,6 +18,65 @@ import httpx
 from drt.config.models import RetryConfig, SyncOptions
 
 T = TypeVar("T")
+
+
+class OperationSafety(Enum):
+    """Replay contract for one concrete HTTP operation (ADR 0023)."""
+
+    IDEMPOTENT = "idempotent"
+    KEYED = "keyed"
+    RECONCILIABLE_CREATE = "reconciliable_create"
+    BLIND_CREATE = "blind_create"
+
+
+class FailureSafety(Enum):
+    """Whether replaying after one failure can duplicate a side effect."""
+
+    SAFE_TO_REPLAY = "safe_to_replay"
+    DELIVERY_UNKNOWN = "delivery_unknown"
+
+
+class RetryDirective(Enum):
+    """A delivery-unknown handler can explicitly authorize another attempt."""
+
+    RETRY = "retry"
+
+
+class DeliveryUnknownError(RuntimeError):
+    """The remote side may have committed, so automatic replay was suppressed."""
+
+    def __init__(self, message: str, *, cause: Exception, attempt: int) -> None:
+        super().__init__(message)
+        self.cause = cause
+        self.attempt = attempt
+
+    @property
+    def http_status(self) -> int | None:
+        """Preserve a proxy's ambiguous status for ``RowError`` diagnostics."""
+        if isinstance(self.cause, httpx.HTTPStatusError):
+            return self.cause.response.status_code
+        return None
+
+
+def classify_failure_safety(
+    operation: OperationSafety,
+    error: Exception,
+) -> FailureSafety:
+    """Classify a retryable failure at the request boundary (ADR 0023).
+
+    Idempotent and keyed operations can always repeat. Creates may repeat only
+    when the client proves no request bytes were sent. A 429 also remains
+    retryable: the server explicitly refused the attempt before accepting the
+    operation. Read/write/response transport failures and retryable 5xx
+    responses are delivery-unknown because the remote side may have committed.
+    """
+    if operation in {OperationSafety.IDEMPOTENT, OperationSafety.KEYED}:
+        return FailureSafety.SAFE_TO_REPLAY
+    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
+        return FailureSafety.SAFE_TO_REPLAY
+    if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return FailureSafety.SAFE_TO_REPLAY
+    return FailureSafety.DELIVERY_UNKNOWN
 
 
 def resolve_retry(
@@ -99,6 +159,9 @@ def with_retry(
     fn: Callable[[], T],
     config: RetryConfig,
     retry_on: Callable[[Exception], bool] | None = None,
+    *,
+    operation: OperationSafety | None = None,
+    on_delivery_unknown: Callable[[Exception, int], T | RetryDirective] | None = None,
 ) -> T:
     """Execute ``fn`` with exponential backoff on transient failures.
 
@@ -127,6 +190,14 @@ def with_retry(
     and never suppresses the built-in httpx handling. When it is ``None``,
     behaviour is exactly as it was before #766.
 
+    ``operation`` is opt-in so existing call sites retain byte-for-behavior
+    compatibility while connectors adopt ADR 0023. For a create, an ambiguous
+    failure is never fed back into ``fn`` blindly. ``on_delivery_unknown`` may
+    reconcile and return the operation result, explicitly return
+    ``RetryDirective.RETRY`` (the ``retry_creates`` escape hatch), or raise a
+    connector-specific ``DeliveryUnknownError``. Without a handler, the shared
+    error is raised immediately.
+
     Raises the last exception if all attempts are exhausted.
     """
     backoff = config.initial_backoff
@@ -148,6 +219,22 @@ def with_retry(
             if retry_on is None or not retry_on(e):
                 raise
             last_exc = e
+
+        if (
+            operation is not None
+            and last_exc is not None
+            and classify_failure_safety(operation, last_exc) is FailureSafety.DELIVERY_UNKNOWN
+        ):
+            if on_delivery_unknown is None:
+                raise DeliveryUnknownError(
+                    "Delivery is unknown; refusing to replay an operation that may have "
+                    "committed remotely.",
+                    cause=last_exc,
+                    attempt=attempt,
+                ) from last_exc
+            resolution = on_delivery_unknown(last_exc, attempt)
+            if resolution is not RetryDirective.RETRY:
+                return resolution
 
         if attempt < config.max_attempts:
             wait = backoff if retry_after is None else max(retry_after, backoff)

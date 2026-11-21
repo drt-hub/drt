@@ -1322,6 +1322,7 @@ destination:
   base_url: https://api.pipedrive.com/api/v2   # optional, https only: this is the default
   object: person                         # only person is supported for now
   match_field: email                     # email | name | phone: column for the exact search
+  retry_creates: false                   # default; true allows duplicate-risk blind create replay
   retry:                                 # optional: overrides sync.retry as a whole
     max_attempts: 3
     initial_backoff: 1.0
@@ -1340,7 +1341,11 @@ nothing written. `name`, `owner_id`, `org_id`, `visible_to` and `label_ids` pass
 through, `email`/`phone` become `emails`/`phones` lists (sent only when a person is created), and every other column goes to
 `custom_fields`, so `field_mappings` must rename it to Pipedrive's 40-character key (an
 unknown key is rejected by Pipedrive and becomes a per-row error). The token is sent in
-the `x-api-token` header. Each row costs about 25 API tokens (search 20 + write 5). See
+the `x-api-token` header. If a create response is lost or returns 5xx, drt re-searches by
+the exact `match_field`: one result is success, multiple results are a RowError, and no
+result fails delivery-unknown because the search index may lag. `retry_creates: true`
+allows a blind replay after a miss and can create a duplicate; 429 and pre-send connection
+failures remain retryable without it. Each row costs about 25 API tokens (search 20 + write 5). See
 [Pipedrive connector docs](../connectors/pipedrive.md).
 
 ### `type: sqs`
