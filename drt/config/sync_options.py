@@ -80,7 +80,6 @@ from drt.config.destinations_storage import (
     S3DestinationConfig,
 )
 from drt.config.duration import parse_duration
-from drt.templates.renderer import validate_template_syntax
 
 _DURATION_JSON_PATTERN = (
     r"^(?:\s*0*[1-9]\d*\s*[smhdw]\s*|\s*0*[1-9]\d*\s+"
@@ -760,6 +759,9 @@ class SyncOptions(BaseModel):
         ``on_error``. An empty field name is rejected too: it would produce a
         record key of ``""`` that no destination can address.
         """
+        if self.computed_fields:
+            from drt.templates.renderer import validate_template_syntax
+
         for name, template in (self.computed_fields or {}).items():
             if not name.strip():
                 raise ValueError("computed_fields keys must be non-empty field names.")

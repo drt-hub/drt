@@ -262,6 +262,27 @@ class TestSnowflakeWarehouseHistoryStore:
         assert len(entries) == 1
         sql = str(conn.cursor.return_value.execute.call_args.args[0])
         assert "WHERE sync_name" not in sql
+        assert (
+            "ORDER BY started_at DESC, run_id DESC NULLS LAST, "
+            "sync_run_id DESC NULLS LAST LIMIT" in sql
+        )
+
+    def test_read_breaks_started_at_ties_by_run_id_before_limit(self) -> None:
+        row_b = ("s", "t0", "t1", 1.5, "success", 2, 0, [], None, False, "run-b", "sr-b")
+        row_a = ("s", "t0", "t1", 1.5, "success", 1, 0, [], None, False, "run-a", "sr-a")
+        conn = _mock_conn(fetchall=[row_b, row_a])
+        with (
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+        ):
+            entries = SnowflakeWarehouseHistoryStore(_profile()).read("s", limit=2)
+
+        assert [entry.run_id for entry in entries] == ["run-b", "run-a"]
+        sql = str(conn.cursor.return_value.execute.call_args.args[0])
+        assert (
+            "ORDER BY started_at DESC, run_id DESC NULLS LAST, "
+            "sync_run_id DESC NULLS LAST LIMIT" in sql
+        )
 
     def test_prune_returns_zero_before_any_table_exists(self) -> None:
         with patch("drt.state.warehouse_snowflake._table_exists", return_value=False):

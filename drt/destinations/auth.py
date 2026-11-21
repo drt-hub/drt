@@ -54,7 +54,7 @@ class AuthHandler:
             password = resolve_env(None, auth.password_env)
             if not username:
                 raise ValueError(f"BasicAuth: env var '{auth.username_env}' is not set.")
-            if not password:
+            if password is None:
                 raise ValueError(f"BasicAuth: env var '{auth.password_env}' is not set.")
             encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
             return {"Authorization": f"Basic {encoded}"}

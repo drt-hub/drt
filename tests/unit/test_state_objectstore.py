@@ -63,9 +63,11 @@ def _state(name: str = "s", records: int = 1) -> SyncState:
     return SyncState(name, "2026-08-08T00:00:00+00:00", records, "success")
 
 
-def _history(name: str = "s", *, started_at: str | None = None) -> HistoryEntry:
+def _history(
+    name: str = "s", *, started_at: str | None = None, run_id: str | None = None
+) -> HistoryEntry:
     timestamp = started_at or datetime.now(timezone.utc).isoformat()
-    return HistoryEntry(name, timestamp, timestamp, 1.0, "success", 1, 0)
+    return HistoryEntry(name, timestamp, timestamp, 1.0, "success", 1, 0, run_id=run_id)
 
 
 def _dead(value: int) -> DeadLetter:
@@ -299,6 +301,18 @@ def test_prune_caps_by_started_at_not_append_order() -> None:
 
     assert store.prune("s", retention_days=30) == 1
     assert [entry.started_at for entry in store.read("s")] == [newest, middle]
+
+
+def test_history_ties_use_same_run_id_order_for_read_and_prune() -> None:
+    client = MemoryObjectClient()
+    store = ObjectStoreHistoryStore(client, max_entries=2)
+    started_at = datetime.now(timezone.utc).isoformat()
+    for run_id in ("run-b", "run-a", "run-c"):
+        store.append(_history(started_at=started_at, run_id=run_id))
+
+    assert [entry.run_id for entry in store.read("s")] == ["run-c", "run-b", "run-a"]
+    assert store.prune("s", retention_days=30) == 1
+    assert [entry.run_id for entry in store.read("s")] == ["run-c", "run-b"]
 
 
 def test_history_reads_all_syncs_newest_first_and_prunes_old_entries() -> None:

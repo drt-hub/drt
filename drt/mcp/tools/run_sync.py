@@ -33,7 +33,7 @@ def run_sync(
 ) -> dict[str, Any]:
     from drt.cli._helpers import get_watermark_storage, resolve_profile_name
     from drt.cli.main import _get_destination, _get_source
-    from drt.config.credentials import load_profile
+    from drt.config.credentials import load_profile, resolve_profile_paths
     from drt.config.parser import project_vars as resolve_project_vars
     from drt.engine.observer import CompositeObserver, DlqObserver, StatePersistingObserver
     from drt.engine.sync import run_sync as engine_run_sync
@@ -108,7 +108,10 @@ def run_sync(
             )
         }
 
-    profile = load_profile(resolve_profile_name(profile_name, project.profile))
+    profile = resolve_profile_paths(
+        load_profile(resolve_profile_name(profile_name, project.profile)),
+        ctx.project_dir,
+    )
     source = _get_source(profile)
     dest = _get_destination(sync)
     bundle = build_state_bundle(project, ctx.project_dir)

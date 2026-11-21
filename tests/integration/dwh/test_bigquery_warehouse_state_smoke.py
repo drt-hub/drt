@@ -154,6 +154,53 @@ def test_history_store_append_read_and_prune(
     assert [entry.started_at for entry in history.read(sync_name)] == [recent]
 
 
+def test_history_tie_break_is_stable_across_read_and_prune(
+    warehouse_profile: BigQueryProfile,
+) -> None:
+    from datetime import datetime, timezone
+
+    history = BigQueryWarehouseHistoryStore(warehouse_profile)
+    sync_name = f"history_tie_{uuid.uuid4().hex[:8]}"
+    tied_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def entry(started_at: str, run_id: str) -> HistoryEntry:
+        return HistoryEntry(
+            sync_name=sync_name,
+            started_at=started_at,
+            completed_at=started_at,
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+            run_id=run_id,
+        )
+
+    try:
+        history.append(entry("2020-01-01T00:00:00+00:00", "run-old"))
+        history.append(entry(tied_at, "run-a"))
+        history.append(entry(tied_at, "run-b"))
+
+        assert [item.run_id for item in history.read(sync_name, limit=2)] == ["run-b", "run-a"]
+        assert history.prune(sync_name, retention_days=30) == 1
+        assert [item.run_id for item in history.read(sync_name, limit=2)] == ["run-b", "run-a"]
+    finally:
+        assert warehouse_profile.keyfile is not None
+        client = bigquery.Client.from_service_account_json(
+            warehouse_profile.keyfile,
+            project=warehouse_profile.project,
+        )
+        table = f"`{warehouse_profile.project}.{warehouse_profile.managed_schema}._drt_history`"
+        config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sync_name", "STRING", sync_name),
+            ]
+        )
+        client.query(
+            f"DELETE FROM {table} WHERE sync_name = @sync_name",
+            job_config=config,
+        ).result()
+
+
 def test_dlq_fifo_reconcile_and_clear_round_trip(
     warehouse_profile: BigQueryProfile,
 ) -> None:

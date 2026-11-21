@@ -1972,3 +1972,268 @@ async def test_run_sync_full_refresh_real_run_clears_watermark(
     await call(srv, "drt_run_sync", sync_name="notify", dry_run=False, full_refresh=True)
 
     storage.delete.assert_called_once_with("notify")
+
+
+@pytest.mark.asyncio
+async def test_non_cwd_real_sqlite_profile_resolves_against_project_dir(
+    tmp_path_factory: Any, monkeypatch: Any
+) -> None:
+    """#1243: relative SQLite database paths resolve against project_dir, not cwd."""
+    import sqlite3
+
+    import yaml
+
+    from drt.config.credentials import SQLiteProfile
+
+    proj = tmp_path_factory.mktemp("sqlite_proj")
+    elsewhere = tmp_path_factory.mktemp("elsewhere_cwd")
+    (proj / "data").mkdir()
+    db_path = proj / "data" / "warehouse.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
+    conn.execute("INSERT INTO users (id, email) VALUES (1, 'ada@example.com')")
+    conn.commit()
+    conn.close()
+
+    (proj / "drt_project.yml").write_text(
+        yaml.dump({"name": "sqlite-non-cwd", "version": "0.1", "profile": "local"})
+    )
+    (proj / "syncs").mkdir()
+    (proj / "syncs" / "users_out.yml").write_text(
+        yaml.dump(
+            {
+                "name": "users_out",
+                "model": "SELECT id, email FROM users",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "https://example.invalid/hook",
+                },
+                "sync": {"mode": "full"},
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile",
+        lambda _name: SQLiteProfile(type="sqlite", database="data/warehouse.sqlite"),
+    )
+    monkeypatch.chdir(elsewhere)
+
+    srv = create_server(proj)
+
+    tested = await call(srv, "drt_test_profile", name="local")
+    assert tested == {"name": "local", "type": "sqlite", "ok": True}
+
+    run_res = await call(srv, "drt_run_sync", sync_name="users_out", dry_run=True)
+    assert run_res["success"] == 1
+    assert run_res["failed"] == 0
+    assert not (elsewhere / "data").exists()
+
+
+@pytest.mark.asyncio
+async def test_plan_apply_reads_relative_sqlite_from_project(
+    project_dir: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan, replan and apply read the real SQLite source outside the process cwd."""
+    import sqlite3
+
+    import yaml
+
+    from drt.cli import _plan_runner
+    from drt.cli.commands import run as run_cmd
+    from drt.config.credentials import SQLiteProfile
+    from drt.destinations.base import SyncResult
+    from drt.engine.diff import DiffResult
+
+    db_path = project_dir / "data" / "warehouse.sqlite"
+    db_path.parent.mkdir()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+        conn.execute("INSERT INTO users VALUES (1, 'Ada')")
+
+    (project_dir / "syncs" / "notify.yml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "notify",
+                "model": "SELECT id, name FROM users",
+                "destination": {
+                    "type": "postgres",
+                    "host": "localhost",
+                    "dbname": "d",
+                    "user": "u",
+                    "password": "p",
+                    "table": "users",
+                    "upsert_key": ["id"],
+                },
+                "sync": {"mode": "upsert"},
+            }
+        )
+    )
+    writes: list[dict[str, Any]] = []
+
+    class LocalDestination:
+        def load(self, records: list[dict[str, Any]], *_args: Any) -> SyncResult:
+            writes.extend(records)
+            return SyncResult(success=len(records))
+
+    def local_diff(records: list[dict[str, Any]], *_args: Any, **_kwargs: Any) -> DiffResult:
+        return DiffResult(added=records, total_source_rows=len(records))
+
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile",
+        lambda _name: SQLiteProfile(type="sqlite", database="data/warehouse.sqlite"),
+    )
+    monkeypatch.setattr(_plan_runner, "get_destination", lambda _sync: LocalDestination())
+    monkeypatch.setattr(run_cmd, "get_destination", lambda _sync: LocalDestination())
+    monkeypatch.setattr("drt.engine.diff.compute_diff", local_diff)
+    elsewhere = tmp_path_factory.mktemp("plan_apply_cwd")
+    monkeypatch.chdir(elsewhere)
+
+    srv = create_server(project_dir)
+    planned = await call(srv, "drt_plan", sync_name="notify")
+    assert planned["available"] and planned["summary"]["create"] == 1, planned
+    assert writes == []
+    applied = await call(srv, "drt_apply", plan_id=planned["plan_id"], approved_by="reviewer")
+    assert applied["applied"] is True, applied
+    assert writes == [{"id": 1, "name": "Ada"}]
+    assert not (elsewhere / "data").exists()
+
+
+@pytest.mark.asyncio
+async def test_non_cwd_duckdb_profile_resolves_against_project_dir(
+    tmp_path_factory: Any, monkeypatch: Any
+) -> None:
+    """#1243: relative DuckDB database paths resolve against project_dir, not cwd."""
+    duckdb = pytest.importorskip("duckdb")
+    import yaml
+
+    from drt.config.credentials import DuckDBProfile
+
+    proj = tmp_path_factory.mktemp("duckdb_proj")
+    elsewhere = tmp_path_factory.mktemp("elsewhere_cwd")
+    (proj / "data").mkdir()
+    db_path = proj / "data" / "warehouse.duckdb"
+    conn = duckdb.connect(str(db_path))
+    conn.execute("CREATE TABLE users (id INTEGER, email VARCHAR)")
+    conn.execute("INSERT INTO users VALUES (1, 'ada@example.com')")
+    conn.close()
+
+    (proj / "drt_project.yml").write_text(
+        yaml.dump({"name": "duckdb-non-cwd", "version": "0.1", "profile": "local"})
+    )
+    (proj / "syncs").mkdir()
+    (proj / "syncs" / "users_out.yml").write_text(
+        yaml.dump(
+            {
+                "name": "users_out",
+                "model": "SELECT id, email FROM users",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "https://example.invalid/hook",
+                },
+                "sync": {"mode": "full"},
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile",
+        lambda _name: DuckDBProfile(type="duckdb", database="data/warehouse.duckdb"),
+    )
+    monkeypatch.chdir(elsewhere)
+
+    srv = create_server(proj)
+
+    tested = await call(srv, "drt_test_profile", name="local")
+    assert tested == {"name": "local", "type": "duckdb", "ok": True}
+
+    run_res = await call(srv, "drt_run_sync", sync_name="users_out", dry_run=True)
+    assert run_res["success"] == 1
+    assert run_res["failed"] == 0
+    assert not (elsewhere / "data").exists()
+
+
+def test_resolve_profile_paths_preserves_absolute_memory_and_file_uri(
+    tmp_path: Path,
+) -> None:
+    """#1243: absolute paths, :memory:, and file: URIs stay untouched."""
+    from drt.config.credentials import SQLiteProfile, resolve_profile_paths
+
+    abs_db = str((tmp_path / "abs.sqlite").resolve())
+    assert (
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database=abs_db), tmp_path).database
+        == abs_db
+    )
+    assert (
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database=":memory:"), tmp_path).database
+        == ":memory:"
+    )
+    for uri in ("file:data.sqlite?mode=ro", "file:../outside.sqlite?mode=rw"):
+        assert (
+            resolve_profile_paths(SQLiteProfile(type="sqlite", database=uri), tmp_path).database
+            == uri
+        )
+
+
+@pytest.mark.parametrize(
+    "database",
+    [
+        "md:analytics",
+        "motherduck:analytics",
+        "s3://bucket/db.duckdb",
+        "https://host/db",
+        "gcs://bucket/db",
+        "azure://container/db",
+    ],
+)
+def test_resolve_profile_paths_preserves_duckdb_connection_schemes(
+    tmp_path: Path, database: str
+) -> None:
+    from drt.config.credentials import DuckDBProfile, resolve_profile_paths
+
+    profile = DuckDBProfile(type="duckdb", database=database)
+    assert resolve_profile_paths(profile, tmp_path) is profile
+
+
+def test_resolve_profile_paths_canonicalises_noncanonical_project_dir(tmp_path: Path) -> None:
+    from drt.config.credentials import SQLiteProfile, resolve_profile_paths
+
+    project = tmp_path / "project"
+    project.mkdir()
+    profile = SQLiteProfile(type="sqlite", database="data/db.sqlite")
+    resolved = resolve_profile_paths(profile, project / ".." / "project")
+    assert resolved.database == str(project / "data" / "db.sqlite")
+    with pytest.raises(ValueError, match="escapes project directory"):
+        resolve_profile_paths(
+            SQLiteProfile(type="sqlite", database="../outside.sqlite"), project / ".." / "project"
+        )
+
+
+def test_resolve_profile_paths_rejects_parent_escape(tmp_path: Path) -> None:
+    """#1243: relative paths with '..' escaping project_dir are rejected."""
+    from drt.config.credentials import SQLiteProfile, resolve_profile_paths
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    with pytest.raises(ValueError, match="escapes project directory"):
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database="../outside.sqlite"), proj)
+
+
+def test_resolve_profile_paths_rejects_symlink_escape(tmp_path: Path) -> None:
+    """#1243: relative symlinks pointing outside project_dir are rejected."""
+    from drt.config.credentials import SQLiteProfile, resolve_profile_paths
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    outside = tmp_path / "outside.sqlite"
+    outside.write_bytes(b"")
+    link = proj / "link.sqlite"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("symlink creation requires developer mode or admin on Windows")
+        raise
+
+    with pytest.raises(ValueError, match="escapes project directory"):
+        resolve_profile_paths(SQLiteProfile(type="sqlite", database="link.sqlite"), proj)

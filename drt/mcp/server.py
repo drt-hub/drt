@@ -65,7 +65,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     except ImportError as e:
         raise ImportError("MCP server requires: pip install drt-core[mcp]") from e
 
-    _project_dir = project_dir or Path(".")
+    _project_dir = (project_dir or Path(".")).resolve()
     ctx = _load_ctx(_project_dir)
 
     mcp: Any = FastMCP(
@@ -686,7 +686,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             ``{"name": ..., "type": ..., "ok": bool}`` and, on failure, an
             ``error`` message.
         """
-        return _test_profile(name)
+        return _test_profile(name, project_dir=_project_dir)
 
     # -----------------------------------------------------------------------
     # drt_doctor

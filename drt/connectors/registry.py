@@ -12,19 +12,43 @@ The registry enables:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
-
-from drt.destinations.base import Destination, StagedDestination
-from drt.sources.base import Source
 
 if TYPE_CHECKING:
     from drt.config.models import DestinationConfig
     from drt.config.profiles import ProfileConfigLike
+    from drt.destinations.base import Destination, StagedDestination
+    from drt.sources.base import Source
+
+
+@dataclass(frozen=True)
+class _LazyConnector:
+    """Import one built-in implementation only when it is instantiated.
+
+    Config classes stay eagerly registered because config parsing and plugin
+    discrimination need them. Third-party registrations continue to store the
+    concrete class supplied by the plugin; only drt's built-ins use this
+    private loader.
+    """
+
+    module: str
+    class_name: str
+
+    def resolve(self) -> type[Any]:
+        connector_class = getattr(import_module(self.module), self.class_name)
+        if not isinstance(connector_class, type):
+            raise TypeError(f"{self.module}.{self.class_name} is not a class")
+        return connector_class
+
+
+_ConnectorClass = type[Any] | _LazyConnector
 
 # Registry mappings: type_name -> (ConfigClass, ImplementationClass)
 # ConfigClass stored for future plugin validation — not used in lookup yet
-_destination_registry: dict[str, tuple[type[Any], type[Any]]] = {}
-_source_registry: dict[str, tuple[type[Any], type[Any]]] = {}
+_destination_registry: dict[str, tuple[type[Any], _ConnectorClass]] = {}
+_source_registry: dict[str, tuple[type[Any], _ConnectorClass]] = {}
 
 
 def register_destination(
@@ -70,6 +94,35 @@ def register_source(
             f"Source type '{type_name}' already registered. Each connector type must be unique."
         )
     _source_registry[type_name] = (profile_class, source_class)
+
+
+def _register_builtin_destination(
+    type_name: str,
+    config_class: type[Any],
+    module: str,
+    class_name: str,
+) -> None:
+    """Register a built-in without importing its implementation module."""
+    if type_name in _destination_registry:
+        raise ValueError(
+            f"Destination type '{type_name}' already registered. "
+            f"Each connector type must be unique."
+        )
+    _destination_registry[type_name] = (config_class, _LazyConnector(module, class_name))
+
+
+def _register_builtin_source(
+    type_name: str,
+    profile_class: type[Any],
+    module: str,
+    class_name: str,
+) -> None:
+    """Register a built-in without importing its implementation module."""
+    if type_name in _source_registry:
+        raise ValueError(
+            f"Source type '{type_name}' already registered. Each connector type must be unique."
+        )
+    _source_registry[type_name] = (profile_class, _LazyConnector(module, class_name))
 
 
 def _ensure_plugins_loaded() -> None:
@@ -188,7 +241,10 @@ def get_destination(config: DestinationConfig) -> Destination | StagedDestinatio
         ValueError: If the destination type is not registered
     """
     if config.type in _destination_registry:
-        _, destination_class = _destination_registry[config.type]
+        config_class, destination_class = _destination_registry[config.type]
+        if isinstance(destination_class, _LazyConnector):
+            destination_class = destination_class.resolve()
+            _destination_registry[config.type] = (config_class, destination_class)
         return destination_class()  # type: ignore[no-any-return]
 
     # If not found, provide helpful error message
@@ -211,7 +267,10 @@ def get_source(profile: ProfileConfigLike) -> Source:
         ValueError: If the source type is not registered
     """
     if profile.type in _source_registry:
-        _, source_class = _source_registry[profile.type]
+        profile_class, source_class = _source_registry[profile.type]
+        if isinstance(source_class, _LazyConnector):
+            source_class = source_class.resolve()
+            _source_registry[profile.type] = (profile_class, source_class)
         return source_class()  # type: ignore[no-any-return]
 
     # If not found, provide helpful error message
@@ -224,7 +283,9 @@ def get_source(profile: ProfileConfigLike) -> Source:
 def _register_all_connectors() -> None:
     """Register all built-in connectors.
 
-    This is called automatically when the module is imported.
+    Config/profile classes are imported immediately because validation needs
+    them. Implementation modules are named here but imported by
+    :func:`get_destination` or :func:`get_source` only when selected.
     """
     # Import config classes
     from drt.config.credentials import (
@@ -282,117 +343,107 @@ def _register_all_connectors() -> None:
         ZendeskDestinationConfig,
     )
 
-    # Import destination classes
-    from drt.destinations.airtable import AirtableDestination
-    from drt.destinations.amplitude import AmplitudeDestination
-    from drt.destinations.azure_blob import AzureBlobDestination
-    from drt.destinations.bigquery import BigQueryDestination
-    from drt.destinations.clickhouse import ClickHouseDestination
-    from drt.destinations.databricks import DatabricksDestination
-    from drt.destinations.discord import DiscordDestination
-    from drt.destinations.elasticsearch import ElasticsearchDestination
-    from drt.destinations.email_smtp import EmailSmtpDestination
-    from drt.destinations.file import FileDestination
-    from drt.destinations.gcs import GCSDestination
-    from drt.destinations.github_actions import GitHubActionsDestination
-    from drt.destinations.google_ads import GoogleAdsDestination
-    from drt.destinations.google_sheets import GoogleSheetsDestination
-    from drt.destinations.hubspot import HubSpotDestination
-    from drt.destinations.intercom import IntercomDestination
-    from drt.destinations.jira import JiraDestination
-    from drt.destinations.klaviyo import KlaviyoDestination
-    from drt.destinations.linear import LinearDestination
-    from drt.destinations.meta_conversions import MetaConversionsDestination
-    from drt.destinations.mixpanel import MixpanelDestination
-    from drt.destinations.mysql import MySQLDestination
-    from drt.destinations.notion import NotionDestination
-    from drt.destinations.parquet import ParquetDestination
-    from drt.destinations.pipedrive import PipedriveDestination  # <-- ADDED
-    from drt.destinations.postgres import PostgresDestination
-    from drt.destinations.rest_api import RestApiDestination
-    from drt.destinations.s3 import S3Destination
-    from drt.destinations.salesforce_bulk import SalesforceBulkDestination
-    from drt.destinations.sendgrid import SendGridDestination
-    from drt.destinations.slack import SlackDestination
-    from drt.destinations.snowflake import SnowflakeDestination
-    from drt.destinations.sqs import SQSDestination
-    from drt.destinations.staged_upload import StagedUploadDestination
-    from drt.destinations.teams import TeamsDestination
-    from drt.destinations.twilio import TwilioDestination
-    from drt.destinations.zendesk import ZendeskDestination
-
-    # Import source classes
-    from drt.sources.bigquery import BigQuerySource
-    from drt.sources.clickhouse import ClickHouseSource
-    from drt.sources.databricks import DatabricksSource
-    from drt.sources.deltalake import DeltaLakeSource
-    from drt.sources.duckdb import DuckDBSource
-    from drt.sources.iceberg import IcebergSource
-    from drt.sources.mysql import MySQLSource
-    from drt.sources.postgres import PostgresSource
-    from drt.sources.redshift import RedshiftSource
-    from drt.sources.rest_api import RestApiSource
-    from drt.sources.snowflake import SnowflakeSource
-    from drt.sources.sqlite import SQLiteSource
-    from drt.sources.sqlserver import SQLServerSource
-
     # Register all destinations
-    register_destination("rest_api", RestApiDestinationConfig, RestApiDestination)
-    register_destination("slack", SlackDestinationConfig, SlackDestination)
-    register_destination("sqs", SQSDestinationConfig, SQSDestination)
-    register_destination("twilio", TwilioDestinationConfig, TwilioDestination)
-    register_destination("discord", DiscordDestinationConfig, DiscordDestination)
-    register_destination("github_actions", GitHubActionsDestinationConfig, GitHubActionsDestination)
-    register_destination("hubspot", HubSpotDestinationConfig, HubSpotDestination)
-    register_destination("pipedrive", PipedriveDestinationConfig, PipedriveDestination)  # <-- ADDED
-    register_destination("amplitude", AmplitudeDestinationConfig, AmplitudeDestination)
-    register_destination("mixpanel", MixpanelDestinationConfig, MixpanelDestination)
-    register_destination("zendesk", ZendeskDestinationConfig, ZendeskDestination)
-    register_destination("jira", JiraDestinationConfig, JiraDestination)
-    register_destination("sendgrid", SendGridDestinationConfig, SendGridDestination)
-    register_destination("google_sheets", GoogleSheetsDestinationConfig, GoogleSheetsDestination)
-    register_destination("postgres", PostgresDestinationConfig, PostgresDestination)
-    register_destination("mysql", MySQLDestinationConfig, MySQLDestination)
-    register_destination("teams", TeamsDestinationConfig, TeamsDestination)
-    register_destination("clickhouse", ClickHouseDestinationConfig, ClickHouseDestination)
-    register_destination("parquet", ParquetDestinationConfig, ParquetDestination)
-    register_destination("file", FileDestinationConfig, FileDestination)
-    register_destination("s3", S3DestinationConfig, S3Destination)
-    register_destination("gcs", GCSDestinationConfig, GCSDestination)
-    register_destination("azure_blob", AzureBlobDestinationConfig, AzureBlobDestination)
-    register_destination("email_smtp", EmailSmtpDestinationConfig, EmailSmtpDestination)
-    register_destination("elasticsearch", ElasticsearchDestinationConfig, ElasticsearchDestination)
-    register_destination("linear", LinearDestinationConfig, LinearDestination)
-    register_destination("google_ads", GoogleAdsDestinationConfig, GoogleAdsDestination)
-    register_destination(
-        "meta_conversions", MetaConversionsDestinationConfig, MetaConversionsDestination
+    destinations = (
+        ("rest_api", RestApiDestinationConfig, "rest_api", "RestApiDestination"),
+        ("slack", SlackDestinationConfig, "slack", "SlackDestination"),
+        ("sqs", SQSDestinationConfig, "sqs", "SQSDestination"),
+        ("twilio", TwilioDestinationConfig, "twilio", "TwilioDestination"),
+        ("discord", DiscordDestinationConfig, "discord", "DiscordDestination"),
+        (
+            "github_actions",
+            GitHubActionsDestinationConfig,
+            "github_actions",
+            "GitHubActionsDestination",
+        ),
+        ("hubspot", HubSpotDestinationConfig, "hubspot", "HubSpotDestination"),
+        ("pipedrive", PipedriveDestinationConfig, "pipedrive", "PipedriveDestination"),
+        ("amplitude", AmplitudeDestinationConfig, "amplitude", "AmplitudeDestination"),
+        ("mixpanel", MixpanelDestinationConfig, "mixpanel", "MixpanelDestination"),
+        ("zendesk", ZendeskDestinationConfig, "zendesk", "ZendeskDestination"),
+        ("jira", JiraDestinationConfig, "jira", "JiraDestination"),
+        ("sendgrid", SendGridDestinationConfig, "sendgrid", "SendGridDestination"),
+        (
+            "google_sheets",
+            GoogleSheetsDestinationConfig,
+            "google_sheets",
+            "GoogleSheetsDestination",
+        ),
+        ("postgres", PostgresDestinationConfig, "postgres", "PostgresDestination"),
+        ("mysql", MySQLDestinationConfig, "mysql", "MySQLDestination"),
+        ("teams", TeamsDestinationConfig, "teams", "TeamsDestination"),
+        ("clickhouse", ClickHouseDestinationConfig, "clickhouse", "ClickHouseDestination"),
+        ("parquet", ParquetDestinationConfig, "parquet", "ParquetDestination"),
+        ("file", FileDestinationConfig, "file", "FileDestination"),
+        ("s3", S3DestinationConfig, "s3", "S3Destination"),
+        ("gcs", GCSDestinationConfig, "gcs", "GCSDestination"),
+        ("azure_blob", AzureBlobDestinationConfig, "azure_blob", "AzureBlobDestination"),
+        ("email_smtp", EmailSmtpDestinationConfig, "email_smtp", "EmailSmtpDestination"),
+        (
+            "elasticsearch",
+            ElasticsearchDestinationConfig,
+            "elasticsearch",
+            "ElasticsearchDestination",
+        ),
+        ("linear", LinearDestinationConfig, "linear", "LinearDestination"),
+        ("google_ads", GoogleAdsDestinationConfig, "google_ads", "GoogleAdsDestination"),
+        (
+            "meta_conversions",
+            MetaConversionsDestinationConfig,
+            "meta_conversions",
+            "MetaConversionsDestination",
+        ),
+        ("notion", NotionDestinationConfig, "notion", "NotionDestination"),
+        (
+            "salesforce_bulk",
+            SalesforceBulkDestinationConfig,
+            "salesforce_bulk",
+            "SalesforceBulkDestination",
+        ),
+        (
+            "staged_upload",
+            StagedUploadDestinationConfig,
+            "staged_upload",
+            "StagedUploadDestination",
+        ),
+        ("intercom", IntercomDestinationConfig, "intercom", "IntercomDestination"),
+        ("snowflake", SnowflakeDestinationConfig, "snowflake", "SnowflakeDestination"),
+        ("databricks", DatabricksDestinationConfig, "databricks", "DatabricksDestination"),
+        ("bigquery", BigQueryDestinationConfig, "bigquery", "BigQueryDestination"),
+        ("airtable", AirtableDestinationConfig, "airtable", "AirtableDestination"),
+        ("klaviyo", KlaviyoDestinationConfig, "klaviyo", "KlaviyoDestination"),
     )
-    register_destination("notion", NotionDestinationConfig, NotionDestination)
-    register_destination(
-        "salesforce_bulk", SalesforceBulkDestinationConfig, SalesforceBulkDestination
-    )
-    register_destination("staged_upload", StagedUploadDestinationConfig, StagedUploadDestination)
-    register_destination("intercom", IntercomDestinationConfig, IntercomDestination)
-    register_destination("snowflake", SnowflakeDestinationConfig, SnowflakeDestination)
-    register_destination("databricks", DatabricksDestinationConfig, DatabricksDestination)
-    register_destination("bigquery", BigQueryDestinationConfig, BigQueryDestination)
-    register_destination("airtable", AirtableDestinationConfig, AirtableDestination)
-    register_destination("klaviyo", KlaviyoDestinationConfig, KlaviyoDestination)
+    for type_name, config_class, module_name, class_name in destinations:
+        _register_builtin_destination(
+            type_name,
+            config_class,
+            f"drt.destinations.{module_name}",
+            class_name,
+        )
 
     # Register all sources
-    register_source("bigquery", BigQueryProfile, BigQuerySource)
-    register_source("duckdb", DuckDBProfile, DuckDBSource)
-    register_source("sqlite", SQLiteProfile, SQLiteSource)
-    register_source("postgres", PostgresProfile, PostgresSource)
-    register_source("redshift", RedshiftProfile, RedshiftSource)
-    register_source("clickhouse", ClickHouseProfile, ClickHouseSource)
-    register_source("mysql", MySQLProfile, MySQLSource)
-    register_source("snowflake", SnowflakeProfile, SnowflakeSource)
-    register_source("databricks", DatabricksProfile, DatabricksSource)
-    register_source("sqlserver", SQLServerProfile, SQLServerSource)
-    register_source("rest_api", RestApiProfile, RestApiSource)
-    register_source("deltalake", DeltaLakeProfile, DeltaLakeSource)
-    register_source("iceberg", IcebergProfile, IcebergSource)
+    sources = (
+        ("bigquery", BigQueryProfile, "bigquery", "BigQuerySource"),
+        ("duckdb", DuckDBProfile, "duckdb", "DuckDBSource"),
+        ("sqlite", SQLiteProfile, "sqlite", "SQLiteSource"),
+        ("postgres", PostgresProfile, "postgres", "PostgresSource"),
+        ("redshift", RedshiftProfile, "redshift", "RedshiftSource"),
+        ("clickhouse", ClickHouseProfile, "clickhouse", "ClickHouseSource"),
+        ("mysql", MySQLProfile, "mysql", "MySQLSource"),
+        ("snowflake", SnowflakeProfile, "snowflake", "SnowflakeSource"),
+        ("databricks", DatabricksProfile, "databricks", "DatabricksSource"),
+        ("sqlserver", SQLServerProfile, "sqlserver", "SQLServerSource"),
+        ("rest_api", RestApiProfile, "rest_api", "RestApiSource"),
+        ("deltalake", DeltaLakeProfile, "deltalake", "DeltaLakeSource"),
+        ("iceberg", IcebergProfile, "iceberg", "IcebergSource"),
+    )
+    for type_name, profile_class, module_name, class_name in sources:
+        _register_builtin_source(
+            type_name,
+            profile_class,
+            f"drt.sources.{module_name}",
+            class_name,
+        )
 
 
 # Auto-register all connectors on import

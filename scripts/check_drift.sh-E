@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# check_drift.sh — Detect docs / skill / MCP drift against the connector registry.
+#
+# Motivation: connectors and MCP tools ship in code PRs, but the
+# surrounding surfaces (docs/connectors/*.md, the /drt-create-sync and
+# /drt-init skills, the README tables, the MCP server's docstring and
+# drt_list_connectors inventory) are updated by hand and regularly lag
+# behind. Real drift observed before this script existed:
+#   - /drt-debug skill went 3 months without learning about `drt doctor`
+#   - the MCP server went 4 months behind the CLI (no drt_doctor, no
+#     --diff parity) and its docstring was missing drt_get_history
+#   - drt_list_connectors' hardcoded inventory silently lagged the
+#     registry by several connectors
+#
+# Checks (state-based — audits current reality, not a PR diff, so it
+# also catches drift that accumulated before the check existed):
+#   1. Every registered destination has docs/connectors/<name>.md
+#   2. Every registered destination is mentioned in the /drt-create-sync skill
+#   3. Every registered destination appears in README.md's Destinations table
+#   4. Every registered source appears in README.md's Sources table
+#   5. Every registered source is mentioned in the /drt-init skill
+#   6. Every MCP tool is listed in drt/mcp/server.py's module docstring
+#   7. Every MCP tool appears in README.md's MCP tools table
+#   8. Every registered connector appears in the drt_list_connectors inventory
+#   9. Every behaviour-changing CLI option reaches the MCP tool covering the
+#      same command (#871, via scripts/check_cli_mcp_parity.py)
+#  10. Every registered destination declares its `drt plan` coverage and the
+#      generated docs/guides/plan-coverage.md is current (#1223)
+#
+# Baseline: scripts/drift_baseline.txt holds known-accepted gaps, one
+# `check_id:item` per line (e.g. `dest-doc:discord`). Baselined items
+# are reported separately and do NOT fail the run — the file is a
+# ratchet to burn down over time, not a permanent allowlist.
+#
+# Exit codes:
+#   0 — no new drift (baselined gaps may still exist)
+#   1 — new drift found (not in baseline)
+#   2 — script error
+#
+# Usage: bash scripts/check_drift.sh   (or: make check-drift)
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+REGISTRY="drt/connectors/registry.py"
+MCP_SERVER="drt/mcp/server.py"
+CREATE_SYNC_SKILL="skills/drt/skills/drt-create-sync/SKILL.md"
+INIT_SKILL="skills/drt/skills/drt-init/SKILL.md"
+BASELINE="scripts/drift_baseline.txt"
+
+for f in "$REGISTRY" "$MCP_SERVER" "$CREATE_SYNC_SKILL" "$INIT_SKILL" README.md; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: expected file not found: $f" >&2
+        exit 2
+    fi
+done
+
+new_drift=0
+baselined=0
+
+# is_baselined <check_id> <item> — 0 if the gap is recorded in the baseline.
+is_baselined() {
+    [ -f "$BASELINE" ] && grep -qx "$1:$2" "$BASELINE"
+}
+
+# report <check_id> <item> <message>
+report() {
+    local check_id="$1" item="$2" message="$3"
+    if is_baselined "$check_id" "$item"; then
+        echo "KNOWN $check_id:$item  $message (baselined)"
+        baselined=$((baselined + 1))
+    else
+        echo "DRIFT $check_id:$item  $message"
+        new_drift=$((new_drift + 1))
+    fi
+}
+
+# fuzzy_term <type_key> — normalised search term: underscores → spaces.
+# Display surfaces (skills, README tables) use human names like
+# "GitHub Actions" / "Email SMTP"; matching the space-joined type key
+# case-insensitively covers almost all of them. Exceptions live in
+# display_alias below.
+fuzzy_term() {
+    echo "$1" | tr '_' ' '
+}
+
+# display_alias <type_key> — overrides for connectors whose display
+# name shares no token with the type key.
+display_alias() {
+    case "$1" in
+        file)   echo "CSV" ;;       # README/skill row is "CSV / JSON / JSONL file"
+        *)      echo "" ;;
+    esac
+}
+
+# mentions <type_key> <file> — 0 if the connector is mentioned in file.
+mentions() {
+    local key="$1" file="$2"
+    local term alias
+    term="$(fuzzy_term "$key")"
+    alias="$(display_alias "$key")"
+    grep -qi -- "$term" "$file" && return 0
+    [ -n "$alias" ] && grep -qi -- "$alias" "$file" && return 0
+    return 1
+}
+
+# Registrations may span multiple lines (e.g. salesforce_bulk), so collapse
+# newlines before matching — a single-line regex silently drops those entries
+# and skips every downstream check for them (doc / skill / README / MCP).
+destinations=$(tr '\n' ' ' < "$REGISTRY" | grep -oE 'register_destination\(\s*"[a-z_0-9]+"' | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
+sources=$(tr '\n' ' ' < "$REGISTRY" | grep -oE 'register_source\(\s*"[a-z_0-9]+"' | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
+mcp_tools=$(grep -oE '    def (drt_[a-z_]+)\(' "$MCP_SERVER" | grep -oE 'drt_[a-z_]+' | sort)
+
+echo "== drift check: $(echo "$destinations" | wc -l | tr -d ' ') destinations, $(echo "$sources" | wc -l | tr -d ' ') sources, $(echo "$mcp_tools" | wc -l | tr -d ' ') MCP tools =="
+echo
+
+# ---------------------------------------------------------------------------
+# Check 1: destination → docs/connectors/<name>.md  (underscores → hyphens)
+# ---------------------------------------------------------------------------
+for dest in $destinations; do
+    doc_name="${dest//_/-}"
+    if [ ! -f "docs/connectors/${doc_name}.md" ]; then
+        report "dest-doc" "$dest" "docs/connectors/${doc_name}.md missing"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 2: destination → /drt-create-sync skill mention
+# ---------------------------------------------------------------------------
+for dest in $destinations; do
+    if ! mentions "$dest" "$CREATE_SYNC_SKILL"; then
+        report "dest-skill" "$dest" "not mentioned in /drt-create-sync skill"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 3: destination → README.md Destinations table
+# ---------------------------------------------------------------------------
+readme_dest_section=$(awk '/^### Destinations/,/^## /' README.md)
+for dest in $destinations; do
+    term="$(fuzzy_term "$dest")"
+    alias="$(display_alias "$dest")"
+    if ! grep -qi -- "$term" <<< "$readme_dest_section"; then
+        if [ -z "$alias" ] || ! grep -qi -- "$alias" <<< "$readme_dest_section"; then
+            report "dest-readme" "$dest" "no row in README.md Destinations table"
+        fi
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 4: source → README.md Sources table
+# ---------------------------------------------------------------------------
+readme_src_section=$(awk '/^### Sources/,/^### Destinations/' README.md)
+for src in $sources; do
+    term="$(fuzzy_term "$src")"
+    if ! grep -qi -- "$term" <<< "$readme_src_section"; then
+        report "src-readme" "$src" "no row in README.md Sources table"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 5: source → /drt-init skill mention
+# ---------------------------------------------------------------------------
+for src in $sources; do
+    if ! mentions "$src" "$INIT_SKILL"; then
+        report "src-skill" "$src" "not mentioned in /drt-init skill"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 6: MCP tool → module docstring (first 30 lines of server.py)
+# ---------------------------------------------------------------------------
+docstring=$(head -30 "$MCP_SERVER")
+for tool in $mcp_tools; do
+    if ! grep -q "$tool" <<< "$docstring"; then
+        report "mcp-docstring" "$tool" "not listed in drt/mcp/server.py module docstring"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 7: MCP tool → README.md MCP tools table
+# ---------------------------------------------------------------------------
+for tool in $mcp_tools; do
+    if ! grep -q "\`$tool\`" README.md; then
+        report "mcp-readme" "$tool" "not in README.md MCP tools table"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 8: drt_list_connectors must DERIVE its inventory from the
+# drt.config.connectors SSoT (not a hand-maintained literal). The SSoT is
+# kept aligned with the registry by test_cli_list_connectors, so a derived
+# inventory can't drift — whereas a re-hardcoded one silently can (that's how
+# salesforce_bulk once fell out of the MCP list). Flag any regression to a
+# literal. Actual name/type parity is asserted in tests/unit/test_mcp.py.
+# ---------------------------------------------------------------------------
+# Since #723 part 1 the tool bodies live in drt/mcp/tools/<tool>.py and
+# server.py only registers thin delegates, so check the implementation module.
+MCP_LIST_CONNECTORS="drt/mcp/tools/list_connectors.py"
+if [ ! -f "$MCP_LIST_CONNECTORS" ]; then
+    report "mcp-inventory" "drt_list_connectors" \
+        "implementation module $MCP_LIST_CONNECTORS is missing (moved again?)"
+elif ! grep -q "connector_inventory" "$MCP_LIST_CONNECTORS"; then
+    report "mcp-inventory" "drt_list_connectors" \
+        "no longer derives from the drt.config.connectors SSoT (re-hardcoded?)"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 9: every behaviour-changing CLI option reaches the MCP tool covering
+# the same command (#871). Checks 6-8 verify a tool *exists*; nothing verified
+# that a tool kept up with its command's flags, which is why the v0.8.0 wave
+# (--limit, --fail-fast, --failed, --vars, --threads) shipped without MCP
+# parity and went unnoticed for three releases (#870).
+#
+# Delegated to Python because this needs to introspect the Typer/Click tree
+# and the tool signatures — grep cannot see either. The script owns the
+# structural exclusions (presentation flags, selection flags) and the
+# command->tool map; this loop only feeds its findings through the same
+# baseline ratchet as every other check.
+#
+# It exits 2 rather than reporting "no gaps" if introspection breaks, so a
+# Typer/Click change surfaces as an error instead of a silent pass. Run it
+# directly for the human-readable listing: python3 scripts/check_cli_mcp_parity.py
+# ---------------------------------------------------------------------------
+PARITY_SCRIPT="scripts/check_cli_mcp_parity.py"
+if [ ! -f "$PARITY_SCRIPT" ]; then
+    echo "ERROR: expected file not found: $PARITY_SCRIPT" >&2
+    exit 2
+fi
+parity_out="$(mktemp)"
+trap 'rm -f "$parity_out"' EXIT
+if ! python3 "$PARITY_SCRIPT" --porcelain > "$parity_out"; then
+    echo "ERROR: $PARITY_SCRIPT could not introspect the CLI/MCP surfaces (see above)." >&2
+    echo "       Refusing to report a clean audit on an unreliable enumeration." >&2
+    exit 2
+fi
+while IFS=$'\t' read -r item message; do
+    [ -z "$item" ] && continue
+    report "cli-mcp" "$item" "$message"
+done < "$parity_out"
+
+# ---------------------------------------------------------------------------
+# Check 10: every registered destination declares its `drt plan` coverage in
+# drt/engine/plan_coverage.py (#1223), and the generated coverage page is
+# current. A destination that cannot be planned says so with a reason; what it
+# may not do is stay silent. tests/unit/test_plan_coverage.py keeps each
+# declaration in line with the real code paths.
+# ---------------------------------------------------------------------------
+PLAN_COVERAGE_FILE="drt/engine/plan_coverage.py"
+if [ ! -f "$PLAN_COVERAGE_FILE" ]; then
+    echo "ERROR: expected file not found: $PLAN_COVERAGE_FILE" >&2
+    exit 2
+fi
+declared_plan=$(PYTHONPATH="$REPO_ROOT" python3 -c 'from drt.engine.plan_coverage import PLAN_COVERAGE; print("\n".join(sorted(PLAN_COVERAGE)))') || {
+    echo "ERROR: could not import $PLAN_COVERAGE_FILE" >&2
+    exit 2
+}
+for dest in $destinations; do
+    if ! echo "$declared_plan" | grep -qx -- "$dest"; then
+        report "plan-coverage" "$dest" "no entry in $PLAN_COVERAGE_FILE (declare its drt plan status)"
+    fi
+done
+if ! PYTHONPATH="$REPO_ROOT" python3 scripts/gen_plan_coverage.py --check 2>/dev/null; then
+    report "plan-coverage-doc" "stale" "docs/guides/plan-coverage.md is stale (run scripts/gen_plan_coverage.py)"
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo
+echo "== summary: $new_drift new drift item(s), $baselined baselined gap(s) =="
+if [ "$new_drift" -gt 0 ]; then
+    echo
+    echo "New drift found. Fix the surfaces above, or — only when a gap is"
+    echo "intentional — record it in $BASELINE as 'check_id:item'."
+    exit 1
+fi
+echo "No new drift. (Baselined gaps are tracked in $BASELINE — burn them down when possible.)"
+exit 0
