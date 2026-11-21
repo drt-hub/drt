@@ -30,7 +30,7 @@ from drt.engine.observer import (
 from drt.engine.plan import unsupported_reason
 from drt.engine.sync import run_sync as engine_run_sync
 from drt.sources.sqlite import SQLiteSource
-from drt.state.dlq import LocalDlqStore
+from drt.state.dlq import DeadLetter, DlqBackend, LocalDlqStore
 from drt.state.history import HistoryEntry
 from drt.state.manager import LocalStateManager, SyncState
 from drt.state.watermark import LocalWatermarkStorage
@@ -970,6 +970,126 @@ def test_dlq_append_failure_is_fatal_before_checkpoint(tmp_path: Path) -> None:
             observer=observer,
         )
     assert state.value is None
+
+
+def _strict_dlq_backend(backend: str, tmp_path: Path) -> DlqBackend:
+    if backend == "local":
+        return LocalDlqStore(tmp_path)
+    if backend in {"gcs", "s3"}:
+        from drt.state._objectstore import ObjectStoreDlqBackend
+
+        return ObjectStoreDlqBackend(MagicMock())
+    if backend == "postgres":
+        from drt.config.credentials import PostgresProfile
+        from drt.state.warehouse import PostgresWarehouseDlqBackend
+
+        return PostgresWarehouseDlqBackend(
+            PostgresProfile(type="postgres", host="h", dbname="d", user="u")
+        )
+    if backend == "snowflake":
+        from drt.config.credentials import SnowflakeProfile
+        from drt.state.warehouse_snowflake import SnowflakeWarehouseDlqBackend
+
+        return SnowflakeWarehouseDlqBackend(
+            SnowflakeProfile(type="snowflake", account="a", user="u", database="d")
+        )
+    if backend == "databricks":
+        from drt.config.credentials import DatabricksProfile
+        from drt.state.warehouse_databricks import DatabricksWarehouseDlqBackend
+
+        return DatabricksWarehouseDlqBackend(
+            DatabricksProfile(
+                type="databricks", server_hostname="h", http_path="/p", catalog="main"
+            )
+        )
+    from drt.state.warehouse_bigquery import BigQueryWarehouseDlqBackend
+
+    assert backend == "bigquery"
+    return BigQueryWarehouseDlqBackend(
+        BigQueryProfile(type="bigquery", project="p", dataset="analytics")
+    )
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
+@pytest.mark.parametrize(
+    ("existing_values", "current_values"),
+    [([], [0, 1]), ([99], [0])],
+    ids=["current-window-overflow", "pre-populated-full-queue"],
+)
+def test_strict_dlq_capacity_overflow_does_not_evict_or_checkpoint(
+    backend: str,
+    existing_values: list[int],
+    current_values: list[int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RowFailingDestination(RecordingDestination):
+        def load(
+            self,
+            records: list[dict[str, Any]],
+            config: DestinationConfig,
+            sync_options: SyncOptions,
+        ) -> SyncResult:
+            return SyncResult(
+                failed=len(records),
+                row_errors=[
+                    RowError(index, "row", None, "rejected")
+                    for index in range(len(records))
+                ],
+            )
+
+    store = _strict_dlq_backend(backend, tmp_path)
+    queue = [
+        DeadLetter(record={"id": value}, error_message="existing")
+        for value in existing_values
+    ]
+    append_calls: list[int] = []
+
+    def depth(_sync_name: str) -> int:
+        return len(queue)
+
+    def append(
+        _sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+    ) -> int:
+        append_calls.append(max_records)
+        queue.extend(entries)
+        if max_records > 0 and len(queue) > max_records:
+            del queue[: len(queue) - max_records]
+        return len(queue)
+
+    monkeypatch.setattr(store, "depth", depth)
+    monkeypatch.setattr(store, "append", append)
+    monkeypatch.setattr(store, "_append_strict", append)
+
+    state = MemoryState()
+    checkpoint = StatePersistingObserver(state, None)
+    observer = CompositeObserver(
+        [checkpoint, DlqObserver(store, max_records=1)], checkpoint_observer=checkpoint
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"raise dlq\.max_records or drain the queue via `drt retry events`",
+    ):
+        run_sync(
+            _sync(end=3, on_error="skip"),
+            WindowSource([{"cursor": value} for value in current_values]),
+            RowFailingDestination(),
+            _profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+    assert append_calls == []
+    assert [entry.record["id"] for entry in queue] == existing_values
+    assert state.value is None
+    assert state.saves == []
 
 
 def test_staged_destination_is_excluded_before_staging(tmp_path: Path) -> None:

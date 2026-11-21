@@ -57,6 +57,11 @@ checkpoint, drt verifies destination outcome cardinality, flushes the DLQ, and
 calls an async destination's optional `flush_pending()` acknowledgement hook.
 Any failure leaves the current window resumable.
 
+The pre-checkpoint DLQ flush never evicts older failures. If the existing queue
+plus the current window would exceed a finite `dlq.max_records`, drt leaves the
+queue and checkpoint unchanged. Raise `dlq.max_records` or drain the queue with
+`drt retry <sync>` before resuming.
+
 `watermark.lag` applies when resuming a durable checkpoint. drt subtracts the
 lag, clamps at `backfill.start`, replays ordinary-sized overlap windows, and
 never moves durable progress backward.

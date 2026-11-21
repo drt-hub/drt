@@ -804,3 +804,12 @@ necessary.
 11. **`--cursor-value` is not the windowed-backfill interface.** README, CLI,
     LLM context, and generated skills call it a legacy/ad-hoc one-bound recovery
     override and state that a sync declaring `sync.backfill` refuses it.
+
+## Amendment 2026-11-21 (slice 3 round 6)
+
+**A strict backfill DLQ flush never evicts.** Before mutating any local,
+object-store, or warehouse DLQ, drt compares the existing depth plus all
+current-window failures with a finite `dlq.max_records`. An overflow fails the
+window before its checkpoint and leaves the queue unchanged; the operator must
+raise the cap or drain the queue with `drt retry`. The ordinary non-backfill
+append contract remains FIFO-capped.

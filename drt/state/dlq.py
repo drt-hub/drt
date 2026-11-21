@@ -29,7 +29,7 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from drt.state._atomic import _fsync_parent_directory
 from drt.state._filelock import advisory_lock
@@ -251,6 +251,48 @@ class DlqBackend(Protocol):
         silently dropped. Returns the resulting full entry list.
         """
         ...
+
+
+class DlqCapacityExceeded(RuntimeError):
+    """A strict window append would evict an unreplayed dead letter."""
+
+
+class _StrictDlqBackend(Protocol):
+    def _append_strict(
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+    ) -> int: ...
+
+
+def append_strict_non_evicting(
+    store: DlqBackend,
+    sync_name: str,
+    entries: list[DeadLetter],
+    *,
+    max_records: int,
+    current_window_failures: int,
+) -> int:
+    """Durably append one window without ever enforcing the FIFO eviction cap."""
+    strict_append = getattr(store, "_append_strict", None)
+    if not callable(strict_append):
+        raise RuntimeError(
+            f"{type(store).__name__} does not support durable DLQ append"
+        )
+    if max_records > 0:
+        existing = store.depth(sync_name)
+        if existing + current_window_failures > max_records:
+            raise DlqCapacityExceeded(
+                f"DLQ capacity for '{sync_name}' would exceed dlq.max_records "
+                f"({existing} existing + {current_window_failures} current-window "
+                f"failures > {max_records}); raise dlq.max_records or drain the queue "
+                f"via `drt retry {sync_name}`"
+            )
+    return cast(_StrictDlqBackend, store)._append_strict(
+        sync_name, entries, max_records=0
+    )
 
 
 class LocalDlqStore:
