@@ -20,7 +20,7 @@ from typing import Any, Literal
 from drt.config.credentials import PostgresProfile, ProfileConfigLike, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
-from drt.sources.base import SnapshotDiffResult
+from drt.sources.base import SnapshotDiffResult, is_windowed_backfill_query
 
 # Sentinels for the #755 diff-hash concatenation (see extract_snapshot_diff).
 # Control characters, not printable text, so no real column value collides
@@ -209,6 +209,9 @@ class PostgresSource:
         def _connect_and_execute() -> tuple[Any, Any]:
             conn = self._connect(config)
             try:
+                if is_windowed_backfill_query(query):
+                    with conn.cursor() as setup:
+                        setup.execute("SET TIME ZONE 'UTC'")
                 # Named cursor => server-side. The name only has to be unique
                 # within the session, and each extract() gets its own
                 # connection, so a fixed name is safe.

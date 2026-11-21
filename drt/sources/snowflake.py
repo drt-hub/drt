@@ -24,7 +24,7 @@ from typing import Any, Literal
 from drt.config.credentials import ProfileConfigLike, SnowflakeProfile, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
-from drt.sources.base import SnapshotDiffResult
+from drt.sources.base import SnapshotDiffResult, is_windowed_backfill_query
 
 # Snowflake error code for an expired authentication token — the session has
 # to be re-established, which is exactly what a retry does. Observed during
@@ -184,6 +184,8 @@ class SnowflakeSource:
             try:
                 cur = conn.cursor()
                 cur.arraysize = config.fetch_size
+                if is_windowed_backfill_query(query):
+                    cur.execute("ALTER SESSION SET TIMEZONE='UTC'")
                 cur.execute(query)
                 return conn, cur, [desc[0] for desc in cur.description]
             except BaseException:

@@ -460,6 +460,77 @@
       "title": "AzureBlobDestinationConfig",
       "type": "object"
     },
+    "BackfillConfig": {
+      "description": "Fixed-width cursor windows for an incremental backfill (ADR 0021).\n\nMode, incremental strategy, and watermark.default_value eligibility are\nenforced at validation time by ``drt validate``.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "window": {
+              "description": "Positive compact or long duration.",
+              "pattern": "^(?:\\s*0*[1-9]\\d*\\s*[smhdw]\\s*|\\s*0*[1-9]\\d*\\s+(?:[dD][aA][yY]|[hH][oO][uU][rR]|[mM][iI][nN][uU][tT][eE]|[sS][eE][cC][oO][nN][dD]|[wW][eE][eE][kK])(?:[sS])?\\s*)$",
+              "type": "string"
+            },
+            "start": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "window",
+            "start"
+          ],
+          "title": "Timestamp backfill",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "window": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            "start": {
+              "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
+              "type": "integer"
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "maximum": 9223372036854775807,
+                  "minimum": -9223372036854775808,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "window",
+            "start"
+          ],
+          "title": "Integer backfill",
+          "type": "object"
+        }
+      ],
+      "title": "BackfillConfig"
+    },
     "BasicAuth": {
       "properties": {
         "type": {
@@ -5270,6 +5341,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/WatermarkConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "backfill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BackfillConfig"
             },
             {
               "type": "null"

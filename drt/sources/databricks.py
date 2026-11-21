@@ -23,7 +23,7 @@ from typing import Any, Literal
 from drt.config.credentials import DatabricksProfile, ProfileConfigLike, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
-from drt.sources.base import SnapshotDiffResult
+from drt.sources.base import SnapshotDiffResult, is_windowed_backfill_query
 
 _SNAPSHOT_TOKEN_PROPERTY = "drt.snapshot_run_token"
 
@@ -192,6 +192,8 @@ class DatabricksSource:
             conn = self._connect(config, query_tags=query_tags)
             try:
                 cur = conn.cursor()
+                if is_windowed_backfill_query(query):
+                    cur.execute("SET TIME ZONE 'UTC'")
                 cur.execute(query)
                 return conn, cur, [desc[0] for desc in cur.description]
             except BaseException:

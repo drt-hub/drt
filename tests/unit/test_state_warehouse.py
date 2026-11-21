@@ -308,6 +308,23 @@ class TestPostgresWarehouseHistoryStore:
         selects = [s for s, _ in conn.cursor.return_value.statements if "ORDER BY" in s]
         assert selects and "sync_run_id, guards" in selects[0]
 
+    def test_read_breaks_started_at_ties_by_run_id_before_limit(self) -> None:
+        row_b = ("s", "t0", "t1", 1.5, "success", 2, 0, [], None, False, "run-b", "sr-b")
+        row_a = ("s", "t0", "t1", 1.5, "success", 1, 0, [], None, False, "run-a", "sr-a")
+        for sync_name in ("s", None):
+            conn = self._history_conn(self._BASE_COLUMNS, rows=[row_b, row_a])
+            with patch("drt.state.warehouse._connect", return_value=conn):
+                entries = PostgresWarehouseHistoryStore(_profile()).read(sync_name, limit=2)
+
+            assert [entry.run_id for entry in entries] == ["run-b", "run-a"]
+            select = next(
+                sql for sql, _ in conn.cursor.return_value.statements if "ORDER BY" in sql
+            )
+            assert (
+                "ORDER BY started_at DESC, run_id DESC NULLS LAST, "
+                "sync_run_id DESC NULLS LAST LIMIT" in select
+            )
+
     def test_read_never_alters_the_schema_and_omits_a_missing_column(self) -> None:
         row = ("s", "t0", "t1", 1.5, "success", 3, 0, [], None, False, "r", "sr")
         conn = self._history_conn(self._BASE_COLUMNS, rows=[row])

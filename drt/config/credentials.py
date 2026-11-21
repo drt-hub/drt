@@ -27,15 +27,17 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from inspect import signature
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
+from drt.config.base import PaginationConfig, RestIncrementalConfig, validate_rest_window_params
 from drt.config.profiles import (
     DEFAULT_FETCH_SIZE,
     BigQueryProfile,
@@ -79,6 +81,53 @@ class ObservabilityConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# DuckDB connection strings that are not local files: MotherDuck (``md:`` /
+# ``motherduck:``) and ``scheme://`` URLs (s3, https, gcs, ...). Anything else, such
+# as ``data:warehouse.duckdb`` or ``localhost:5432``, is a relative local path; write a
+# local file literally named ``md:x`` as ``./md:x``.
+_DUCKDB_REMOTE_DATABASE = re.compile(r"^(?:md|motherduck):|^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def resolve_profile_paths(
+    profile: ProfileConfigLike,
+    project_dir: Path | None = None,
+) -> ProfileConfigLike:
+    """Resolve relative SQLite/DuckDB database paths against *project_dir*.
+
+    Preserves ``:memory:``, ``file:`` URIs, DuckDB connection schemes,
+    and explicit absolute paths. URI paths are not checked for containment.
+    Rejects relative paths (including ``..`` and symlinks) that escape
+    *project_dir*.
+    """
+    if project_dir is None:
+        return profile
+    if isinstance(profile, (SQLiteProfile, DuckDBProfile)):
+        db = profile.database
+        if (
+            not db
+            or db == ":memory:"
+            or db.startswith("file:")
+            or Path(db).is_absolute()
+            or (isinstance(profile, DuckDBProfile) and _DUCKDB_REMOTE_DATABASE.match(db))
+        ):
+            return profile
+        try:
+            base = project_dir.resolve()
+            resolved = (base / db).resolve()
+        except (OSError, RuntimeError) as exc:
+            # A symlink loop (or a filesystem error while resolving) must surface
+            # as the same structured error as an escaping path, not an internal one.
+            raise ValueError(
+                f"Cannot resolve relative database path {db!r} under {project_dir}: {exc}"
+            ) from exc
+        if not resolved.is_relative_to(base):
+            raise ValueError(
+                f"Relative database path {db!r} escapes project directory {project_dir}."
+            )
+        return replace(profile, database=str(resolved))
+    return profile
 
 
 def _config_dir(override: Path | None = None) -> Path:
@@ -557,13 +606,23 @@ def _load_rest_api(raw: dict[str, Any]) -> RestApiProfile:
     url = raw.get("url", "")
     if not url:
         raise ValueError("REST API profile requires 'url'.")
+    incremental_raw = raw.get("incremental")
+    pagination_raw = raw.get("pagination")
+    pagination = (
+        TypeAdapter(PaginationConfig).validate_python(pagination_raw)
+        if pagination_raw is not None
+        else None
+    )
+    if incremental_raw is not None:
+        incremental = TypeAdapter(RestIncrementalConfig).validate_python(incremental_raw)
+        validate_rest_window_params(incremental, pagination)
     return RestApiProfile(
         type="rest_api",
         url=url,
         auth=raw.get("auth"),
-        pagination=raw.get("pagination"),
+        pagination=pagination_raw,
         result_path=raw.get("result_path"),
-        incremental=raw.get("incremental"),
+        incremental=incremental_raw,
     )
 
 
@@ -977,6 +1036,7 @@ __all__ = [
     "remove_profile",
     "resolve_env",
     "resolve_env_dict",
+    "resolve_profile_paths",
     "save_profile",
     "write_raw_profile",
 ]

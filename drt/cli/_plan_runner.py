@@ -148,7 +148,7 @@ def compute_plan(
     ``preflight(project, state_bundle, sync)`` may raise :class:`PlanCliError` to
     stop before anything is extracted.
     """
-    from drt.config.credentials import load_profile
+    from drt.config.credentials import load_profile, resolve_profile_paths
     from drt.config.parser import load_project, load_syncs
     from drt.config.vars import VarError, resolve_vars
     from drt.engine.sync import run_sync
@@ -160,7 +160,10 @@ def compute_plan(
         raise PlanCliError(str(e)) from e
 
     try:
-        profile = load_profile(resolve_profile_name(profile_name, project.profile))
+        profile = resolve_profile_paths(
+            load_profile(resolve_profile_name(profile_name, project.profile)),
+            project_dir,
+        )
     except (FileNotFoundError, KeyError, ValueError) as e:
         raise PlanCliError(str(e)) from e
 
@@ -288,7 +291,7 @@ def compute_plan_from_records(
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
 ) -> PlanContext:
     """Recompute a plan from decrypted destination-facing rows without reading the source."""
-    from drt.config.credentials import load_profile
+    from drt.config.credentials import load_profile, resolve_profile_paths
     from drt.config.parser import load_project, load_syncs
     from drt.config.vars import VarError, resolve_vars
     from drt.engine.diff import compute_diff
@@ -299,7 +302,10 @@ def compute_plan_from_records(
     except FileNotFoundError as e:
         raise PlanCliError(str(e)) from e
     try:
-        profile = load_profile(resolve_profile_name(profile_name, project.profile))
+        profile = resolve_profile_paths(
+            load_profile(resolve_profile_name(profile_name, project.profile)),
+            project_dir,
+        )
     except (FileNotFoundError, KeyError, ValueError) as e:
         raise PlanCliError(str(e)) from e
     try:

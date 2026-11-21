@@ -20,6 +20,7 @@ from typing import Any
 from drt.config.credentials import ClickHouseProfile, ProfileConfigLike
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
+from drt.sources.base import is_windowed_backfill_query
 
 
 class ClickHouseSource:
@@ -111,7 +112,10 @@ class ClickHouseSource:
         def _connect_and_open_stream() -> tuple[Any, Any]:
             client = self._connect(config)
             try:
-                stream = client.query_rows_stream(query)
+                if is_windowed_backfill_query(query):
+                    stream = client.query_rows_stream(query, settings={"session_timezone": "UTC"})
+                else:
+                    stream = client.query_rows_stream(query)
                 return client, stream
             except BaseException:
                 # A failed attempt cleans up after itself: the close no longer

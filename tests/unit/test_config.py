@@ -565,6 +565,46 @@ def test_load_profile_missing_key(tmp_path: Path) -> None:
         load_profile("dev", config_dir=tmp_path)
 
 
+def test_load_rest_profile_rejects_window_pagination_parameter_collision(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "api:\n"
+        "  type: rest_api\n"
+        "  url: https://api.example.com/events\n"
+        "  pagination:\n"
+        "    type: offset\n"
+        "  incremental:\n"
+        "    start_param: updated_since\n"
+        "    end_param: offset\n"
+    )
+
+    with pytest.raises(ValueError, match=r"must not collide.*'offset'"):
+        load_profile("api", config_dir=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "pagination_yaml",
+    [
+        "type: offset\n    offset_param: page\n    limit_param: page",
+        "type: cursor\n    cursor_param: page\n    limit_param: page\n    cursor_field: next",
+    ],
+)
+def test_load_rest_profile_rejects_internal_pagination_collision_without_incremental(
+    tmp_path: Path, pagination_yaml: str
+) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "api:\n"
+        "  type: rest_api\n"
+        "  url: https://api.example.com/events\n"
+        "  pagination:\n"
+        f"    {pagination_yaml}\n"
+    )
+
+    with pytest.raises(ValueError, match=r"pagination\..*_param must differ"):
+        load_profile("api", config_dir=tmp_path)
+
+
 # One representative instance per built-in profile type (#402 refactor
 # baseline), populated with non-default values wherever the type has one so a
 # round trip actually exercises every optional field save_profile() knows how
@@ -663,9 +703,9 @@ _ALL_BUILTIN_PROFILES: list[object] = [
         type="rest_api",
         url="https://api.example.com/v1",
         auth={"type": "bearer", "token_env": "API_TOKEN"},
-        pagination={"type": "cursor", "cursor_param": "next"},
+        pagination={"type": "cursor", "cursor_param": "next", "cursor_field": "next"},
         result_path="data.items",
-        incremental={"start_param": "updated_since"},
+        incremental={"start_param": "updated_since", "end_param": "updated_before"},
     ),
 ]
 
