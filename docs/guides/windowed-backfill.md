@@ -57,10 +57,12 @@ checkpoint, drt verifies destination outcome cardinality, flushes the DLQ, and
 calls an async destination's optional `flush_pending()` acknowledgement hook.
 Any failure leaves the current window resumable.
 
-The pre-checkpoint DLQ flush never evicts older failures. If the existing queue
-plus the current window would exceed a finite `dlq.max_records`, drt leaves the
-queue and checkpoint unchanged. Raise `dlq.max_records` or drain the queue with
-`drt retry <sync>` before resuming.
+The pre-checkpoint DLQ flush never evicts older failures. Capacity is checked
+against the prospective ID-merged queue: retrying an uncheckpointed window
+replaces its deterministic dead-letter IDs and consumes no extra capacity. If
+genuinely new IDs would exceed a finite `dlq.max_records`, drt leaves the queue
+and checkpoint unchanged. Raise `dlq.max_records` or drain the queue with `drt
+retry <sync>` before resuming.
 
 `watermark.lag` applies when resuming a durable checkpoint. drt subtracts the
 lag, clamps at `backfill.start`, replays ordinary-sized overlap windows, and
@@ -85,11 +87,11 @@ unsupported until their implementation opts in and proves the same contract.
 
 | Destination | v1 status | Required configuration or exclusion reason |
 |---|---|---|
-| PostgreSQL | Supported | A non-empty `destination.upsert_key`; `ON CONFLICT` makes replay keyed and synchronous. |
-| MySQL | Supported | A non-empty `destination.upsert_key`; `ON DUPLICATE KEY` makes replay keyed and synchronous. |
-| Snowflake | Supported | `destination.mode: merge` and a non-empty `upsert_key`. Insert mode is append-only. |
-| Databricks | Supported | `destination.mode: merge` and a non-empty `upsert_key`. Insert mode is append-only. |
-| BigQuery | Supported | `destination.mode: merge` and a non-empty `upsert_key`. Streaming insert mode is append-only. |
+| PostgreSQL | Supported | A non-empty `destination.upsert_key`; use ordinary deterministic, type-native equality. `citext` and nondeterministic ICU collations are outside the key contract. |
+| MySQL | Supported | A full-column PRIMARY/UNIQUE NOT NULL key whose columns are integer, BINARY/VARBINARY, or strings with a binary `*_bin` collation. The runtime preflight refuses coercing types and case/accent-insensitive collations. |
+| Snowflake | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and uncollated key columns. Insert mode and collated key expressions are outside the contract. |
+| Databricks | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and `UTF8_BINARY`/uncollated key columns. Case-insensitive and other non-binary collations are outside the contract. |
+| BigQuery | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and uncollated/default-binary key columns. Streaming insert mode and `COLLATE 'und:ci'` keys are outside the contract. |
 | ClickHouse | Excluded | `upsert_key` is informational; writes remain inserts, and deduplication depends on target-engine settings drt does not verify. |
 | Elasticsearch | Excluded | Not admitted in v1; keyed API replay and row-error correlation have not completed the destination audit. |
 | Salesforce Bulk | Excluded | Failed rows currently report `batch_index=0`, so row attribution is not trustworthy. |
@@ -115,7 +117,10 @@ raw keys. A repeat fails before its batch is written, reports only the sync, key
 columns, window, and one-based destination-row ordinal, and leaves the window
 uncheckpointed. The set resets for the next window. Budget approximately 16
 bytes per row plus Python set/object overhead; for very large windows, dedupe
-the model on the upsert key or shrink `sync.backfill.window`.
+the model on the upsert key or shrink `sync.backfill.window`. This guard is
+sound only for target-typed values under the destination-exact equality
+contract in the table above; it does not emulate database coercion or
+collation. Choose an exact key domain before enabling backfill.
 
 ## Recovery and state safety
 

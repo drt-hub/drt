@@ -264,7 +264,37 @@ class _StrictDlqBackend(Protocol):
         entries: list[DeadLetter],
         *,
         max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
     ) -> int: ...
+
+
+def prepare_strict_dlq_append(
+    sync_name: str,
+    existing_ids: Collection[str],
+    existing_depth: int,
+    entries: list[DeadLetter],
+    *,
+    max_records: int,
+    incoming_ids: Collection[str] | None = None,
+) -> list[DeadLetter]:
+    """Deduplicate one strict append and reject only prospective new IDs.
+
+    The caller must invoke this after its fresh read and inside the same
+    lock/transaction/retry attempt as the write. Replacing a deterministic
+    backfill dead-letter ID consumes no additional capacity.
+    """
+    deduped = {entry.id: entry for entry in entries}
+    candidate_ids = set(deduped) if incoming_ids is None else set(incoming_ids)
+    additions = candidate_ids.difference(existing_ids)
+    prospective_depth = existing_depth + len(additions)
+    if max_records > 0 and prospective_depth > max_records:
+        raise DlqCapacityExceeded(
+            f"DLQ capacity for '{sync_name}' would exceed dlq.max_records "
+            f"({existing_depth} existing + {len(additions)} new current-window IDs "
+            f"> {max_records}); raise dlq.max_records or drain the queue via "
+            f"`drt retry {sync_name}`"
+        )
+    return list(deduped.values())
 
 
 def append_strict_non_evicting(
@@ -273,25 +303,19 @@ def append_strict_non_evicting(
     entries: list[DeadLetter],
     *,
     max_records: int,
-    current_window_failures: int,
+    current_window_ids: Collection[str] | None = None,
 ) -> int:
-    """Durably append one window without ever enforcing the FIFO eviction cap."""
+    """Durably ID-merge one window, failing instead of evicting old entries."""
     strict_append = getattr(store, "_append_strict", None)
     if not callable(strict_append):
         raise RuntimeError(
             f"{type(store).__name__} does not support durable DLQ append"
         )
-    if max_records > 0:
-        existing = store.depth(sync_name)
-        if existing + current_window_failures > max_records:
-            raise DlqCapacityExceeded(
-                f"DLQ capacity for '{sync_name}' would exceed dlq.max_records "
-                f"({existing} existing + {current_window_failures} current-window "
-                f"failures > {max_records}); raise dlq.max_records or drain the queue "
-                f"via `drt retry {sync_name}`"
-            )
     return cast(_StrictDlqBackend, store)._append_strict(
-        sync_name, entries, max_records=0
+        sync_name,
+        entries,
+        max_records=max_records,
+        incoming_ids=current_window_ids,
     )
 
 
@@ -393,6 +417,7 @@ class LocalDlqStore:
         entries: list[DeadLetter],
         *,
         max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
     ) -> int:
         """Durably append or raise before a backfill window checkpoint."""
         if not entries:
@@ -401,7 +426,24 @@ class LocalDlqStore:
         with advisory_lock(path):
             with self._lock:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                lines = self._merge_lines(path, entries, max_records)
+                existing_lines = materialize_dead_letter_lines(self._read_raw(path))
+                existing_ids: set[str] = set()
+                for line in existing_lines:
+                    try:
+                        existing_id = json.loads(line).get("id")
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+                    if isinstance(existing_id, str):
+                        existing_ids.add(existing_id)
+                strict_entries = prepare_strict_dlq_append(
+                    sync_name,
+                    existing_ids,
+                    len(existing_lines),
+                    entries,
+                    max_records=max_records,
+                    incoming_ids=incoming_ids,
+                )
+                lines = self._merge_lines(path, strict_entries, 0)
                 self._write_lines_strict(path, lines)
                 return len(lines)
 

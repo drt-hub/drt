@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,12 @@ from drt.engine.observer import (
 from drt.engine.plan import unsupported_reason
 from drt.engine.sync import run_sync as engine_run_sync
 from drt.sources.sqlite import SQLiteSource
-from drt.state.dlq import DeadLetter, DlqBackend, LocalDlqStore
+from drt.state.dlq import (
+    DeadLetter,
+    DlqBackend,
+    LocalDlqStore,
+    prepare_strict_dlq_append,
+)
 from drt.state.history import HistoryEntry
 from drt.state.manager import LocalStateManager, SyncState
 from drt.state.watermark import LocalWatermarkStorage
@@ -604,6 +610,48 @@ def test_mysql_backfill_retry_without_unique_index_is_refused_before_extraction(
 
     assert source.extract_calls == 0
     assert source.windows == []
+    connection.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("data_type", "collation", "accepted"),
+    [
+        ("varchar", "utf8mb4_0900_ai_ci", False),
+        ("varchar", "utf8mb4_0900_bin", True),
+        ("decimal", None, False),
+    ],
+    ids=["case-insensitive-string", "binary-string", "coercing-decimal"],
+)
+def test_mysql_backfill_key_requires_exact_destination_equality(
+    data_type: str,
+    collation: str | None,
+    accepted: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="test",
+        table="events",
+        upsert_key=["key_value"],
+    )
+    connection = MagicMock()
+    connection.cursor.return_value.fetchall.return_value = [
+        ("uq_key", "key_value", 1, None, "NO", data_type, collation)
+    ]
+    destination = MySQLDestination()
+    monkeypatch.setattr(destination, "_connect", lambda _config: connection)
+
+    if accepted:
+        destination.validate_backfill_target(config)
+    else:
+        with pytest.raises(
+            ValueError,
+            match=r"exact MySQL comparison semantics.*ALTER the column collation|"
+            r"exact MySQL comparison semantics.*choose a different key",
+        ):
+            destination.validate_backfill_target(config)
+
     connection.close.assert_called_once_with()
 
 
@@ -1310,6 +1358,18 @@ def _strict_dlq_backend(backend: str, tmp_path: Path) -> DlqBackend:
     "backend",
     ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
 )
+def test_every_strict_dlq_backend_checks_prospective_ids_inside_append(
+    backend: str, tmp_path: Path
+) -> None:
+    method = type(_strict_dlq_backend(backend, tmp_path))._append_strict
+    source = inspect.getsource(method)
+    assert "prepare_strict_dlq_append(" in source
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
 @pytest.mark.parametrize(
     ("existing_values", "current_values"),
     [([], [0, 1]), ([99], [0])],
@@ -1352,11 +1412,25 @@ def test_strict_dlq_capacity_overflow_does_not_evict_or_checkpoint(
         entries: list[DeadLetter],
         *,
         max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
     ) -> int:
+        strict_entries = prepare_strict_dlq_append(
+            _sync_name,
+            {entry.id for entry in queue},
+            len(queue),
+            entries,
+            max_records=max_records,
+            incoming_ids=incoming_ids,
+        )
         append_calls.append(max_records)
-        queue.extend(entries)
-        if max_records > 0 and len(queue) > max_records:
-            del queue[: len(queue) - max_records]
+        positions = {entry.id: index for index, entry in enumerate(queue)}
+        for entry in strict_entries:
+            index = positions.get(entry.id)
+            if index is None:
+                positions[entry.id] = len(queue)
+                queue.append(entry)
+            else:
+                queue[index] = entry
         return len(queue)
 
     monkeypatch.setattr(store, "depth", depth)
@@ -1566,7 +1640,8 @@ def test_checkpoint_failure_then_retry_keeps_one_backfill_dead_letter(tmp_path: 
     state = MemoryState()
     failing_checkpoint = FailingCheckpoint(state, None)
     first_observer = CompositeObserver(
-        [failing_checkpoint, DlqObserver(store)], checkpoint_observer=failing_checkpoint
+        [failing_checkpoint, DlqObserver(store, max_records=1)],
+        checkpoint_observer=failing_checkpoint,
     )
     sync = _sync(end=3, on_error="skip")
     source_rows = [{"cursor": 1, "payload": "same"}]
@@ -1586,7 +1661,7 @@ def test_checkpoint_failure_then_retry_keeps_one_backfill_dead_letter(tmp_path: 
 
     checkpoint = StatePersistingObserver(state, None)
     retry_observer = CompositeObserver(
-        [checkpoint, DlqObserver(store)], checkpoint_observer=checkpoint
+        [checkpoint, DlqObserver(store, max_records=1)], checkpoint_observer=checkpoint
     )
     run_sync(
         sync,

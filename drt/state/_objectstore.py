@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, runtime_checkable
 
 from drt.state._integrity import report_unreadable
-from drt.state.dlq import DeadLetter, decode_dead_letter_lines
+from drt.state.dlq import DeadLetter, decode_dead_letter_lines, prepare_strict_dlq_append
 from drt.state.errors import StateContentionError
 from drt.state.history import HistoryEntry, _history_order_key
 from drt.state.manager import SyncState
@@ -362,7 +362,9 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
         max_records: int = 10_000,
     ) -> int:
         try:
-            return self._append_strict(sync_name, entries, max_records=max_records)
+            return self._append_strict(
+                sync_name, entries, max_records=max_records, _allow_eviction=True
+            )
         except Exception as exc:  # noqa: BLE001 — legacy best-effort DLQ contract
             logger.warning("DLQ append failed for sync=%s: %s", sync_name, exc)
             return self.depth(sync_name)
@@ -373,6 +375,8 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
         entries: list[DeadLetter],
         *,
         max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+        _allow_eviction: bool = False,
     ) -> int:
         """Append or raise; used before an ADR 0021 window checkpoint."""
         key = self._dlq_key(sync_name)
@@ -385,15 +389,26 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
                 try:
                     body, token = self._client.read_for_update(key)
                     combined = self._decode(body)
+                    if _allow_eviction:
+                        strict_entries = list({entry.id: entry for entry in entries}.values())
+                    else:
+                        strict_entries = prepare_strict_dlq_append(
+                            sync_name,
+                            {entry.id for entry in combined},
+                            len(combined),
+                            entries,
+                            max_records=max_records,
+                            incoming_ids=incoming_ids,
+                        )
                     positions = {entry.id: index for index, entry in enumerate(combined)}
-                    for entry in entries:
+                    for entry in strict_entries:
                         index = positions.get(entry.id)
                         if index is None:
                             positions[entry.id] = len(combined)
                             combined.append(entry)
                         else:
                             combined[index] = entry
-                    if max_records > 0 and len(combined) > max_records:
+                    if _allow_eviction and max_records > 0 and len(combined) > max_records:
                         combined = combined[-max_records:]
                     last_depth = len(combined)
                     self._client.write_if(key, self._encode(combined), token)

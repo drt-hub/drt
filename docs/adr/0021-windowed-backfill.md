@@ -840,3 +840,32 @@ order, and common warehouse scalar types have stable encodings. A digest
 collision fails closed as a duplicate. The set resets after every window.
 Operators whose window cardinality makes this memory cost too high must dedupe
 the model on `destination.upsert_key` or shrink `sync.backfill.window`.
+
+## Amendment 2026-11-22 (slice 3 round 9)
+
+**The engine key digest is only a within-window guard under a
+destination-exact equality contract.** It deliberately does not emulate SQL
+coercion, collation, or custom operator classes. Destination-facing key values
+must already use the target key's type, and the target equality relation must
+not equate two values that the type-tagged digest distinguishes.
+
+| Destination | Key-equality stance |
+|---|---|
+| PostgreSQL | Default deterministic, type-native equality is admitted. `citext`, nondeterministic ICU collations, and custom equality/operator classes are outside the v1 contract and must not be used for a backfill key. |
+| MySQL | Enforced before extraction. Every key column must be an integer type, BINARY/VARBINARY, or a string with a binary `*_bin` collation; float/double/decimal, date/time, and case/accent-insensitive collations are refused with ALTER-collation/key-choice guidance. The existing full-column PRIMARY/UNIQUE and NOT NULL proof still applies. |
+| Snowflake | Only uncollated, target-typed key columns are in contract. Snowflake collated columns or collated MERGE expressions are outside v1. |
+| BigQuery | Only the default binary string equality and target-typed scalar keys are in contract. A key with `COLLATE`, including `und:ci`, is outside v1. |
+| Databricks | Only uncollated/default `UTF8_BINARY`, target-typed keys are in contract. `UTF8_LCASE` and other non-binary collations are outside v1. |
+
+MySQL has a runtime schema preflight because its commonplace default string
+collations violate this contract. The other four stances are explicit v1
+schema contracts; adding metadata preflights for their opt-in/custom collation
+features is additive future hardening, not permission for those features now.
+
+**Strict DLQ capacity applies after deterministic-ID merge.** A boundary flush
+reads current IDs and checks capacity inside the backend's locked,
+transactional, or fresh-state write attempt. Incoming IDs already present are
+replacements and add zero depth. Only genuinely new current-window IDs count
+toward `dlq.max_records`; overflow still fails before mutation, never evicts,
+and leaves the checkpoint unchanged. This supersedes round 6's raw
+“existing depth plus all failures” wording.

@@ -320,6 +320,9 @@ def validate_window_upsert_keys(
     ``seen_key_digests`` and ``row_ordinal`` belong to one window and are
     carried across its streamed batches by the caller. Only 16-byte BLAKE2b
     digests are retained; raw key values never enter the error or the set.
+    The type-tagged digest is sound only under ADR 0021's destination-exact
+    key-equality contract: destination preflights must refuse key types or
+    collations that can equate two values this digest keeps distinct.
     """
     for record_index, record in enumerate(records):
         for column in upsert_key:

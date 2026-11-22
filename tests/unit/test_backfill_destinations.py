@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,6 +28,14 @@ from drt.destinations.base import (
 
 SUPPORTED_TYPES = {"bigquery", "databricks", "mysql", "postgres", "snowflake"}
 
+KEY_EQUALITY_STANCES = {
+    "postgres": "nondeterministic ICU collations",
+    "mysql": "binary `*_bin` collation",
+    "snowflake": "Snowflake collated columns",
+    "bigquery": "`COLLATE`, including `und:ci`",
+    "databricks": "`UTF8_LCASE`",
+}
+
 
 @pytest.mark.parametrize("destination_type", registered_destination_types())
 def test_every_registered_destination_defaults_to_unsupported_unless_declared(
@@ -36,6 +45,19 @@ def test_every_registered_destination_defaults_to_unsupported_unless_declared(
     assert (destination_type in windowed_backfill_destination_types()) == (
         destination_type in SUPPORTED_TYPES
     )
+
+
+@pytest.mark.parametrize(
+    ("destination_type", "documented_stance"),
+    KEY_EQUALITY_STANCES.items(),
+)
+def test_every_backfill_destination_has_an_explicit_key_equality_contract(
+    destination_type: str, documented_stance: str
+) -> None:
+    assert set(KEY_EQUALITY_STANCES) == set(windowed_backfill_destination_types())
+    adr = Path("docs/adr/0021-windowed-backfill.md").read_text()
+    assert destination_type in KEY_EQUALITY_STANCES
+    assert documented_stance in adr
 
 
 @pytest.mark.parametrize(

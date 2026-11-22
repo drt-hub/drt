@@ -739,7 +739,7 @@ class DlqObserver:
         self._max_records = max_records
         self._logger = logging.getLogger("drt")
         self._buffer: dict[str, list[DeadLetter]] = {}
-        self._buffered_counts: dict[str, int] = {}
+        self._buffered_ids: dict[str, set[str]] = {}
         self._capacity_blocked: set[str] = set()
 
     def on_sync_started(self, sync_name: str, started_at: str) -> None: ...
@@ -765,7 +765,7 @@ class DlqObserver:
         # dead letters.
         if sync_name in self._capacity_blocked:
             self._buffer.pop(sync_name, None)
-            self._buffered_counts.pop(sync_name, None)
+            self._buffered_ids.pop(sync_name, None)
             self._capacity_blocked.discard(sync_name)
             return
         self._flush(sync_name, strict=False)
@@ -785,7 +785,7 @@ class DlqObserver:
                     sync_name,
                     dead_letters,
                     max_records=self._max_records,
-                    current_window_failures=self._buffered_counts[sync_name],
+                    current_window_ids=self._buffered_ids[sync_name],
                 )
             else:
                 self._store.append(sync_name, dead_letters, max_records=self._max_records)
@@ -799,17 +799,19 @@ class DlqObserver:
             self._logger.warning("DLQ persist failure for '%s': %s", sync_name, exc)
             return
         self._buffer.pop(sync_name, None)
-        self._buffered_counts.pop(sync_name, None)
+        self._buffered_ids.pop(sync_name, None)
 
     def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None:
         if not dead_letters:
             return
         buffer = self._buffer.setdefault(sync_name, [])
         buffer.extend(dead_letters)
-        # Keep the full count even when the ordinary-sync memory cap below
-        # trims records; strict window flushes must still detect that overflow.
-        self._buffered_counts[sync_name] = self._buffered_counts.get(sync_name, 0) + len(
-            dead_letters
+        # Retain all identities even when the ordinary-sync memory cap below
+        # trims full records. Strict window flushes need the prospective ID
+        # merge, not the raw failure count: a checkpoint retry replaces the
+        # same deterministic IDs and consumes no additional capacity.
+        self._buffered_ids.setdefault(sync_name, set()).update(
+            entry.id for entry in dead_letters
         )
         # Cap the in-memory buffer as entries arrive, not just at flush —
         # a long-running sync with far more failures than max_records would

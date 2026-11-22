@@ -85,7 +85,7 @@ from drt.state._history_columns import (
     resolve_optional_columns,
 )
 from drt.state.audit_trail import AuditEntry
-from drt.state.dlq import DeadLetter
+from drt.state.dlq import DeadLetter, prepare_strict_dlq_append
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
 
@@ -718,10 +718,70 @@ class PostgresWarehouseDlqBackend:
             conn.close()
 
     def _append_strict(
-        self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
     ) -> int:
-        """Synchronously append or propagate the warehouse write failure."""
-        return self.append(sync_name, entries, max_records=max_records)
+        """Capacity-check and upsert in one PostgreSQL transaction."""
+        from psycopg2 import sql as _pgsql
+
+        conn = _connect(self._profile)
+        try:
+            self._ensure_table(conn)
+            cur = conn.cursor()
+            cur.execute(
+                _pgsql.SQL("SELECT id FROM {} WHERE sync_name = %s FOR UPDATE").format(
+                    _qualified(self._profile, _DLQ_TABLE)
+                ),
+                (sync_name,),
+            )
+            rows = cur.fetchall()
+            existing_ids = [str(row[0]) for row in rows]
+            strict_entries = prepare_strict_dlq_append(
+                sync_name,
+                set(existing_ids),
+                len(existing_ids),
+                entries,
+                max_records=max_records,
+                incoming_ids=incoming_ids,
+            )
+            for chunk in _chunked(strict_entries, _rows_per_chunk(8)):
+                values_sql = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk))
+                params: list[Any] = []
+                for entry in chunk:
+                    params.extend(
+                        (
+                            entry.id,
+                            sync_name,
+                            json.dumps(entry.record),
+                            entry.error_message,
+                            entry.http_status,
+                            entry.timestamp,
+                            entry.attempts,
+                            entry.sync_run_id,
+                        )
+                    )
+                cur.execute(
+                    _pgsql.SQL(
+                        "INSERT INTO {} (id, sync_name, record, error_message, "
+                        "http_status, ts, attempts, sync_run_id) "
+                        f"VALUES {values_sql} ON CONFLICT (id) DO UPDATE SET "
+                        "record = EXCLUDED.record, error_message = EXCLUDED.error_message, "
+                        "http_status = EXCLUDED.http_status, ts = EXCLUDED.ts, "
+                        "attempts = EXCLUDED.attempts, sync_run_id = EXCLUDED.sync_run_id"
+                    ).format(_qualified(self._profile, _DLQ_TABLE)),
+                    params,
+                )
+            conn.commit()
+            return len(set(existing_ids).union(entry.id for entry in strict_entries))
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:
         """Wholesale-replace the queue in one transaction.

@@ -103,7 +103,7 @@ from drt.state._history_columns import (
     encode_optional,
     resolve_optional_columns,
 )
-from drt.state.dlq import DeadLetter
+from drt.state.dlq import DeadLetter, prepare_strict_dlq_append
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
 
@@ -725,10 +725,34 @@ class SnowflakeWarehouseDlqBackend:
             conn.close()
 
     def _append_strict(
-        self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
     ) -> int:
-        """Synchronously append or propagate the warehouse write failure."""
-        return self.append(sync_name, entries, max_records=max_records)
+        """Capacity-check and upsert in one explicit Snowflake transaction."""
+        conn = _connect(self._profile)
+        try:
+            self._ensure_table(conn)
+            t = _qualified(self._profile, _DLQ_TABLE)
+            with _snowflake_transaction(conn):
+                cur = conn.cursor()
+                cur.execute(f"SELECT id FROM {t} WHERE sync_name = %s", (sync_name,))
+                existing_ids = [str(row[0]) for row in cur.fetchall()]
+                strict_entries = prepare_strict_dlq_append(
+                    sync_name,
+                    set(existing_ids),
+                    len(existing_ids),
+                    entries,
+                    max_records=max_records,
+                    incoming_ids=incoming_ids,
+                )
+                _upsert_dlq_entries(cur, t, sync_name, strict_entries)
+            return len(set(existing_ids).union(entry.id for entry in strict_entries))
+        finally:
+            conn.close()
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:
         """Wholesale-replace the queue in one explicit transaction.
