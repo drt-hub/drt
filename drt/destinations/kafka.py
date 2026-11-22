@@ -76,6 +76,7 @@ class KafkaDestination:
         retry = resolve_retry(config.retry, sync_options)
         result = SyncResult()
         pending: set[int] = set()
+        discarding = False
 
         def fail(index: int, exc: Exception) -> None:
             try:
@@ -87,8 +88,11 @@ class KafkaDestination:
             result.errors.append(str(exc))
 
         def on_delivery(index: int, error: Any, message: Any) -> None:
-            """Update pending, result counters"""
-            if index not in pending:
+            """
+            Update pending, result counters.
+            Use discarding to ensure 
+            """
+            if discarding or index not in pending:
                 return
             pending.remove(index)
             if error is None:
@@ -158,7 +162,14 @@ class KafkaDestination:
                 producer.purge()
                 producer.poll(0)
         finally:
-            pending.clear()
+            discarding = True
+            try:
+                if pending:
+                    producer.purge()
+                    producer.poll(0)
+            finally:
+                # remove the local record-to-producer mapping.
+                pending.clear()
 
         result.skipped = len(records) - result.total
         result.row_errors.sort(key=lambda error: error.batch_index)
