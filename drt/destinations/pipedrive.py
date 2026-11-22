@@ -51,11 +51,15 @@ from drt.destinations.retry import (
 from drt.destinations.row_errors import record_preview, record_row_error
 
 _PIPEDRIVE_API = "https://api.pipedrive.com/api/v2"
-# Pipedrive's search endpoints have their own, tighter limit than the rest of the API
-# (reported as 10 requests per 2 seconds; taken from third-party documentation, not yet
-# confirmed against a live account, #1306). Searches get their own bucket below that
-# ceiling, so a run of misses (`update_only`) or hits (`create_only`) cannot exceed it.
+# Official Pipedrive docs, read 2026-11-22:
+# https://pipedrive.readme.io/docs/core-api-concepts-rate-limiting
+# https://developers.pipedrive.com/changelog/post/announcing-search-api-rate-limit
+# Search has a separate 10 requests / rolling 2 seconds limit; API-token traffic starts
+# at 20 / 2 seconds on Lite. Keep separate buckets, pace search conservatively below its
+# 5/s average, and cap writes at the lowest plan's 10/s average (#1306).
 _SEARCH_REQUESTS_PER_SECOND = 4.0
+_WRITE_REQUESTS_PER_SECOND = 10.0
+_ERROR_MESSAGE_MAX_LENGTH = 500
 
 _PASSTHROUGH_KEYS = frozenset({"name", "owner_id", "org_id", "visible_to", "label_ids"})
 _CONTACT_KEYS = {"email": "emails", "emails": "emails", "phone": "phones", "phones": "phones"}
@@ -129,6 +133,22 @@ def _build_payload(
     if creating and not payload.get("name"):
         raise ValueError("Pipedrive: 'name' is required to create a person; map a column to name.")
     return payload
+
+
+def _pipedrive_error_message(response: httpx.Response) -> str:
+    """Return only Pipedrive's documented error fields, never the raw response body."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    parts = []
+    if isinstance(body, dict):
+        for field in ("error", "error_info", "code"):
+            value = body.get(field)
+            if isinstance(value, str) and value:
+                parts.append(f"{field}: {value}")
+    message = "; ".join(parts) or f"Pipedrive API request failed (HTTP {response.status_code})."
+    return message[:_ERROR_MESSAGE_MAX_LENGTH]
 
 
 class _PipedriveApi:
@@ -289,7 +309,11 @@ class PipedriveDestination:
                 client,
                 base_url,
                 {"x-api-token": token, "Accept": "application/json"},
-                resolve_rate_limiter(config, sync_options),
+                resolve_rate_limiter(
+                    config,
+                    sync_options,
+                    max_requests_per_second=_WRITE_REQUESTS_PER_SECOND,
+                ),
                 resolve_retry(config.retry, sync_options),
                 search_limiter=resolve_rate_limiter(
                     config,
@@ -321,7 +345,7 @@ class PipedriveDestination:
                         record_preview(record),
                         exc,
                         http_status=exc.response.status_code,
-                        error_message=exc.response.text[:500],
+                        error_message=_pipedrive_error_message(exc.response),
                     )
                     if sync_options.on_error == "fail":
                         break

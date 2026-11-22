@@ -79,7 +79,7 @@ Match values are remembered for the whole sync (case-insensitively). A later row
 
 A `NULL` in a custom-field column is sent as `null`, which Pipedrive treats as "clear this field". Filter or `COALESCE` such values in your model if you do not want existing values cleared.
 
-When a person is updated, `email`, `emails`, `phone` and `phones` columns are never sent: Pipedrive replaces whole contact lists, so sending them would wipe the person's other addresses and numbers. These columns set the contact lists only when a person is created. The `match_field` column is also left out of an update, because it already matches. An update with nothing else to change is counted as `skipped`.
+When a person is updated, `email`, `emails`, `phone` and `phones` columns are never sent. See the unverified compatibility premise under [Known limitations](#known-limitations). These columns set the contact lists only when a person is created. The `match_field` column is also left out of an update, because it already matches. An update with nothing else to change is counted as `skipped`.
 
 ## Sync modes
 
@@ -87,7 +87,7 @@ When a person is updated, `email`, `emails`, `phone` and `phones` columns are ne
 
 ## Errors and retries
 
-- Each failed row becomes a row error with the HTTP status and the first 500 characters of Pipedrive's response. With `sync.on_error: fail` (the default), drt stops at the first failed row and the remaining rows are not attempted; with `on_error: skip`, drt records the row error and continues with the next row.
+- Each failed row becomes a row error with the HTTP status and, when Pipedrive returns JSON, only its documented `error`, `error_info` and `code` fields (bounded to 500 characters). The raw response body is never stored in the DLQ because it can echo rejected PII. With `sync.on_error: fail` (the default), drt stops at the first failed row and the remaining rows are not attempted; with `on_error: skip`, drt records the row error and continues with the next row.
 - Searches and id-addressed updates retry transient errors with exponential backoff. A create retries HTTP 429 and connection-establishment failures, where no person was accepted. If a create response is lost or a proxy returns 5xx, delivery is unknown: drt re-searches once by the exact `match_field`. Exactly one match is accepted as the created person; several matches are a RowError listing their IDs; no match fails closed because Pipedrive's search index may lag the write. A 429 caused by an exhausted daily budget keeps failing until the budget resets.
 - A missing token raises an error for the whole batch. An empty batch returns immediately without contacting Pipedrive.
 
@@ -102,7 +102,9 @@ When a RowError says create delivery is unknown, assume the first `POST` may hav
 
 ## Rate limits and per-row cost
 
-Pipedrive charges each API call against a daily token budget that depends on your plan and number of seats, and it also limits bursts per token. According to Pipedrive's Persons API reference, a person search costs **20** tokens and a create or update costs **5**, so each row costs about **25** tokens (1,000 rows are roughly 25,000 tokens). Rows skipped by `match_policy` still cost the 20-token search, and a repeated key within a batch costs only one search.
+Pipedrive's official rate-limit and Persons API documentation was read on **2026-11-22**. The daily company budget is `30,000 × plan multiplier × seats`, plus purchased top-ups, and resets at midnight in Pipedrive's server timezone. A person search costs **20** tokens and a create or update costs **5**, so each row costs about **25** tokens (1,000 rows are roughly 25,000 tokens). Rows skipped by `match_policy` still cost the 20-token search, and a repeated key within a batch costs only one search.
+
+Pipedrive applies burst limits per token over a rolling two-second window. Person search has a separate **10 requests per 2 seconds** limit for every plan. API-token traffic starts at **20 requests per 2 seconds** on Lite. drt therefore uses separate process-wide buckets per token: searches are conservatively paced at 4 requests/second, while writes are capped at 10 requests/second. Every HTTP retry attempt acquires its bucket again, including the reconciliation search after an ambiguous create. A configured lower positive rate still wins.
 
 Use `rate_limit.requests_per_second` (on the destination or in `sync`) to stay below your plan's burst limit:
 
@@ -114,9 +116,14 @@ destination:
     requests_per_second: 5
 ```
 
+## Known limitations
+
+- The connector omits `email`/`emails` and `phone`/`phones` from person updates on the premise that `PATCH /persons/{id}` replaces the complete contact lists rather than merging individual entries. That behavior has not been verified against a live Pipedrive account, so preserving remote secondary emails and phone numbers is conservative but updating those fields is not currently supported. Contact-list merge behavior, broader `PATCH /persons` semantics, organizations and deals require live-account verification and are outside this implementation.
+
 ## References
 
 - [Pipedrive Persons API](https://developers.pipedrive.com/docs/api/v1/Persons)
+- [Pipedrive Search API rate-limit announcement](https://developers.pipedrive.com/changelog/post/announcing-search-api-rate-limit)
 - [Pipedrive authentication](https://pipedrive.readme.io/docs/core-api-concepts-authentication)
 - [Pipedrive rate limiting](https://pipedrive.readme.io/docs/core-api-concepts-rate-limiting)
 - [Pipedrive: guide for optimizing API usage](https://pipedrive.readme.io/docs/guide-for-optimizing-api-usage)
