@@ -3687,6 +3687,11 @@
           "title": "Match Field",
           "type": "string"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
