@@ -9,7 +9,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from decimal import Decimal
 from functools import partial
+from hashlib import sha256
 from json import dumps
+from reprlib import repr as bounded_repr
 from typing import Any
 from uuid import UUID
 
@@ -28,7 +30,7 @@ class KafkaDestination:
     def __init__(self) -> None:
         """Initialize per-run producer state without importing the SDK."""
         self._client: Any = None
-        self._bootstrap_servers: str = ""
+        self._rate_limit_key = ""
         self._delivery_timeout_s = 30.0
 
     def load(
@@ -61,15 +63,17 @@ class KafkaDestination:
                     "broker1.example.com:9092,"
                     "broker2.example.com:9092)"
                 )
-            self._bootstrap_servers = ",".join(brokers)
-            self._client = self._initialize_producer(config, self._bootstrap_servers)
+            bootstrap_servers = ",".join(brokers)
+            identity = dumps([bootstrap_servers, config.topic]).encode("utf-8")
+            self._rate_limit_key = f"kafka:{sha256(identity).hexdigest()}"
+            self._client = self._initialize_producer(config, bootstrap_servers)
             self._delivery_timeout_s = config.delivery_timeout_s
         # Reuse the client connection here
         producer = self._client
         limiter = resolve_rate_limiter(
             config,
             sync_options,
-            key_override=f"kafka:{self._bootstrap_servers}:{config.topic}",
+            key_override=self._rate_limit_key,
         )
         retry = resolve_retry(config.retry, sync_options)
         result = SyncResult()
@@ -194,7 +198,7 @@ class KafkaDestination:
             if not producer.close():
                 raise RuntimeError("Kafka producer close failed.")
             self._client = None
-            self._bootstrap_servers = ""
+            bootstrap_servers = ""
         if remaining:
             raise RuntimeError(
                 "Kafka safety drain found unconfirmed messages after load(); "
