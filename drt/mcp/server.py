@@ -34,9 +34,13 @@ that used to be duplicated inline in every closure.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from drt.config.credentials import secrets_project_dir
 from drt.mcp._context import _load_ctx
 from drt.mcp.tools.apply import apply as _apply
 from drt.mcp.tools.dlq import dlq as _dlq
@@ -83,11 +87,35 @@ def create_server(project_dir: Path | None = None) -> Any:
         ),
     )
 
+    def scoped_tool(*args: Any, **kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
+        """Register a tool whose whole operation uses this server's project secrets."""
+
+        def register(fn: Callable[..., Any]) -> Any:
+            if inspect.iscoroutinefunction(fn):
+
+                @wraps(fn)
+                async def async_scoped(*fn_args: Any, **fn_kwargs: Any) -> Any:
+                    with secrets_project_dir(_project_dir):
+                        return await fn(*fn_args, **fn_kwargs)
+
+                scoped = async_scoped
+            else:
+
+                @wraps(fn)
+                def sync_scoped(*fn_args: Any, **fn_kwargs: Any) -> Any:
+                    with secrets_project_dir(_project_dir):
+                        return fn(*fn_args, **fn_kwargs)
+
+                scoped = sync_scoped
+            return mcp.tool(*args, **kwargs)(scoped)
+
+        return register
+
     # -----------------------------------------------------------------------
     # drt_list_syncs
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_list_syncs() -> list[dict[str, str]]:
         """List all sync definitions in the current drt project.
 
@@ -100,7 +128,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_run_sync
     # -----------------------------------------------------------------------
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+    @scoped_tool(annotations={"readOnlyHint": False, "destructiveHint": True})
     def drt_run_sync(
         sync_name: str,
         dry_run: bool = False,
@@ -180,7 +208,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             approved_by=approved_by,
         )
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    @scoped_tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def drt_plan(
         sync_name: str,
         redact_keys: bool = False,
@@ -233,7 +261,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             max_entries=max_entries,
         )
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+    @scoped_tool(annotations={"readOnlyHint": False, "destructiveHint": True})
     def drt_apply(
         plan_id: str,
         approved_by: str,
@@ -292,7 +320,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_run_test
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_run_test(
         sync_name: str | None = None,
         unit: bool = False,
@@ -366,7 +394,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_get_status
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_get_status(
         sync_name: str | None = None, check: bool = False, allow_empty: bool = False
     ) -> dict[str, Any]:
@@ -392,7 +420,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_state_show / drt_state_reset (#776)
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_state_show(sync_name: str | None = None) -> dict[str, Any]:
         """Show drt's stored state for a sync (watermark + last run).
 
@@ -407,7 +435,7 @@ def create_server(project_dir: Path | None = None) -> Any:
         """
         return _state_show(ctx, sync_name)
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_state_reset(
         sync_name: str,
         watermark: bool = False,
@@ -441,7 +469,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_get_history
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_get_history(
         sync_name: str | None = None,
         limit: int = 20,
@@ -471,7 +499,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_validate
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_validate(
         check_connection: bool = False,
         strict: bool = False,
@@ -515,7 +543,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_get_schema
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_get_schema(schema_type: str = "sync") -> dict[str, Any]:
         """Return the JSON Schema for drt configuration files.
 
@@ -535,7 +563,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_list_connectors
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_list_connectors() -> dict[str, list[dict[str, str]]]:
         """List drt-core's built-in source and destination connector inventory.
 
@@ -555,7 +583,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_dlq
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_dlq(sync_name: str | None = None, limit: int = 20) -> dict[str, Any]:
         """Inspect a sync's Dead Letter Queue — records that failed to load and
         are persisted for replay (``sync.dlq.enabled: true``, v0.7.9).
@@ -577,7 +605,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_retry
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_retry(
         sync_name: str,
         limit: int | None = None,
@@ -608,7 +636,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_get_manifest
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_get_manifest(
         include_state: bool = False,
         full_labels: bool = False,
@@ -653,7 +681,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_list_profiles
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_list_profiles() -> dict[str, Any]:
         """List credential profiles from ``~/.drt/profiles.yml`` (v0.7.9).
 
@@ -669,7 +697,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_test_profile
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_test_profile(name: str) -> dict[str, Any]:
         """Check connectivity for a credential profile (mirrors ``drt profile test``).
 
@@ -689,7 +717,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_doctor
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @scoped_tool()
     def drt_doctor() -> dict[str, Any]:
         """Run environment diagnostics — the MCP equivalent of ``drt doctor``.
 

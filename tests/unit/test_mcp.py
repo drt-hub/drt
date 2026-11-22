@@ -6,6 +6,8 @@ These tests are skipped automatically when fastmcp is not installed.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -87,6 +89,31 @@ async def test_server_has_expected_tools() -> None:
         "drt_get_schema",
     }
     assert expected <= tool_names
+
+
+@pytest.mark.asyncio
+async def test_every_registered_tool_enters_project_secrets_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registration choke point scopes every tool, including future ones."""
+
+    class ScopeEntered(Exception):
+        pass
+
+    canonical = tmp_path.resolve()
+
+    @contextmanager
+    def stop_on_scope(project_dir: Path) -> Iterator[None]:
+        assert project_dir == canonical
+        raise ScopeEntered
+        yield
+
+    monkeypatch.setattr("drt.mcp.server.secrets_project_dir", stop_on_scope)
+    tools = await create_server(tmp_path)._local_provider._list_tools()
+
+    for tool in tools:
+        with pytest.raises(ScopeEntered):
+            tool.fn()
 
 
 # ---------------------------------------------------------------------------
@@ -1529,6 +1556,48 @@ async def test_test_profile_connection_error(server: FastMCP, monkeypatch: Any) 
     assert result["ok"] is False
     assert result["type"] == "postgres"
     assert "connection refused" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_test_profile_resolves_secrets_from_server_project_not_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.config.credentials import resolve_env
+
+    project = tmp_path / "project"
+    cwd = tmp_path / "cwd"
+    fake_home = tmp_path / "home"
+    for path in (project, cwd, fake_home / ".drt"):
+        path.mkdir(parents=True)
+    (project / ".drt").mkdir()
+    (cwd / ".drt").mkdir()
+    (project / ".drt" / "secrets.toml").write_text('[sources]\nMCP_PASSWORD = "project-secret"\n')
+    (cwd / ".drt" / "secrets.toml").write_text('[sources]\nMCP_PASSWORD = "wrong-cwd-secret"\n')
+    (fake_home / ".drt" / "profiles.yml").write_text(
+        "default:\n"
+        "  type: postgres\n"
+        "  host: localhost\n"
+        "  dbname: analytics\n"
+        "  user: drt\n"
+        "  password_env: MCP_PASSWORD\n"
+    )
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("MCP_PASSWORD", raising=False)
+    monkeypatch.chdir(cwd)
+    seen: list[str | None] = []
+
+    def get_source(_profile: Any) -> Any:
+        def test_connection(profile: Any) -> bool:
+            seen.append(resolve_env(profile.password, profile.password_env))
+            return True
+
+        return type("Source", (), {"test_connection": staticmethod(test_connection)})()
+
+    monkeypatch.setattr("drt.connectors.registry.get_source", get_source)
+    result = await call(create_server(project), "drt_test_profile", name="default")
+
+    assert result == {"name": "default", "type": "postgres", "ok": True}
+    assert seen == ["project-secret"]
 
 
 # ---------------------------------------------------------------------------
