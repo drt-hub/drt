@@ -159,6 +159,7 @@ def test_create_commit_then_failure_reconciles_without_duplicate(
 ) -> None:
     harness = _fault_harness(mode)
     install_mock_transport(monkeypatch, harness)
+    seen = _spy_limiters(monkeypatch)
 
     result = PipedriveDestination().load(
         [_RECORD],
@@ -181,6 +182,8 @@ def test_create_commit_then_failure_reconciles_without_duplicate(
     if match_policy == "upsert":
         expected_requests.append(("PATCH", "/api/v2/persons/1"))
     assert [(request.method, request.url.path) for request in harness.requests] == expected_requests
+    assert seen["search"].acquired == 2  # initial lookup and reconciliation lookup
+    assert seen["write"].acquired == (2 if match_policy == "upsert" else 1)
 
 
 @pytest.mark.parametrize(
@@ -334,6 +337,7 @@ def test_429_on_create_is_retried_without_reconciliation(
         return httpx.Response(201, json={"success": True, "data": {"id": 1}}, request=request)
 
     install_mock_transport(monkeypatch, handler)
+    seen = _spy_limiters(monkeypatch)
     result = PipedriveDestination().load(
         [_RECORD],
         _config(base_url="https://fault.test/api/v2"),
@@ -343,6 +347,7 @@ def test_429_on_create_is_retried_without_reconciliation(
     assert (result.success, result.failed) == (1, 0)
     assert create_attempts == 2
     assert [request.method for request in requests] == ["GET", "POST", "POST"]
+    assert (seen["search"].acquired, seen["write"].acquired) == (1, 2)
 
 
 def test_updates_person_when_search_finds_a_match(
@@ -432,6 +437,52 @@ def test_write_failure_becomes_a_row_error(
     assert (result.success, result.failed) == (0, expected_failed)
     assert all(error.http_status == 500 for error in result.row_errors)
     assert len(httpserver.log) == expected_calls
+
+
+def test_row_error_keeps_only_bounded_documented_pipedrive_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_search_result(), request=request)
+        return httpx.Response(
+            400,
+            json={
+                "success": False,
+                "error": "Invalid person",
+                "error_info": "See docs",
+                "code": "x" * 600,
+                "rejected_value": "ada.private@example.com",
+            },
+            request=request,
+        )
+
+    install_mock_transport(monkeypatch, handler)
+
+    result = PipedriveDestination().load(
+        [_RECORD], _config(base_url="https://fault.test/api/v2"), _options()
+    )
+
+    message = result.row_errors[0].error_message
+    assert message.startswith("error: Invalid person; error_info: See docs; code: ")
+    assert len(message) == 500
+    assert "ada.private@example.com" not in message
+    assert "rejected_value" not in message
+
+
+def test_non_json_error_body_is_not_copied_to_the_row_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="proxy rejected ada.private@example.com", request=request)
+
+    install_mock_transport(monkeypatch, handler)
+
+    result = PipedriveDestination().load(
+        [_RECORD], _config(base_url="https://fault.test/api/v2"), _options()
+    )
+
+    assert result.row_errors[0].error_message == "Pipedrive API request failed (HTTP 400)."
 
 
 def _body(httpserver: HTTPServer, index: int) -> dict[str, Any]:
@@ -805,46 +856,56 @@ def _spy_limiters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return seen
 
 
-def test_searches_have_their_own_bucket_below_the_search_ceiling(
-    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+def test_searches_and_writes_have_separate_documented_ceiling_buckets(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _use_server(httpserver, monkeypatch)
     seen = _spy_limiters(monkeypatch)
-    httpserver.expect_request(_SEARCH).respond_with_json(_search_result())
-    httpserver.expect_request(_PERSONS, method="POST").respond_with_json({"data": {"id": 9}})
 
-    result = PipedriveDestination().load([_RECORD], _config(), _options())
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _search_result() if request.method == "GET" else {"data": {"id": 9}}
+        return httpx.Response(200, json=body, request=request)
+
+    install_mock_transport(monkeypatch, handler)
+
+    result = PipedriveDestination().load(
+        [_RECORD], _config(base_url="https://fault.test/api/v2"), _options()
+    )
 
     assert result.success == 1
     search_kwargs = [k for k in seen["calls"] if k.get("key_override")]
+    write_kwargs = [k for k in seen["calls"] if not k.get("key_override")]
     assert len(search_kwargs) == 1
+    assert len(write_kwargs) == 1
     assert search_kwargs[0]["max_requests_per_second"] <= 5  # 10 requests / 2 s
+    assert write_kwargs[0]["max_requests_per_second"] <= 10  # Lite: 20 requests / 2 s
     assert search_kwargs[0]["key_override"].endswith(":search")
     assert (seen["search"].acquired, seen["write"].acquired) == (1, 1)
 
 
 def test_every_retry_attempt_spends_a_limiter_slot(
-    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _use_server(httpserver, monkeypatch)
     seen = _spy_limiters(monkeypatch)
-    from werkzeug.wrappers import Response
-
     attempts = {"n": 0}
 
-    def search(_request: Any) -> Response:
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            return Response("busy", status=503)
-        return Response(json.dumps(_search_result(7)), mimetype="application/json")
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return httpx.Response(503, text="busy", request=request)
+            return httpx.Response(200, json=_search_result(7), request=request)
+        return httpx.Response(200, json={"data": {}}, request=request)
 
-    httpserver.expect_request(_SEARCH).respond_with_handler(search)
-    httpserver.expect_request(f"{_PERSONS}/7", method="PATCH").respond_with_json({"data": {}})
+    install_mock_transport(monkeypatch, handler)
     options = _options(
         retry=RetryConfig(max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0)
     )
 
-    result = PipedriveDestination().load([{**_RECORD, "name": "Ada"}], _config(), options)
+    result = PipedriveDestination().load(
+        [{**_RECORD, "name": "Ada"}],
+        _config(base_url="https://fault.test/api/v2"),
+        options,
+    )
 
     assert result.success == 1
     assert attempts["n"] == 2
