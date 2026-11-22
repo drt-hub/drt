@@ -15,9 +15,8 @@ from drt.config.credentials import _load_secrets, resolve_env, secrets_project_d
 def _write_secret(project_dir: Path, value: str) -> None:
     secrets_dir = project_dir / ".drt"
     secrets_dir.mkdir()
-    (secrets_dir / "secrets.toml").write_text(
-        f'[destinations]\nSCOPED_SECRET = "{value}"\n'
-    )
+    (secrets_dir / "secrets.toml").write_text(f'[destinations]\nSCOPED_SECRET = "{value}"\n')
+
 
 # ---------------------------------------------------------------------------
 # _load_secrets

@@ -1571,12 +1571,8 @@ async def test_test_profile_resolves_secrets_from_server_project_not_cwd(
         path.mkdir(parents=True)
     (project / ".drt").mkdir()
     (cwd / ".drt").mkdir()
-    (project / ".drt" / "secrets.toml").write_text(
-        '[sources]\nMCP_PASSWORD = "project-secret"\n'
-    )
-    (cwd / ".drt" / "secrets.toml").write_text(
-        '[sources]\nMCP_PASSWORD = "wrong-cwd-secret"\n'
-    )
+    (project / ".drt" / "secrets.toml").write_text('[sources]\nMCP_PASSWORD = "project-secret"\n')
+    (cwd / ".drt" / "secrets.toml").write_text('[sources]\nMCP_PASSWORD = "wrong-cwd-secret"\n')
     (fake_home / ".drt" / "profiles.yml").write_text(
         "default:\n"
         "  type: postgres\n"

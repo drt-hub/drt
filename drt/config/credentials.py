@@ -91,9 +91,7 @@ class ObservabilityConfig(BaseModel):
 # local file literally named ``md:x`` as ``./md:x``.
 _DUCKDB_REMOTE_DATABASE = re.compile(r"^(?:md|motherduck):|^[A-Za-z][A-Za-z0-9+.-]*://")
 
-_secrets_project_dir: ContextVar[Path | None] = ContextVar(
-    "drt_secrets_project_dir", default=None
-)
+_secrets_project_dir: ContextVar[Path | None] = ContextVar("drt_secrets_project_dir", default=None)
 
 
 @contextmanager
