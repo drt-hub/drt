@@ -81,7 +81,7 @@ class KafkaDestination:
         def fail(index: int, exc: Exception) -> None:
             try:
                 preview = record_preview(records[index])
-            except (TypeError, ValueError, RecursionError):
+            except (TypeError, ValueError):
                 # A JSON serialization failure can also make the shared preview fail.
                 preview = repr(records[index])[:200]
             record_row_error(result, index, preview, exc)
@@ -90,10 +90,12 @@ class KafkaDestination:
         def on_delivery(index: int, error: Any, message: Any) -> None:
             """
             Update pending, result counters.
-            Use discarding to ensure 
+            Use discarding to ensure
             """
             if discarding or index not in pending:
                 return
+            if error is not None:
+                self._raise_fatal(error)
             pending.remove(index)
             if error is None:
                 result.success += 1
@@ -128,7 +130,7 @@ class KafkaDestination:
                     break
                 try:
                     body, key = self._serialize_record(record, config)
-                except (TypeError, ValueError) as exc:
+                except (TypeError, ValueError, RecursionError) as exc:
                     fail(index, exc)
                     continue
 
@@ -231,6 +233,24 @@ class KafkaDestination:
         self._close()
 
     @staticmethod
+    def _raise_fatal(error: Any) -> None:
+        """Abort on unrecoverable producer or auth/config errors from either callback."""
+        from confluent_kafka import KafkaError  # type: ignore[import-untyped]
+
+        if error.fatal() or error.code() in {
+            KafkaError._AUTHENTICATION,
+            KafkaError._INVALID_ARG,
+            KafkaError._SSL,
+            KafkaError.SASL_AUTHENTICATION_FAILED,
+            KafkaError.TOPIC_AUTHORIZATION_FAILED,
+            KafkaError.CLUSTER_AUTHORIZATION_FAILED,
+            KafkaError.INVALID_CONFIG,
+            KafkaError.UNSUPPORTED_SASL_MECHANISM,
+            KafkaError.ILLEGAL_SASL_STATE,
+        }:
+            raise RuntimeError(f"Kafka produer fatal error: {error}")
+
+    @staticmethod
     def _initialize_producer(
         config: KafkaDestinationConfig,
         bootstrap_servers: str,
@@ -241,6 +261,7 @@ class KafkaDestination:
             "enable.idempotence": config.enable_idempotence,
             "acks": "all",
             "message.timeout.ms": int(config.delivery_timeout_s * 1000),
+            "error_cb": KafkaDestination._raise_fatal,
             "security.protocol": {
                 "none": "PLAINTEXT",
                 "ssl": "SSL",
