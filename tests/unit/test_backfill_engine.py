@@ -588,9 +588,7 @@ def test_mysql_backfill_retry_without_unique_index_is_refused_before_extraction(
             },
         }
     )
-    state = MemoryState(
-        SyncState("events", "old", 3, "partial", "", "3", "exclusive")
-    )
+    state = MemoryState(SyncState("events", "old", 3, "partial", "", "3", "exclusive"))
     source = WindowSource([{"cursor": 3, "id": 1}])
     connection = MagicMock()
     connection.cursor.return_value.fetchall.return_value = []
@@ -854,6 +852,40 @@ def test_unsupported_destination_is_refused_before_extraction(tmp_path: Path) ->
         )
 
     assert source.windows == []
+
+
+def test_non_sql_source_without_window_capability_is_refused_before_extraction(
+    tmp_path: Path,
+) -> None:
+    class LegacySource:
+        def __init__(self) -> None:
+            self.extract_calls = 0
+
+        def extract(
+            self,
+            query: str,
+            profile: RestApiProfile,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            self.extract_calls += 1
+            yield from ()
+
+    source = LegacySource()
+    state = MemoryState()
+
+    with pytest.raises(NotImplementedError, match="must implement synchronous extract_window"):
+        run_sync(
+            _sync(end=3),
+            source,
+            RecordingDestination(),
+            _profile(),
+            tmp_path,
+            observer=_observer(state),
+        )
+
+    assert source.extract_calls == 0
+    assert state.saves == []
 
 
 def test_rows_outside_window_fail_closed(tmp_path: Path) -> None:
@@ -1392,15 +1424,13 @@ def test_strict_dlq_capacity_overflow_does_not_evict_or_checkpoint(
             return SyncResult(
                 failed=len(records),
                 row_errors=[
-                    RowError(index, "row", None, "rejected")
-                    for index in range(len(records))
+                    RowError(index, "row", None, "rejected") for index in range(len(records))
                 ],
             )
 
     store = _strict_dlq_backend(backend, tmp_path)
     queue = [
-        DeadLetter(record={"id": value}, error_message="existing")
-        for value in existing_values
+        DeadLetter(record={"id": value}, error_message="existing") for value in existing_values
     ]
     append_calls: list[int] = []
 
@@ -1460,6 +1490,192 @@ def test_strict_dlq_capacity_overflow_does_not_evict_or_checkpoint(
     assert [entry.record["id"] for entry in queue] == existing_values
     assert state.value is None
     assert state.saves == []
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
+@pytest.mark.parametrize(
+    "failure_kind",
+    [
+        "on_error_fail",
+        "interrupted",
+        "extraction_exception",
+        "cursor_contract",
+        "destination_contract",
+    ],
+)
+def test_uncheckpointed_window_strictly_flushes_without_eviction_or_masking_failure(
+    backend: str,
+    failure_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop = threading.Event()
+
+    class RowFailingDestination(RecordingDestination):
+        def load(
+            self,
+            records: list[dict[str, Any]],
+            config: DestinationConfig,
+            sync_options: SyncOptions,
+        ) -> SyncResult:
+            self.calls.append([dict(record) for record in records])
+            if failure_kind == "destination_contract" and len(self.calls) == 2:
+                return SyncResult()
+            if failure_kind == "interrupted":
+                stop.set()
+            return SyncResult(
+                failed=len(records),
+                errors=["original row failure"],
+                row_errors=[
+                    RowError(index, "row", None, "original row failure")
+                    for index in range(len(records))
+                ],
+            )
+
+    class ExtractionFailureSource(WindowSource):
+        def extract_window(
+            self,
+            query: str,
+            profile: RestApiProfile,
+            low: str | int,
+            high: str | int,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            yield {"cursor": 0}
+            raise RuntimeError("original extraction failure")
+
+    class CursorContractSource(WindowSource):
+        def extract_window(
+            self,
+            query: str,
+            profile: RestApiProfile,
+            low: str | int,
+            high: str | int,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            yield {"payload": "missing cursor"}
+
+    class CountingCheckpoint(StatePersistingObserver):
+        def __init__(self, state: MemoryState) -> None:
+            super().__init__(state, None)
+            self.calls = 0
+
+        def checkpoint_window(
+            self,
+            sync_name: str,
+            started_at: str,
+            result: SyncResult,
+            cursor_field: str,
+            high: str | int,
+        ) -> str:
+            self.calls += 1
+            return super().checkpoint_window(sync_name, started_at, result, cursor_field, high)
+
+    store = _strict_dlq_backend(backend, tmp_path)
+    existing = DeadLetter(record={"id": "earlier-window"}, error_message="existing")
+    queue = [existing]
+    strict_calls = 0
+    ordinary_calls = 0
+
+    def strict_append(
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int:
+        nonlocal strict_calls
+        strict_calls += 1
+        strict_entries = prepare_strict_dlq_append(
+            sync_name,
+            {entry.id for entry in queue},
+            len(queue),
+            entries,
+            max_records=max_records,
+            incoming_ids=incoming_ids,
+        )
+        queue.extend(strict_entries)
+        return len(queue)
+
+    def ordinary_append(
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+    ) -> int:
+        nonlocal ordinary_calls
+        ordinary_calls += 1
+        queue.extend(entries)
+        if max_records > 0:
+            del queue[:-max_records]
+        return len(queue)
+
+    monkeypatch.setattr(store, "_append_strict", strict_append)
+    monkeypatch.setattr(store, "append", ordinary_append)
+
+    state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    observer = CompositeObserver(
+        [checkpoint, DlqObserver(store, max_records=1)], checkpoint_observer=checkpoint
+    )
+    sync = _sync(end=3, on_error="fail" if failure_kind == "on_error_fail" else "skip")
+    sync.sync.batch_size = 1
+    if failure_kind == "extraction_exception":
+        source: WindowSource = ExtractionFailureSource([])
+    elif failure_kind == "cursor_contract":
+        source = CursorContractSource([])
+    else:
+        source = WindowSource([{"cursor": 0}, {"cursor": 1}])
+
+    if failure_kind in {"extraction_exception", "destination_contract"}:
+        expected = (
+            "original extraction failure"
+            if failure_kind == "extraction_exception"
+            else "reported 0 outcomes for 1 records"
+        )
+        with pytest.raises(RuntimeError, match=expected) as caught:
+            run_sync(
+                sync,
+                source,
+                RowFailingDestination(),
+                _profile(),
+                tmp_path,
+                observer=observer,
+            )
+        assert any(
+            "Uncheckpointed backfill window DLQ flush failed" in note
+            for note in getattr(caught.value, "__notes__", [])
+        )
+    else:
+        result = run_sync(
+            sync,
+            source,
+            RowFailingDestination(),
+            _profile(),
+            tmp_path,
+            observer=observer,
+            stop_event=stop if failure_kind == "interrupted" else None,
+        )
+        assert any(
+            "Uncheckpointed backfill window DLQ flush failed" in error for error in result.errors
+        )
+        if failure_kind in {"on_error_fail", "interrupted"}:
+            assert "original row failure" in result.errors
+        else:
+            assert any(
+                "null or missing cursor_field" in error.error_message for error in result.row_errors
+            )
+
+    assert strict_calls == 1
+    assert ordinary_calls == 0
+    assert queue == [existing]
+    assert checkpoint.calls == 0
+    assert all(saved.last_cursor_value is None for saved in state.saves)
 
 
 def test_staged_destination_is_excluded_before_staging(tmp_path: Path) -> None:

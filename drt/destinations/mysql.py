@@ -227,9 +227,7 @@ class MySQLDestination(BaseSqlDestination):
             "ORDER BY s.index_name, s.seq_in_index",
             params,
         )
-        indexes: dict[
-            str, list[tuple[int, str, int | None, bool, str, str | None]]
-        ] = {}
+        indexes: dict[str, list[tuple[int, str, int | None, bool, str, str | None]]] = {}
         for row in cur.fetchall():
             values = list(row.values()) if isinstance(row, dict) else list(row)
             sub_part = None if values[3] is None else int(values[3])
@@ -240,11 +238,7 @@ class MySQLDestination(BaseSqlDestination):
                     sub_part,
                     str(values[4]).upper() == "YES",
                     str(values[5]).lower() if len(values) > 5 else "",
-                    (
-                        None
-                        if len(values) <= 6 or values[6] is None
-                        else str(values[6]).lower()
-                    ),
+                    (None if len(values) <= 6 or values[6] is None else str(values[6]).lower()),
                 )
             )
         expected = sorted(column.lower() for column in upsert_keys)

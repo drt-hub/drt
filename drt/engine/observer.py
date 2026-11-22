@@ -676,6 +676,12 @@ class CompositeObserver:
             if isinstance(obs, DlqObserver):
                 obs.flush_window(sync_name)
 
+    def begin_backfill(self, sync_name: str) -> None:
+        """Prevent the designated DLQ observer from using capped cleanup."""
+        for obs in self._observers:
+            if isinstance(obs, DlqObserver):
+                obs.begin_backfill(sync_name)
+
 
 def is_window_checkpoint_capable(observer: object) -> bool:
     """Return whether an observer can acknowledge a checkpoint before extraction."""
@@ -741,6 +747,7 @@ class DlqObserver:
         self._buffer: dict[str, list[DeadLetter]] = {}
         self._buffered_ids: dict[str, set[str]] = {}
         self._capacity_blocked: set[str] = set()
+        self._backfill_syncs: set[str] = set()
 
     def on_sync_started(self, sync_name: str, started_at: str) -> None: ...
     def on_watermark_resolved(
@@ -763,12 +770,23 @@ class DlqObserver:
         # fires on the normal-return path. The buffer must flush here, not
         # there, so a mid-sync crash cannot silently drop already-buffered
         # dead letters.
-        if sync_name in self._capacity_blocked:
-            self._buffer.pop(sync_name, None)
-            self._buffered_ids.pop(sync_name, None)
-            self._capacity_blocked.discard(sync_name)
+        if sync_name in self._backfill_syncs:
+            try:
+                if sync_name not in self._capacity_blocked:
+                    self._flush(sync_name, strict=True)
+            except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
+                self._logger.warning("DLQ persist failure for '%s': %s", sync_name, exc)
+            finally:
+                self._buffer.pop(sync_name, None)
+                self._buffered_ids.pop(sync_name, None)
+                self._capacity_blocked.discard(sync_name)
+                self._backfill_syncs.discard(sync_name)
             return
         self._flush(sync_name, strict=False)
+
+    def begin_backfill(self, sync_name: str) -> None:
+        """Mark cleanup as strict so a backfill can never use FIFO eviction."""
+        self._backfill_syncs.add(sync_name)
 
     def flush_window(self, sync_name: str) -> None:
         """Durably append this window's failures; unlike final cleanup, raise."""
@@ -810,9 +828,7 @@ class DlqObserver:
         # trims full records. Strict window flushes need the prospective ID
         # merge, not the raw failure count: a checkpoint retry replaces the
         # same deterministic IDs and consumes no additional capacity.
-        self._buffered_ids.setdefault(sync_name, set()).update(
-            entry.id for entry in dead_letters
-        )
+        self._buffered_ids.setdefault(sync_name, set()).update(entry.id for entry in dead_letters)
         # Cap the in-memory buffer as entries arrive, not just at flush —
         # a long-running sync with far more failures than max_records would
         # otherwise hold all of them in memory for the whole run. Only the

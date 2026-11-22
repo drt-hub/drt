@@ -731,6 +731,23 @@ def test_dlq_observer_swallows_store_errors(caplog: pytest.LogCaptureFixture) ->
     assert any("DLQ persist failure" in r.message for r in caplog.records)
 
 
+def test_dlq_observer_backfill_cleanup_never_uses_capped_append(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = MagicMock()
+    store._append_strict.side_effect = OSError("strict write failed")
+    observer = DlqObserver(store)
+    observer.begin_backfill("s")
+    observer.on_records_failed("s", [_dead(1)])
+
+    with caplog.at_level(logging.WARNING, logger="drt"):
+        observer.on_sync_ended("s")
+
+    store._append_strict.assert_called_once()
+    store.append.assert_not_called()
+    assert any("strict write failed" in record.message for record in caplog.records)
+
+
 def test_dlq_observer_strict_local_append_keeps_old_file_on_fsync_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -788,9 +805,7 @@ def test_dlq_observer_strict_local_append_tolerates_directory_fsync_failure(
     real_fsync = os.fsync
     directory_fds: set[int] = set()
 
-    def track_directory_open(
-        target: str | bytes | os.PathLike[str], flags: int, *args: int
-    ) -> int:
+    def track_directory_open(target: str | bytes | os.PathLike[str], flags: int, *args: int) -> int:
         fd = real_open(target, flags, *args)
         if Path(target) == path.parent:
             directory_fds.add(fd)

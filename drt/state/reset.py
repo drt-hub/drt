@@ -32,12 +32,9 @@ def reset_watermark_and_runs(
             storage.delete(sync_name)
             watermark_cleared = True
         if current_state is not None and (
-            current_state.last_cursor_value is not None
-            or current_state.cursor_boundary is not None
+            current_state.last_cursor_value is not None or current_state.cursor_boundary is not None
         ):
-            state.save_sync(
-                replace(current_state, last_cursor_value=None, cursor_boundary=None)
-            )
+            state.save_sync(replace(current_state, last_cursor_value=None, cursor_boundary=None))
             watermark_cleared = True
 
     runs_removed = False

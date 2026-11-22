@@ -567,6 +567,10 @@ def run_sync(
     tracer = get_tracer()
 
     observer.on_sync_started(sync.name, started_at)
+    if backfill is not None:
+        begin_backfill = getattr(observer, "begin_backfill", None)
+        if callable(begin_backfill):
+            begin_backfill(sync.name)
 
     if (
         backfill is not None
@@ -835,6 +839,38 @@ def _window_event(observer: SyncObserver, name: str, *args: object) -> None:
         observer.on_warning("windowed-backfill", f"Observer {name} raised: {exc}")
 
 
+def _flush_uncheckpointed_window(
+    observer: SyncObserver,
+    sync_name: str,
+    result: SyncResult,
+    *,
+    original_error: BaseException | None,
+) -> None:
+    """Strictly flush failed-window DLQ data without replacing its failure."""
+    boundary_flusher = getattr(observer, "flush_window", None)
+    if not callable(boundary_flusher):
+        return
+    try:
+        boundary_flusher(sync_name)
+    except BaseException as exc:
+        message = (
+            f"Uncheckpointed backfill window DLQ flush failed for '{sync_name}'; "
+            f"the checkpoint was not written: {exc}"
+        )
+        result.errors.append(message)
+        try:
+            observer.on_warning(sync_name, message)
+        except BaseException:
+            pass
+        if original_error is not None:
+            try:
+                add_note = getattr(original_error, "add_note", None)
+                if callable(add_note):
+                    add_note(message)
+            except Exception:  # noqa: BLE001 — failure metadata is best-effort
+                pass
+
+
 def _run_backfill_body(
     *,
     sync: SyncConfig,
@@ -945,6 +981,7 @@ def _run_backfill_body(
             total_result.interrupted = True
             observer.on_interrupted(sync.name, 0)
             summary["failed_window"] = index
+            _flush_uncheckpointed_window(observer, sync.name, total_result, original_error=None)
             break
 
         window_started_at = time.perf_counter()
@@ -995,6 +1032,7 @@ def _run_backfill_body(
             total_result.windows.append(detail)
             summary["failed_window"] = index
             _window_event(observer, "window_failed", sync.name, index, low, high, exc)
+            _flush_uncheckpointed_window(observer, sync.name, total_result, original_error=exc)
             raise
 
         _accumulate_result(total_result, window_result)
@@ -1018,6 +1056,7 @@ def _run_backfill_body(
         if not window_succeeded:
             summary["failed_window"] = index
             _window_event(observer, "window_failed", sync.name, index, low, high, None)
+            _flush_uncheckpointed_window(observer, sync.name, total_result, original_error=None)
             break
 
         try:

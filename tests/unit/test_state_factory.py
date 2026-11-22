@@ -71,9 +71,7 @@ def test_every_factory_supported_dlq_backend_has_strict_flush_capability(
     else:
         profiles = {
             "postgres": PostgresProfile(type="postgres", host="h", dbname="d", user="u"),
-            "snowflake": SnowflakeProfile(
-                type="snowflake", account="a", user="u", database="d"
-            ),
+            "snowflake": SnowflakeProfile(type="snowflake", account="a", user="u", database="d"),
             "databricks": DatabricksProfile(
                 type="databricks", server_hostname="h", http_path="/p", catalog="main"
             ),

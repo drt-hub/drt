@@ -122,6 +122,14 @@ sound only for target-typed values under the destination-exact equality
 contract in the table above; it does not emulate database coercion or
 collation. Choose an exact key domain before enabling backfill.
 
+DLQ writes are also part of the window boundary. Before either checkpointing a
+successful window or leaving a failed/interrupted window, drt strictly merges
+its buffered dead letters without evicting older entries. If `dlq.max_records`
+has no room, the queue and checkpoint stay unchanged; the original row,
+extraction, interruption, or contract failure remains the primary failure and
+the capacity error is reported with it. Raise the cap or drain the queue with
+`drt retry NAME`. Backfill cleanup never uses the ordinary capped append.
+
 ## Recovery and state safety
 
 Use `drt state reset`; hand-editing `.drt/state.json` or

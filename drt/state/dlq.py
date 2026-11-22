@@ -308,9 +308,7 @@ def append_strict_non_evicting(
     """Durably ID-merge one window, failing instead of evicting old entries."""
     strict_append = getattr(store, "_append_strict", None)
     if not callable(strict_append):
-        raise RuntimeError(
-            f"{type(store).__name__} does not support durable DLQ append"
-        )
+        raise RuntimeError(f"{type(store).__name__} does not support durable DLQ append")
     return cast(_StrictDlqBackend, store)._append_strict(
         sync_name,
         entries,
@@ -351,9 +349,7 @@ class LocalDlqStore:
 
     # -- writes -------------------------------------------------------------
 
-    def _merge_lines(
-        self, path: Path, entries: list[DeadLetter], max_records: int
-    ) -> list[str]:
+    def _merge_lines(self, path: Path, entries: list[DeadLetter], max_records: int) -> list[str]:
         # Persist unique ids (#1147) before the FIFO cap can evict an
         # earlier twin; otherwise the survivor is renumbered on the next
         # read and a concurrent retry's confirmed id hits it.

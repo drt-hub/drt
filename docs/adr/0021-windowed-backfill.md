@@ -869,3 +869,14 @@ replacements and add zero depth. Only genuinely new current-window IDs count
 toward `dlq.max_records`; overflow still fails before mutation, never evicts,
 and leaves the checkpoint unchanged. This supersedes round 6's raw
 “existing depth plus all failures” wording.
+
+## Amendment 2026-11-22 (slice 3 round 10)
+
+**Every non-checkpointing window exit uses the same strict DLQ flush.** Row
+failure, interruption, extraction or validation exceptions, and contract
+violations all attempt a non-evicting flush before leaving the window. A flush
+failure is recorded alongside the original window failure rather than replacing
+it, and no checkpoint is written. Backfill cleanup is explicitly marked so
+`DlqObserver.on_sync_ended()` can never fall back to the ordinary FIFO-capped
+append; a full queue therefore remains byte-for-byte unchanged until the
+operator raises `dlq.max_records` or drains it with `drt retry`.
