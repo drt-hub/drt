@@ -31,7 +31,6 @@ class KafkaDestination:
         """Initialize per-run producer state without importing the SDK."""
         self._client: Any = None
         self._rate_limit_key = ""
-        self._delivery_timeout_s = 30.0
 
     def load(
         self,
@@ -67,7 +66,6 @@ class KafkaDestination:
             identity = dumps([bootstrap_servers, config.topic]).encode("utf-8")
             self._rate_limit_key = f"kafka:{sha256(identity).hexdigest()}"
             self._client = self._initialize_producer(config, bootstrap_servers)
-            self._delivery_timeout_s = config.delivery_timeout_s
         # Reuse the client connection here
         producer = self._client
         limiter = resolve_rate_limiter(
@@ -188,7 +186,7 @@ class KafkaDestination:
         remaining = len(producer)
         try:
             if remaining:
-                producer.flush(self._delivery_timeout_s)
+                producer.flush()
         finally:
             if len(producer):
                 producer.purge()
