@@ -2137,6 +2137,11 @@
           "title": "Properties Template",
           "type": "string"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {

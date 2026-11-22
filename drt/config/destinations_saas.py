@@ -661,6 +661,8 @@ class IntercomDestinationConfig(DescribableConfig):
     # Jinja2 JSON template for contact payload
     properties_template: str
 
+    # Blind replay after create reconciliation misses is an explicit duplicate-risk opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
