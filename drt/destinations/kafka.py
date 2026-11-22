@@ -184,9 +184,14 @@ class KafkaDestination:
         key = None
         if config.key_field is not None:
             value = record.get(config.key_field)
-            if not isinstance(value, (str, int, float, Decimal, UUID)):
+            if (
+                not isinstance(value, (str, int, float, Decimal, UUID))
+                or isinstance(value, bool)
+                or value == ""
+            ):
                 raise ValueError(
-                    f"Kafka key_field {config.key_field!r} must contain a non-null scalar."
+                    f"Kafka key_field {config.key_field!r} must contain a non-empty scalar, "
+                    "excluding bool."
                 )
             key = str(value).encode("utf-8")
         return dumps(record, default=str, ensure_ascii=False).encode("utf-8"), key
