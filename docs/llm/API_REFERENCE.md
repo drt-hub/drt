@@ -1018,6 +1018,44 @@ the aggregated `SyncResult.kept_values` counts kept properties and `drt run`
 prints them. This leg is mock-verified only, not verified against a live HubSpot
 account. HubSpot has no `drt plan` / `--dry-run --diff` support today (#472).
 
+### `type: intercom`
+
+```yaml
+destination:
+  type: intercom
+  properties_template: |
+    {
+      "role": "user",
+      "external_id": "{{ row.customer_id }}",
+      "email": "{{ row.email }}",
+      "name": "{{ row.name }}"
+    }
+  auth:
+    type: bearer
+    token_env: INTERCOM_TOKEN
+  retry_creates: false                  # default; true allows duplicate-risk blind replay
+  retry:                                # optional: overrides sync.retry as a whole
+    max_attempts: 3
+    initial_backoff: 1.0
+  rate_limit:                           # optional: overrides sync.rate_limit as a whole
+    requests_per_second: 10
+sync:
+  mode: upsert
+  match_policy: upsert                  # upsert | update_only | create_only
+```
+
+`upsert` creates a contact and follows Intercom's duplicate `409` ID with an
+addressed update; `create_only` treats a duplicate conflict as a policy skip;
+`update_only` uses a rendered Intercom `id` directly or searches with exact `=`
+filters on rendered `external_id` and/or `email`. Multiple search matches fail
+closed. After a lost create response or retryable 5xx, drt performs the same exact
+search: one contact is accepted (and updated for `upsert`), multiple IDs are a
+RowError, and no match fails delivery-unknown because Intercom says a new contact
+can take minutes to appear in search. HTTP 429 and proven pre-send connection
+failures remain retryable. `retry_creates: true` permits a blind replay after a
+miss and warns about duplicate-contact risk. See the
+[Intercom connector docs](../connectors/intercom.md).
+
 ### `type: zendesk`
 
 ```yaml

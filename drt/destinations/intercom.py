@@ -29,7 +29,9 @@ Example sync YAML:
 from __future__ import annotations
 
 import json
+import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -38,13 +40,28 @@ from drt.config.credentials import resolve_env
 from drt.config.models import (
     DestinationConfig,
     IntercomDestinationConfig,
+    RetryConfig,
     SyncOptions,
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, RateLimiterBackend, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _CreateOutcome:
+    contact_id: str | None = None
+    skipped: bool = False
 
 
 class IntercomDestination:
@@ -74,40 +91,40 @@ class IntercomDestination:
                     return True, match.group(1)
         return conflict_found, None
 
-    def _find_contact_id(
-        self,
-        client: httpx.Client,
-        payload: dict[str, Any],
-        rate_limiter: RateLimiterBackend,
-    ) -> str | None:
-        """Resolve one existing contact for ``update_only`` without creating it."""
-        direct_id = payload.get("id")
-        if direct_id not in (None, ""):
-            return str(direct_id)
-
-        filters = [
+    @staticmethod
+    def _search_filters(payload: dict[str, Any]) -> list[dict[str, str]]:
+        """Exact Intercom search filters usable to reconcile a contact create."""
+        return [
             {"field": field, "operator": "=", "value": str(payload[field])}
             for field in ("external_id", "email")
             if payload.get(field) not in (None, "")
         ]
-        if not filters:
-            raise ValueError(
-                "Intercom destination: sync.match_policy: update_only requires "
-                "properties_template to render a non-empty id, external_id, or email."
-            )
 
+    def _search_contact_ids(
+        self,
+        client: httpx.Client,
+        payload: dict[str, Any],
+        rate_limiter: RateLimiterBackend,
+        retry_config: RetryConfig,
+    ) -> list[str]:
+        """Search by the payload's exact external_id/email, safely retrying the read."""
+        filters = self._search_filters(payload)
         query: dict[str, Any]
         if len(filters) == 1:
             query = filters[0]
         else:
             query = {"operator": "OR", "value": filters}
 
-        rate_limiter.acquire()
-        response = client.post(
-            self.SEARCH_URL,
-            json={"query": query, "pagination": {"per_page": 2}},
-        )
-        response.raise_for_status()
+        def search() -> httpx.Response:
+            rate_limiter.acquire()
+            response = client.post(
+                self.SEARCH_URL,
+                json={"query": query, "pagination": {"per_page": 2}},
+            )
+            response.raise_for_status()
+            return response
+
+        response = with_retry(search, retry_config, operation=OperationSafety.IDEMPOTENT)
         try:
             data = response.json()["data"]
         except (KeyError, TypeError, ValueError) as e:
@@ -115,17 +132,140 @@ class IntercomDestination:
         if not isinstance(data, list):
             raise ValueError("Invalid Intercom contact-search response: data is not a list.")
 
-        contact_ids: set[str] = set()
+        contact_ids: list[str] = []
         for contact in data:
             if not isinstance(contact, dict) or contact.get("id") in (None, ""):
                 raise ValueError("Invalid Intercom contact-search response: contact is missing id.")
-            contact_ids.add(str(contact["id"]))
+            contact_id = str(contact["id"])
+            if contact_id not in contact_ids:
+                contact_ids.append(contact_id)
+        return contact_ids
+
+    def _find_contact_id(
+        self,
+        client: httpx.Client,
+        payload: dict[str, Any],
+        rate_limiter: RateLimiterBackend,
+        retry_config: RetryConfig,
+    ) -> str | None:
+        """Resolve one existing contact for ``update_only`` without creating it."""
+        direct_id = payload.get("id")
+        if direct_id not in (None, ""):
+            return str(direct_id)
+
+        if not self._search_filters(payload):
+            raise ValueError(
+                "Intercom destination: sync.match_policy: update_only requires "
+                "properties_template to render a non-empty id, external_id, or email."
+            )
+
+        contact_ids = self._search_contact_ids(client, payload, rate_limiter, retry_config)
         if len(contact_ids) > 1:
             raise ValueError(
                 "Intercom destination: update_only matched multiple contacts; "
-                "render a unique id or external_id instead of an ambiguous email."
+                f"matching contact ids: {contact_ids}. Render a unique id or external_id "
+                "instead of an ambiguous email."
             )
-        return next(iter(contact_ids), None)
+        return contact_ids[0] if contact_ids else None
+
+    def _update_contact(
+        self,
+        client: httpx.Client,
+        contact_id: str,
+        payload: dict[str, Any],
+        rate_limiter: RateLimiterBackend,
+        retry_config: RetryConfig,
+        *,
+        missing_is_skip: bool = False,
+    ) -> httpx.Response | None:
+        """Retry a PUT addressed to one fixed Intercom contact id."""
+
+        def update() -> httpx.Response | None:
+            rate_limiter.acquire()
+            response = client.put(
+                f"{self.BASE_URL}/{contact_id}",
+                json={key: value for key, value in payload.items() if key != "id"},
+            )
+            if missing_is_skip and response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response
+
+        return with_retry(update, retry_config, operation=OperationSafety.IDEMPOTENT)
+
+    def _create_contact(
+        self,
+        client: httpx.Client,
+        payload: dict[str, Any],
+        policy: str,
+        rate_limiter: RateLimiterBackend,
+        retry_config: RetryConfig,
+        *,
+        retry_creates: bool,
+    ) -> _CreateOutcome:
+        """Create once, reconciling an ambiguous response before any replay."""
+
+        def create() -> _CreateOutcome:
+            rate_limiter.acquire()
+            response = client.post(self.BASE_URL, json=payload)
+            is_conflict, contact_id = self._conflicting_contact_id(response)
+            if is_conflict and policy == "create_only":
+                return _CreateOutcome(skipped=True)
+            if is_conflict and policy == "upsert":
+                if contact_id is None:
+                    raise ValueError(
+                        "Invalid Intercom conflict response: missing existing contact id."
+                    )
+                return _CreateOutcome(contact_id=contact_id)
+            response.raise_for_status()
+            return _CreateOutcome()
+
+        filters = self._search_filters(payload)
+
+        def reconcile(error: Exception, attempt: int) -> _CreateOutcome | RetryDirective:
+            if filters:
+                contact_ids = self._search_contact_ids(client, payload, rate_limiter, retry_config)
+                if len(contact_ids) > 1:
+                    raise ValueError(
+                        "Intercom destination: create delivery is unknown and reconciliation "
+                        f"matched multiple contacts; matching contact ids: {contact_ids}. "
+                        "Refusing to guess or create another contact."
+                    ) from error
+                if contact_ids:
+                    return _CreateOutcome(contact_id=contact_ids[0])
+
+            if retry_creates and attempt < retry_config.max_attempts:
+                logger.warning(
+                    "Intercom retry_creates=true: retrying delivery-unknown POST /contacts "
+                    "after reconciliation found no match (attempt %d/%d); duplicate contact risk.",
+                    attempt,
+                    retry_config.max_attempts,
+                )
+                return RetryDirective.RETRY
+
+            searched = (
+                "an exact external_id/email reconciliation search found no contact"
+                if filters
+                else ("the payload had no external_id or email reconciliation key")
+            )
+            raise DeliveryUnknownError(
+                "Intercom create delivery is unknown: the request may have committed, but "
+                f"{searched}. Intercom search indexing can lag for minutes, so drt refused "
+                "a second POST. Verify Intercom before manual replay; "
+                "destination.retry_creates: true restores blind retries with duplicate risk.",
+                cause=error,
+                attempt=attempt,
+            ) from error
+
+        operation = (
+            OperationSafety.RECONCILIABLE_CREATE if filters else OperationSafety.BLIND_CREATE
+        )
+        return with_retry(
+            create,
+            retry_config,
+            operation=operation,
+            on_delivery_unknown=reconcile,
+        )
 
     def load(
         self,
@@ -170,42 +310,42 @@ class IntercomDestination:
                     if not isinstance(payload, dict):
                         raise ValueError("Invalid Intercom JSON payload: expected an object.")
 
-                    def do_request() -> httpx.Response | None:
-                        if policy == "update_only":
-                            contact_id = self._find_contact_id(client, payload, rate_limiter)
-                            if contact_id is None:
-                                return None
-                            rate_limiter.acquire()
-                            response = client.put(
-                                f"{self.BASE_URL}/{contact_id}",
-                                json={key: value for key, value in payload.items() if key != "id"},
+                    if policy == "update_only":
+                        contact_id = self._find_contact_id(
+                            client, payload, rate_limiter, retry_config
+                        )
+                        update_response = (
+                            None
+                            if contact_id is None
+                            else self._update_contact(
+                                client,
+                                contact_id,
+                                payload,
+                                rate_limiter,
+                                retry_config,
+                                missing_is_skip=True,
                             )
-                            if response.status_code == 404:
-                                return None
-                            response.raise_for_status()
-                            return response
-
-                        rate_limiter.acquire()
-                        response = client.post(self.BASE_URL, json=payload)
-                        is_conflict, contact_id = self._conflicting_contact_id(response)
-                        if is_conflict and policy == "create_only":
-                            return None
-                        if is_conflict and policy == "upsert":
-                            if contact_id is None:
-                                raise ValueError(
-                                    "Invalid Intercom conflict response: "
-                                    "missing existing contact id."
-                                )
-                            rate_limiter.acquire()
-                            response = client.put(
-                                f"{self.BASE_URL}/{contact_id}",
-                                json={key: value for key, value in payload.items() if key != "id"},
+                        )
+                        skipped = update_response is None
+                    else:
+                        outcome = self._create_contact(
+                            client,
+                            payload,
+                            policy,
+                            rate_limiter,
+                            retry_config,
+                            retry_creates=config.retry_creates,
+                        )
+                        if outcome.contact_id is not None and policy == "upsert":
+                            self._update_contact(
+                                client,
+                                outcome.contact_id,
+                                payload,
+                                rate_limiter,
+                                retry_config,
                             )
-                        response.raise_for_status()
-                        return response
-
-                    written = with_retry(do_request, retry_config)
-                    if written is None:
+                        skipped = outcome.skipped
+                    if skipped:
                         result.skipped += 1
                         result.skipped_no_match += 1
                     else:
