@@ -34,8 +34,7 @@ def _status_error(status: int) -> httpx.HTTPStatusError:
 )
 def test_create_pre_send_and_429_failures_are_safe_to_replay(error: Exception) -> None:
     assert (
-        classify_failure_safety(OperationSafety.BLIND_CREATE, error)
-        is FailureSafety.SAFE_TO_REPLAY
+        classify_failure_safety(OperationSafety.BLIND_CREATE, error) is FailureSafety.SAFE_TO_REPLAY
     )
 
 

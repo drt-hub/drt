@@ -331,9 +331,7 @@ def test_429_on_create_is_retried_without_reconciliation(
         create_attempts += 1
         if create_attempts == 1:
             return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
-        return httpx.Response(
-            201, json={"success": True, "data": {"id": 1}}, request=request
-        )
+        return httpx.Response(201, json={"success": True, "data": {"id": 1}}, request=request)
 
     install_mock_transport(monkeypatch, handler)
     result = PipedriveDestination().load(
