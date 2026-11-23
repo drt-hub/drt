@@ -834,10 +834,9 @@ uncheckpointed, so any earlier keyed batches are safe to replay.
 
 Tracking retains only a 16-byte BLAKE2b digest per row, plus Python set/object
 overhead; records and raw keys are not buffered. The canonical digest input is
-type-tagged: integers, strings, and floats are deliberately distinct (`1`,
-`"1"`, and `1.0` do not collide by coercion), composite components retain their
-order, and common warehouse scalar types have stable encodings. A digest
-collision fails closed as a duplicate. The set resets after every window.
+type-tagged for the admitted exact integer and string domains, and composite
+components retain their order. A digest collision fails closed as a duplicate.
+The set resets after every window.
 Operators whose window cardinality makes this memory cost too high must dedupe
 the model on `destination.upsert_key` or shrink `sync.backfill.window`.
 
@@ -849,13 +848,22 @@ coercion, collation, or custom operator classes. Destination-facing key values
 must already use the target key's type, and the target equality relation must
 not equate two values that the type-tagged digest distinguishes.
 
-| Destination | Key-equality stance |
-|---|---|
-| PostgreSQL | Default deterministic, type-native equality is admitted. `citext`, nondeterministic ICU collations, and custom equality/operator classes are outside the v1 contract and must not be used for a backfill key. |
-| MySQL | Enforced before extraction and write: integer keys only in v1 (`TINYINT` through `BIGINT`, signed or unsigned), with integer source values (`int`, never `bool`). Every string/binary, decimal/float, date/time, enum/set, JSON, and other domain is refused. PAD SPACE and NO PAD collation behavior, fixed-width padding, and MySQL coercion make those domains unsafe for the engine's type-tagged digest. Use an integer surrogate key or another destination. The existing full-column PRIMARY/UNIQUE and NOT NULL proof still applies. |
-| Snowflake | Only uncollated, target-typed key columns are in contract. Snowflake collated columns or collated MERGE expressions are outside v1. |
-| BigQuery | Only the default binary string equality and target-typed scalar keys are in contract. A key with `COLLATE`, including `und:ci`, is outside v1. |
-| Databricks | Only uncollated/default `UTF8_BINARY`, target-typed keys are in contract. `UTF8_LCASE` and other non-binary collations are outside v1. |
+| Destination | Engine key values | Key-equality stance |
+|---|---|---|
+| PostgreSQL | Exact Python `int` (never `bool`) or `str` only. | Default deterministic, type-native equality is admitted. `citext`, nondeterministic ICU collations, and custom equality/operator classes are outside the v1 contract and must not be used for a backfill key. |
+| MySQL | Exact Python `int` only. | Integer keys only in v1 (`TINYINT` through `BIGINT`, signed or unsigned). Every string and other domain is refused. PAD SPACE and NO PAD collation behavior, fixed-width padding, and MySQL coercion remain outside the contract. Use an integer surrogate key if the model does not already have an integer key. The existing full-column PRIMARY/UNIQUE and NOT NULL proof still applies. |
+| Snowflake | Exact Python `int` (never `bool`) or `str` only. | Only uncollated, target-typed key columns are in contract. Snowflake collated columns or collated MERGE expressions are outside v1. |
+| BigQuery | Exact Python `int` (never `bool`) or `str` only. | Only the default binary string equality and target-typed scalar keys are in contract. A key with `COLLATE`, including `und:ci`, is outside v1. |
+| Databricks | Exact Python `int` (never `bool`) or `str` only. | Only uncollated/default `UTF8_BINARY`, target-typed keys are in contract. `UTF8_LCASE` and other non-binary collations are outside v1. |
+
+The shared engine enforces this value domain after payload transforms and before
+each batch write. It rejects `float` (including NaN, infinity, and signed zero),
+`Decimal`, `bool`, date/time, UUID, bytes, subclasses, and every other type.
+Datetime precision/timezone normalization, UUID textual form/case, and binary
+padding are not proved exact across all five destinations, so they are refused
+rather than representation-canonicalized. The error identifies the sync, key
+column, window, and type but never the value, and directs the operator to cast
+the key to an integer or string in model SQL or use an integer surrogate key.
 
 MySQL has a runtime schema preflight because string collation and padding rules,
 binary padding, and value coercion violate this contract. The other four stances are explicit v1
@@ -880,3 +888,15 @@ it, and no checkpoint is written. Backfill cleanup is explicitly marked so
 `DlqObserver.on_sync_ended()` can never fall back to the ordinary FIFO-capped
 append; a full queue therefore remains byte-for-byte unchanged until the
 operator raises `dlq.max_records` or drains it with `drt retry`.
+
+## Amendment 2026-11-23 (slice 3 round 12)
+
+**Backfill key values use a narrow engine-enforced domain.** Float and decimal
+representations are not canonicalized: SQL equality collapses values such as
+`0.0`/`-0.0` and differently scaled equal decimals that the former digest kept
+distinct. All five admitted destinations now share the exact `int` (excluding
+`bool`) and `str` engine domain recorded in the key-equality inventory above;
+MySQL remains integer-only. Date/time, UUID, and bytes are also refused because
+their precision, normalization, textual form, or padding is not trivially exact
+across every destination. A violation fails before its batch write and leaves
+the window uncheckpointed.

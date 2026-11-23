@@ -29,11 +29,11 @@ from drt.destinations.base import (
 SUPPORTED_TYPES = {"bigquery", "databricks", "mysql", "postgres", "snowflake"}
 
 KEY_EQUALITY_STANCES = {
-    "postgres": "nondeterministic ICU collations",
-    "mysql": "integer keys only in v1",
-    "snowflake": "Snowflake collated columns",
-    "bigquery": "`COLLATE`, including `und:ci`",
-    "databricks": "`UTF8_LCASE`",
+    "postgres": "| PostgreSQL | Exact Python `int` (never `bool`) or `str` only.",
+    "mysql": "| MySQL | Exact Python `int` only.",
+    "snowflake": "| Snowflake | Exact Python `int` (never `bool`) or `str` only.",
+    "bigquery": "| BigQuery | Exact Python `int` (never `bool`) or `str` only.",
+    "databricks": "| Databricks | Exact Python `int` (never `bool`) or `str` only.",
 }
 
 

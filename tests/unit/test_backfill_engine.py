@@ -7,9 +7,12 @@ import sqlite3
 import threading
 from collections.abc import Collection, Iterator
 from dataclasses import replace
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 from typer.testing import CliRunner
@@ -401,17 +404,98 @@ def test_duplicate_key_across_batches_fails_before_second_batch_write(tmp_path: 
     assert state.value is None
 
 
-def test_window_key_digest_keeps_numeric_and_text_types_distinct(tmp_path: Path) -> None:
-    config = _capable_destination_config("postgres")
+@pytest.mark.parametrize("destination_type", windowed_backfill_destination_types())
+@pytest.mark.parametrize(
+    ("key_values", "type_name"),
+    [
+        ([0.0, -0.0], "float"),
+        ([Decimal("1.0"), Decimal("1.00")], "Decimal"),
+        ([float("nan"), float("nan")], "float"),
+        ([float("inf"), float("inf")], "float"),
+        ([True, True], "bool"),
+        ([1.0, 1], "float"),
+        ([date(2026, 1, 1), date(2026, 1, 2)], "date"),
+        ([datetime(2026, 1, 1), datetime(2026, 1, 2)], "datetime"),
+        ([UUID(int=1), UUID(int=2)], "UUID"),
+        ([b"one", b"two"], "bytes"),
+    ],
+    ids=[
+        "positive-and-negative-zero",
+        "decimal-scale",
+        "nan",
+        "infinity",
+        "bool",
+        "float-and-int",
+        "date",
+        "datetime",
+        "uuid",
+        "bytes",
+    ],
+)
+def test_every_backfill_destination_rejects_non_exact_key_domains_before_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_type: str,
+    key_values: list[Any],
+    type_name: str,
+) -> None:
+    config = _capable_destination_config(destination_type)
     sync = _sync_for_destination(config)
+    sync.sync.batch_size = 1
     destination = get_destination(config)
-    load = MagicMock(return_value=SyncResult(success=3))
-    destination.load = load
+    load = MagicMock(return_value=SyncResult(success=1))
+    monkeypatch.setattr(destination, "load", load)
+    if destination_type == "mysql":
+        monkeypatch.setattr(destination, "validate_backfill_target", lambda _config: None)
     state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
+    tenant_id: str | int = 1 if destination_type == "mysql" else "tenant"
     rows = [
-        {"cursor": 0, "tenant_id": "tenant", "id": 1},
-        {"cursor": 1, "tenant_id": "tenant", "id": "1"},
-        {"cursor": 2, "tenant_id": "tenant", "id": 1.0},
+        {"cursor": index, "tenant_id": tenant_id, "id": value}
+        for index, value in enumerate(key_values)
+    ]
+
+    with pytest.raises(ValueError) as exc_info:
+        run_sync(sync, WindowSource(rows), destination, _profile(), tmp_path, observer=observer)
+
+    message = str(exc_info.value)
+    assert "events" in message
+    assert "'id'" in message
+    assert "[0, 3)" in message
+    assert f"type '{type_name}'" in message
+    expected_remedy = (
+        "cast the key to an integer in the model SQL"
+        if destination_type == "mysql"
+        else "cast the key to an integer or string in the model SQL"
+    )
+    assert expected_remedy in message
+    assert str(key_values[0]) not in message
+    load.assert_not_called()
+    assert checkpoint.checkpoints == 0
+    assert state.value is None
+
+
+@pytest.mark.parametrize("destination_type", windowed_backfill_destination_types())
+def test_backfill_engine_accepts_exact_integer_and_string_key_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_type: str,
+) -> None:
+    config = _capable_destination_config(destination_type)
+    sync = _sync_for_destination(config)
+    sync.sync.batch_size = 1
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=1))
+    monkeypatch.setattr(destination, "load", load)
+    if destination_type == "mysql":
+        monkeypatch.setattr(destination, "validate_backfill_target", lambda _config: None)
+    state = MemoryState()
+    tenant_id: str | int = 1 if destination_type == "mysql" else "tenant"
+    key_values: list[str | int] = [1, 2] if destination_type == "mysql" else [1, "two"]
+    rows = [
+        {"cursor": index, "tenant_id": tenant_id, "id": value}
+        for index, value in enumerate(key_values)
     ]
 
     run_sync(
@@ -423,7 +507,7 @@ def test_window_key_digest_keeps_numeric_and_text_types_distinct(tmp_path: Path)
         observer=_observer(state),
     )
 
-    load.assert_called_once_with(rows, config, sync.sync)
+    assert [call.args[0] for call in load.call_args_list] == [[row] for row in rows]
     assert state.value is not None and state.value.last_cursor_value == "3"
 
 
@@ -663,9 +747,8 @@ def test_mysql_backfill_key_requires_integer_column(
     connection.close.assert_called_once_with()
 
 
-@pytest.mark.parametrize("key_value", ["1", 1.0, True], ids=["str", "float", "bool"])
-def test_mysql_backfill_rejects_non_integer_source_key_before_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_value: Any
+def test_mysql_backfill_rejects_string_source_key_before_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _capable_destination_config("mysql")
     sync = _sync_for_destination(config)
@@ -675,10 +758,10 @@ def test_mysql_backfill_rejects_non_integer_source_key_before_write(
     monkeypatch.setattr(destination, "validate_backfill_target", lambda _config: None)
     state = MemoryState()
 
-    with pytest.raises(ValueError, match=r"integer source value.*integer surrogate key"):
+    with pytest.raises(ValueError, match=r"unsupported value type 'str'.*integer surrogate"):
         run_sync(
             sync,
-            WindowSource([{"cursor": 1, "tenant_id": 1, "id": key_value}]),
+            WindowSource([{"cursor": 1, "tenant_id": 1, "id": "one"}]),
             destination,
             _profile(),
             tmp_path,

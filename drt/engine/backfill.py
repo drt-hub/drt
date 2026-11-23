@@ -12,9 +12,7 @@ import json
 import re
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from typing import Any, TypeAlias, overload
-from uuid import UUID
 
 from drt.config.duration import parse_duration
 from drt.destinations.row_errors import RowError, record_preview
@@ -322,8 +320,9 @@ def validate_window_upsert_keys(
     carried across its streamed batches by the caller. Only 16-byte BLAKE2b
     digests are retained; raw key values never enter the error or the set.
     The type-tagged digest is sound only under ADR 0021's destination-exact
-    key-equality contract: destination preflights must refuse key types or
-    collations that can equate two values this digest keeps distinct.
+    key-equality contract. The engine therefore admits only exact ``int`` and
+    ``str`` values; destination contracts must additionally refuse collations
+    that can equate two admitted strings this digest keeps distinct.
     """
     for record_index, record in enumerate(records):
         for column in upsert_key:
@@ -334,18 +333,25 @@ def validate_window_upsert_keys(
                     f"in record {record_index} for window [{low!r}, {high!r}); "
                     "refusing the destination write and checkpoint."
                 )
-        if destination_type == "mysql":
-            for column in upsert_key:
-                value = record[column]
-                if isinstance(value, bool) or not isinstance(value, int):
-                    raise ValueError(
-                        f"Windowed backfill sync {sync_name!r} cannot replay safely: "
-                        f"MySQL destination.upsert_key column {column!r} must have an "
-                        f"integer source value (not {type(value).__name__}) in record "
-                        f"{record_index} for window [{low!r}, {high!r}); use an integer "
-                        "surrogate key for MySQL backfill in v1, or choose another "
-                        "destination."
-                    )
+            value = record[column]
+            if destination_type == "mysql" and type(value) is not int:
+                raise ValueError(
+                    f"Windowed backfill sync {sync_name!r} cannot replay safely: "
+                    f"MySQL destination.upsert_key column {column!r} has unsupported "
+                    f"value type {type(value).__name__!r} in record {record_index} for "
+                    f"window [{low!r}, {high!r}); cast the key to an integer in the "
+                    "model SQL or use an integer surrogate key for MySQL backfill in "
+                    "v1; refusing the destination write and checkpoint."
+                )
+            if type(value) not in (int, str):
+                raise ValueError(
+                    f"Windowed backfill sync {sync_name!r} cannot replay safely: "
+                    f"destination.upsert_key column {column!r} has unsupported value "
+                    f"type {type(value).__name__!r} in record {record_index} for window "
+                    f"[{low!r}, {high!r}); cast the key to an integer or string in the "
+                    "model SQL, or use an integer surrogate key; refusing the "
+                    "destination write and checkpoint."
+                )
         key = tuple(record[column] for column in upsert_key)
         digest = _window_upsert_key_digest(key)
         if digest in seen_key_digests:
@@ -373,24 +379,9 @@ def _window_upsert_key_digest(key: tuple[Any, ...]) -> bytes:
 
 
 def _type_tagged_key_value(value: Any) -> list[Any]:
-    """Encode common warehouse key values without cross-type coercion."""
-    if isinstance(value, bool):
-        return ["bool", value]
-    if isinstance(value, int):
+    """Encode the engine's exact, deliberately narrow backfill key domain."""
+    if type(value) is int:
         return ["int", str(value)]
-    if isinstance(value, float):
-        return ["float", value.hex()]
-    if isinstance(value, Decimal):
-        sign, digits, exponent = value.as_tuple()
-        return ["decimal", sign, list(digits), exponent]
-    if isinstance(value, str):
+    if type(value) is str:
         return ["str", value]
-    if isinstance(value, bytes):
-        return ["bytes", value.hex()]
-    if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            value = value.astimezone(timezone.utc)
-        return ["datetime", value.isoformat()]
-    if isinstance(value, UUID):
-        return ["uuid", value.hex]
-    return [f"{type(value).__module__}.{type(value).__qualname__}", str(value)]
+    raise TypeError("windowed backfill key values must be exact integers or strings")

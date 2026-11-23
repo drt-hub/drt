@@ -87,11 +87,11 @@ unsupported until their implementation opts in and proves the same contract.
 
 | Destination | v1 status | Required configuration or exclusion reason |
 |---|---|---|
-| PostgreSQL | Supported | A non-empty `destination.upsert_key`; use ordinary deterministic, type-native equality. `citext` and nondeterministic ICU collations are outside the key contract. |
-| MySQL | Supported | Integer keys only in v1: a full-column PRIMARY/UNIQUE NOT NULL key using `TINYINT` through `BIGINT` (signed or unsigned), with integer source values. Strings and binary types are refused regardless of PAD SPACE/NO PAD collation because padding and coercion can collapse values the engine digest keeps distinct. Use an integer surrogate key or another destination. |
-| Snowflake | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and uncollated key columns. Insert mode and collated key expressions are outside the contract. |
-| Databricks | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and `UTF8_BINARY`/uncollated key columns. Case-insensitive and other non-binary collations are outside the contract. |
-| BigQuery | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and uncollated/default-binary key columns. Streaming insert mode and `COLLATE 'und:ci'` keys are outside the contract. |
+| PostgreSQL | Supported | Exact integer (never boolean) or string source key values only, plus a non-empty `destination.upsert_key`; use ordinary deterministic, type-native equality. `citext` and nondeterministic ICU collations are outside the key contract. |
+| MySQL | Supported | Exact integer source key values only in v1: a full-column PRIMARY/UNIQUE NOT NULL key using `TINYINT` through `BIGINT` (signed or unsigned). Strings and binary types are refused regardless of PAD SPACE/NO PAD collation because padding and coercion can collapse values the engine digest keeps distinct. Use an integer surrogate key. |
+| Snowflake | Supported | Exact integer (never boolean) or string source key values only, `destination.mode: merge`, a non-empty `upsert_key`, and uncollated key columns. Insert mode and collated key expressions are outside the contract. |
+| Databricks | Supported | Exact integer (never boolean) or string source key values only, `destination.mode: merge`, a non-empty `upsert_key`, and `UTF8_BINARY`/uncollated key columns. Case-insensitive and other non-binary collations are outside the contract. |
+| BigQuery | Supported | Exact integer (never boolean) or string source key values only, `destination.mode: merge`, a non-empty `upsert_key`, and uncollated/default-binary key columns. Streaming insert mode and `COLLATE 'und:ci'` keys are outside the contract. |
 | ClickHouse | Excluded | `upsert_key` is informational; writes remain inserts, and deduplication depends on target-engine settings drt does not verify. |
 | Elasticsearch | Excluded | Not admitted in v1; keyed API replay and row-error correlation have not completed the destination audit. |
 | Salesforce Bulk | Excluded | Failed rows currently report `batch_index=0`, so row attribution is not trustworthy. |
@@ -111,16 +111,25 @@ uncheckpointed so an operator can correct the source data and retry safely.
 
 Upsert keys must be unique within each window as well. drt tracks a canonical,
 type-tagged 16-byte BLAKE2b digest for every destination-facing composite key
-across all streamed batches in the window. This distinguishes values such as
-integer `1`, string `"1"`, and float `1.0` without buffering records or retaining
-raw keys. A repeat fails before its batch is written, reports only the sync, key
-columns, window, and one-based destination-row ordinal, and leaves the window
-uncheckpointed. The set resets for the next window. Budget approximately 16
-bytes per row plus Python set/object overhead; for very large windows, dedupe
-the model on the upsert key or shrink `sync.backfill.window`. This guard is
-sound only for target-typed values under the destination-exact equality
+across all streamed batches in the window. The shared engine admits only exact
+Python integers (not booleans) and strings; MySQL admits only integers. It
+rejects floats (including NaN, infinity, and signed zero), decimals, booleans,
+dates/timestamps, UUIDs, bytes, subclasses, and every other value type before
+the batch write. Date/time precision and timezone normalization, UUID textual
+form and case, and binary padding are not exact across every supported
+destination, so drt refuses those domains instead of canonicalizing their
+representations. Cast the key to an integer or string in model SQL, or use an
+integer surrogate key.
+
+A repeat fails before its batch is written, reports only the sync, key columns,
+window, and one-based destination-row ordinal, and leaves the window
+uncheckpointed. Type failures similarly report the sync, column, window, and
+type, never the value. The set resets for the next window. Budget approximately
+16 bytes per row plus Python set/object overhead; for very large windows,
+dedupe the model on the upsert key or shrink `sync.backfill.window`. This guard
+is sound only for target-typed values under the destination-exact equality
 contract in the table above; it does not emulate database coercion or
-collation. Choose an exact key domain before enabling backfill.
+collation.
 
 DLQ writes are also part of the window boundary. Before either checkpointing a
 successful window or leaving a failed/interrupted window, drt strictly merges
