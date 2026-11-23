@@ -84,8 +84,8 @@ class DeadLetter:
 
 
 def backfill_dead_letter_id(
-    low: str | int,
-    high: str | int,
+    sync_name: str,
+    canonical_low: str | int,
     stable_identity: Mapping[str, Any],
 ) -> str:
     """Return the stable identity of one failed row in one backfill window.
@@ -94,12 +94,16 @@ def backfill_dead_letter_id(
     fails.  Retrying that uncheckpointed window must update the existing dead
     letter, not append a second retryable copy of the same row. The identity is
     deliberately separate from the persisted post-transform record: injected
-    run metadata changes on retry and must not create a new queue entry.
+    run metadata changes on retry and must not create a new queue entry. The
+    canonical low bound is retry-stable; an open-ended run's high bound is not.
     """
     payload = json.dumps(
         {
-            "low": low,
-            "high": high,
+            "sync_name": sync_name,
+            "window_low": {
+                "value": canonical_low,
+                "checkpoint_boundary": "exclusive",
+            },
             "identity": stable_identity,
         },
         sort_keys=True,

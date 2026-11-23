@@ -147,12 +147,14 @@ extraction, interruption, or contract failure remains the primary failure and
 the capacity error is reported with it. Raise the cap or drain the queue with
 `drt retry NAME`. Backfill cleanup never uses the ordinary capped append.
 
-Backfill DLQ IDs are derived from the window bounds plus the validated
-destination upsert key, not from the final payload, so retry-specific metadata
-does not create duplicate entries. Keyless plugin capabilities fall back to the
-record captured before metadata injection. This ID scheme replaces only IDs
-from earlier unreleased slice-3 commits: mainline has not enabled backfill
-execution, so no compatibility migration is needed.
+Backfill DLQ IDs are derived from the sync name, canonical window low boundary,
+and validated destination upsert key, not from the run-specific high ceiling or
+final payload. Thus a later open-ended retry replaces the existing entry even
+when its ceiling moved. A key appearing in a later completed window still has a
+different low boundary. Keyless plugin capabilities use the same low-boundary
+scheme with the record captured before metadata injection. This ID scheme
+replaces only IDs from earlier unreleased slice-3 commits: mainline has not
+enabled backfill execution, so no compatibility migration is needed.
 
 ## Recovery and state safety
 

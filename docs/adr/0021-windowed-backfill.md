@@ -776,11 +776,11 @@ necessary.
    `read_window_checkpoint()`. An `exclusive` marker still refuses legacy `>`
    execution before extraction.
 6. **Backfill DLQ identity is deterministic and append is idempotent.** A
-   backfill dead letter id hashes canonical window bounds and stable row
-   identity. Local, object-store, and warehouse DLQ appends replace/upsert an
-   existing id rather than append a duplicate. A checkpoint failure followed
-   by a window retry therefore leaves one retryable entry. Non-backfill dead
-   letters keep their legacy random UUID identity.
+   backfill dead letter id hashes the sync name, canonical window low boundary,
+   and stable row identity. Local, object-store, and warehouse DLQ appends
+   replace/upsert an existing id rather than append a duplicate. A checkpoint
+   failure followed by a window retry therefore leaves one retryable entry.
+   Non-backfill dead letters keep their legacy random UUID identity.
 7. **A committed atomic replacement never reports failure afterward.** Local
    atomic JSON writes still fsync the file, replace it, and attempt the POSIX
    directory fsync. Directory open/fsync/close errors after `os.replace` are
@@ -914,14 +914,32 @@ template remains stable across extraction retries. Computed field names are
 resolved through the one-pass `field_mappings` rename before comparison.
 
 **Backfill DLQ IDs use stable identity, not the delivered payload.** For keyed
-rows the hash input is only the canonical window bounds and the validated,
-destination-facing, type-tagged upsert key. A keyless capability uses the
-destination-shaped record captured before engine metadata injection. The DLQ
-continues to persist the final delivered payload, but changing `run_id` or
-`synced_at` on retry now replaces the prior ID across local, object-store, and
-warehouse strict-append implementations instead of consuming capacity.
+rows the hash input is only the sync name, canonical window low boundary, and
+validated, destination-facing, type-tagged upsert key. A keyless capability
+uses the destination-shaped record captured before engine metadata injection.
+The DLQ continues to persist the final delivered payload, but changing `run_id`
+or `synced_at` on retry now replaces the prior ID across local, object-store,
+and warehouse strict-append implementations instead of consuming capacity.
 
 This changes deterministic IDs produced by earlier commits on this unreleased
 slice only. Mainline accepts backfill configuration but keeps execution
 disabled, so no released queue can contain these IDs and no compatibility shim
 is required.
+
+## Amendment 2026-11-23 (slice 3 round 14)
+
+**Backfill DLQ identity excludes the run ceiling.** An open-ended backfill
+snapshots its ceiling per run, so retrying an uncheckpointed final partial
+window can keep the same canonical low boundary while receiving a later high
+boundary. The deterministic ID therefore hashes the sync name, the canonical
+low boundary under the exclusive-checkpoint contract, and either the validated
+type-tagged destination upsert key or the pre-metadata record fallback. It does
+not hash the high boundary.
+
+Persisting a pending ceiling is unnecessary: windows execute sequentially,
+destination keys are unique within a window, and a later completed window has a
+different durable low boundary. Thus low plus row identity distinguishes a key
+that legitimately reappears after its cursor moves into another window while
+remaining stable across a retry whose open-ended ceiling changes. Fixed-range
+retry behavior is unchanged. As with round 13, this replaces only deterministic
+IDs from unreleased slice-3 commits and requires no migration.

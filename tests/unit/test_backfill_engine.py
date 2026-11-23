@@ -1599,8 +1599,10 @@ def test_every_strict_dlq_backend_checks_prospective_ids_inside_append(
     "backend",
     ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
 )
+@pytest.mark.parametrize("open_ended", [False, True], ids=["fixed-range", "open-ended"])
 def test_metadata_retry_replaces_same_keyed_dead_letter_across_strict_backends(
     backend: str,
+    open_ended: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1632,6 +1634,14 @@ def test_metadata_retry_replaces_same_keyed_dead_letter_across_strict_backends(
         config,
         sync_options={"metadata_columns": {"run_id": "load_id"}, "on_error": "skip"},
     )
+    if open_ended:
+        assert sync.sync.backfill is not None
+        sync.sync.backfill.end = None
+        ceilings = iter([2, 3])
+        monkeypatch.setattr(
+            "drt.engine.sync.snapshot_numeric_ceiling",
+            lambda *args, **kwargs: next(ceilings),
+        )
     store = _strict_dlq_backend(backend, tmp_path)
     queue: list[DeadLetter] = []
 
@@ -1667,11 +1677,12 @@ def test_metadata_retry_replaces_same_keyed_dead_letter_across_strict_backends(
         [failing_checkpoint, DlqObserver(store, max_records=1)],
         checkpoint_observer=failing_checkpoint,
     )
+    source = WindowSource([{"cursor": 1, "payload": "same"}])
 
     with pytest.raises(RuntimeError, match="checkpoint unavailable"):
         run_sync(
             sync,
-            WindowSource([{"cursor": 1, "payload": "same"}]),
+            source,
             RowFailingDestination(),
             _profile(),
             tmp_path,
@@ -1689,7 +1700,7 @@ def test_metadata_retry_replaces_same_keyed_dead_letter_across_strict_backends(
     )
     run_sync(
         sync,
-        WindowSource([{"cursor": 1, "payload": "same"}]),
+        source,
         RowFailingDestination(),
         _profile(),
         tmp_path,
@@ -1700,6 +1711,8 @@ def test_metadata_retry_replaces_same_keyed_dead_letter_across_strict_backends(
     assert len(queue) == 1
     assert queue[0].id == first_id
     assert queue[0].record["load_id"] == "retry-run"
+    expected_windows = [(0, 2), (0, 3)] if open_ended else [(0, 3), (0, 3)]
+    assert source.windows == expected_windows
 
 
 @pytest.mark.parametrize(

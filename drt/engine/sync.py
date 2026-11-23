@@ -232,6 +232,7 @@ def _build_audit_entries(
 
 def _dead_letter_for_record(
     *,
+    sync_name: str,
     record: dict[str, Any],
     error_message: str,
     http_status: int | None,
@@ -268,8 +269,8 @@ def _dead_letter_for_record(
         timestamp=timestamp,
         sync_run_id=sync_run_id,
         id=backfill_dead_letter_id(
+            sync_name,
             window_bounds[0],
-            window_bounds[1],
             stable_identity,
         ),
     )
@@ -1552,6 +1553,7 @@ def _run_sync_body(
                         sync.name,
                         [
                             _dead_letter_for_record(
+                                sync_name=sync.name,
                                 record=record_batch[error.batch_index],
                                 error_message=error.error_message,
                                 http_status=error.http_status,
@@ -1883,6 +1885,7 @@ def _run_sync_body(
                 if result.row_errors:
                     dead_letters = [
                         _dead_letter_for_record(
+                            sync_name=sync.name,
                             record=record_batch[err.batch_index],
                             error_message=err.error_message,
                             http_status=err.http_status,
@@ -1979,6 +1982,7 @@ def _run_sync_body(
         if finalize_result.row_errors:
             dead_letters = [
                 _dead_letter_for_record(
+                    sync_name=sync.name,
                     record=staged_records[error.batch_index],
                     error_message=error.error_message,
                     http_status=error.http_status,
