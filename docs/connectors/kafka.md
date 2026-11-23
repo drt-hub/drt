@@ -111,7 +111,7 @@ and other values without a native JSON representation become strings. Schema
 Registry and Avro are outside this version's scope.
 
 When `key_field` is set, the value must be a string, integer, float, Decimal or
-UUID, encoded as UTF-8 `str(value)`. Missing, null or non-scalar keys become
+UUID, encoded as UTF-8 `str(value)`. Missing, null, empty-string, boolean or non-scalar keys become
 individual row errors; drt does not silently replace them with null keys.
 Without `key_field`, messages have no key and use the producer's partitioner.
 A key controls partitioning; it is not an application-level idempotency key.
@@ -128,7 +128,8 @@ A producer is reused across batches within a sync. Each `load()` waits for its
 own batch's delivery reports: success counts, DLQ attribution and ledger
 receipts reflect confirmed delivery, not acceptance into a local queue.
 Finalization/reset are safety drain/close operations, not deferred success
-accounting; unexpected outstanding messages make the safety drain fail.
+accounting; unexpected outstanding messages are purged and make cleanup fail.
+The client is detached even if cleanup fails, so repeated cleanup cannot reuse it.
 
 Producer idempotence is enabled by default with `acks=all`. It deduplicates
 librdkafka's retries within the producer session. Setting
@@ -148,12 +149,16 @@ observe duplicate events before compaction.
 
 ## Errors, timeouts and retries
 
-- Invalid keys and JSON serialization failures are row errors.
+- Invalid keys and JSON serialization failures (including excessive nesting) are row errors.
+  Error previews bound both container traversal and output size.
 - Queue-full `BufferError` is a local, pre-send condition. drt polls and retries
   with `destination.retry`, then `sync.retry`; exhausted attempts become a row error.
 - Other immediate `produce()` exceptions, including auth/config errors, abort
   the sync under both `on_error: skip` and `fail`.
-- librdkafka owns broker/network retries. Failed delivery reports become row
+- Fatal producer errors and authentication/configuration errors from delivery
+  reports or the global error callback also abort under either error policy.
+  Transient global events are left to librdkafka's recovery.
+- librdkafka owns broker/network retries. Other failed delivery reports become row
   errors and are not resubmitted by drt in the same run; confirmed messages are
   never included in local retries.
 - When the batch flush times out, unconfirmed records become individual timeout
@@ -161,6 +166,8 @@ observe duplicate events before compaction.
   before returning, so finalization or a later batch cannot resume those local
   sends/retries. Purge does not undo a broker write already accepted: a timeout
   or an in-flight purge can still mean "possibly delivered", and replay can duplicate it.
+- Exceptional/interrupted loads purge unconfirmed messages before discarding
+  their row correlation, so a later reset cannot flush those messages to Kafka.
 
 With `on_error: skip`, loading continues after row errors. With `fail`, drt
 stops enqueueing when an error is observed, resolves the already-enqueued batch
@@ -176,7 +183,9 @@ is **messages per second**; librdkafka controls broker-request batching.
 Workers targeting the same normalized broker list plus topic share a limiter.
 Broker lists are trimmed, deduplicated and sorted; different env-var aliases
 resolving to the same list share the same identity. Different topics have
-independent limiters. Destination retry/rate-limit settings override sync
+independent limiters. The backend receives a SHA-256 digest of that identity,
+without plaintext broker/topic values; destination labels use the safe `kafka` label.
+Destination retry/rate-limit settings override sync
 settings as complete objects, and shared limiter settings use the stricter limit.
 
 ## References
