@@ -1,8 +1,8 @@
 # ADR 0025 — Multi-destination fan-out and sync dependencies
 
 - **Status:** Accepted 2026-11-23 (decisions 1-4: decline in drt-core; decisions
-  5-8 recorded as reserved design only; decision 9, the check of the live issue
-  threads, remains with the maintainer).
+  5-8 recorded as reserved design only; decision 9: live issue threads checked,
+  no change to the recommendations).
 - **Date:** 2026-11-22.
 - **Issues:** [#425](https://github.com/drt-hub/drt/issues/425)
   (multi-destination fan-out) and
@@ -644,8 +644,15 @@ are **not** accepted for implementation.
    dependency-blocked children recorded only as skipped in the invocation
    artifact, and no shared fan-out watermark (each sync advances only its own
    progress).
-9. **Live issue threads.** Still to be checked by the maintainer; if they contain
-   requirements that change decisions 1-4, amend this ADR before acting on them.
+9. **Live issue threads.** Checked 2026-11-23: #425 and #426 (both opened
+   2026-04-29 by a contributor) have only their bodies and no comments, and the
+   recommendations stand. Two points are recorded honestly rather than
+   resolved. #425 asks that the query run **once** and fan out; decision 2
+   declines that, so each leg reads the source independently. #426's motivating
+   case is a lookup that must be populated before a `destination_lookup` sync;
+   `drt run` already executes selected syncs in definition (sorted file name)
+   order, and two-step `drt run --select` invocations cover the rest, which the
+   fan-out guide documents as the supported workaround.
 
 ### Follow-up work this decision implies
 
