@@ -199,22 +199,19 @@ class KafkaDestination:
     def _close(self) -> None:
         """Close client connection."""
         producer = self._client
+        # Detach even if purge/close fails, so repeated cleanup cannot reuse it.
+        self._client = None
+        self._rate_limit_key = ""
         if producer is None:
             return
         remaining = len(producer)
-        try:
-            if remaining:
-                producer.flush()
-        finally:
-            if len(producer):
-                producer.purge()
-                producer.flush(0)
-            if len(producer):
-                raise RuntimeError("Kafka producer still has undelivered messages after cleanup.")
-            if not producer.close():
-                raise RuntimeError("Kafka producer close failed.")
-            self._client = None
-            bootstrap_servers = ""
+        if remaining:
+            producer.purge()
+            producer.poll(0)
+        if len(producer):
+            raise RuntimeError("Kafka producer still has undelivered messages after cleanup.")
+        if not producer.close():
+            raise RuntimeError("Kafka producer close failed.")
         if remaining:
             raise RuntimeError(
                 "Kafka safety drain found unconfirmed messages after load(); "
