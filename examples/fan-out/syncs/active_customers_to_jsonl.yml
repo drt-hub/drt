@@ -1,0 +1,13 @@
+name: active_customers_to_jsonl
+tags: [customer_fanout]
+model: ref('active_customers')
+
+destination:
+  type: file
+  path: ./output/active_customers.jsonl
+  format: jsonl
+
+sync:
+  mode: full
+  batch_size: 100
+  on_error: fail

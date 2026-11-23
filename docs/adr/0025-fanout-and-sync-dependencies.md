@@ -649,10 +649,12 @@ are **not** accepted for implementation.
    recommendations stand. Two points are recorded honestly rather than
    resolved. #425 asks that the query run **once** and fan out; decision 2
    declines that, so each leg reads the source independently. #426's motivating
-   case is a lookup that must be populated before a `destination_lookup` sync;
-   `drt run` already executes selected syncs in definition (sorted file name)
-   order, and two-step `drt run --select` invocations cover the rest, which the
-   fan-out guide documents as the supported workaround.
+   case is a lookup that must be populated before a `destination_lookup` sync.
+   Sequential `drt run` happens to execute selected syncs in definition (sorted
+   file name) order today, but that is an implementation detail, not a contract,
+   and `--threads` can run selected syncs concurrently. The supported workaround
+   is explicit: separate `drt run --select <sync>` commands chained with `&&`,
+   or an orchestrator task per sync; the fan-out guide documents this.
 
 ### Follow-up work this decision implies
 
