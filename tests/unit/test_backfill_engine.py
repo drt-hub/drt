@@ -318,7 +318,8 @@ def test_every_backfill_destination_rejects_invalid_key_before_write_and_checkpo
     state = MemoryState()
     checkpoint = CountingCheckpoint(state)
     observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
-    row = {"cursor": 1, "tenant_id": "tenant", **bad_row}
+    tenant_id: str | int = 1 if destination_type == "mysql" else "tenant"
+    row = {"cursor": 1, "tenant_id": tenant_id, **bad_row}
 
     with pytest.raises(ValueError) as exc_info:
         run_sync(
@@ -355,9 +356,11 @@ def test_every_backfill_destination_rejects_duplicate_composite_key_before_write
     state = MemoryState()
     checkpoint = CountingCheckpoint(state)
     observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
+    tenant_id: str | int = 11 if destination_type == "mysql" else "tenant-secret"
+    row_id: str | int = 12 if destination_type == "mysql" else "id-secret"
     rows = [
-        {"cursor": 1, "tenant_id": "tenant-secret", "id": "id-secret", "value": "first"},
-        {"cursor": 2, "tenant_id": "tenant-secret", "id": "id-secret", "value": "second"},
+        {"cursor": 1, "tenant_id": tenant_id, "id": row_id, "value": "first"},
+        {"cursor": 2, "tenant_id": tenant_id, "id": row_id, "value": "second"},
     ]
 
     with pytest.raises(ValueError) as exc_info:
@@ -495,7 +498,8 @@ def test_every_backfill_destination_replay_after_checkpoint_failure_is_idempoten
 
     checkpoint = FailingOnceCheckpoint(state)
     observer = CompositeObserver([checkpoint], checkpoint_observer=checkpoint)
-    source = WindowSource([{"cursor": 1, "tenant_id": "tenant", "id": 7}])
+    tenant_id: str | int = 1 if destination_type == "mysql" else "tenant"
+    source = WindowSource([{"cursor": 1, "tenant_id": tenant_id, "id": 7}])
 
     with pytest.raises(RuntimeError, match="checkpoint unavailable"):
         run_sync(sync, source, destination, _profile(), tmp_path, observer=observer)
@@ -504,7 +508,7 @@ def test_every_backfill_destination_replay_after_checkpoint_failure_is_idempoten
     run_sync(sync, source, destination, _profile(), tmp_path, observer=observer)
 
     assert write_calls == 2
-    assert list(destination_rows) == [("tenant", 7)]
+    assert list(destination_rows) == [(tenant_id, 7)]
 
 
 def test_happy_path_and_empty_windows_checkpoint_sequentially(tmp_path: Path) -> None:
@@ -612,17 +616,24 @@ def test_mysql_backfill_retry_without_unique_index_is_refused_before_extraction(
 
 
 @pytest.mark.parametrize(
-    ("data_type", "collation", "accepted"),
+    ("data_type", "accepted"),
     [
-        ("varchar", "utf8mb4_0900_ai_ci", False),
-        ("varchar", "utf8mb4_0900_bin", True),
-        ("decimal", None, False),
+        ("tinyint", True),
+        ("smallint", True),
+        ("mediumint", True),
+        ("int", True),
+        ("integer", True),
+        ("bigint", True),
+        ("varchar", False),
+        ("char", False),
+        ("binary", False),
+        ("decimal", False),
+        ("date", False),
     ],
-    ids=["case-insensitive-string", "binary-string", "coercing-decimal"],
+    ids=lambda value: str(value),
 )
-def test_mysql_backfill_key_requires_exact_destination_equality(
+def test_mysql_backfill_key_requires_integer_column(
     data_type: str,
-    collation: str | None,
     accepted: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -635,7 +646,7 @@ def test_mysql_backfill_key_requires_exact_destination_equality(
     )
     connection = MagicMock()
     connection.cursor.return_value.fetchall.return_value = [
-        ("uq_key", "key_value", 1, None, "NO", data_type, collation)
+        ("uq_key", "key_value", 1, None, "NO", data_type)
     ]
     destination = MySQLDestination()
     monkeypatch.setattr(destination, "_connect", lambda _config: connection)
@@ -645,12 +656,37 @@ def test_mysql_backfill_key_requires_exact_destination_equality(
     else:
         with pytest.raises(
             ValueError,
-            match=r"exact MySQL comparison semantics.*ALTER the column collation|"
-            r"exact MySQL comparison semantics.*choose a different key",
+            match=r"integer surrogate key for MySQL backfill in v1.*another destination",
         ):
             destination.validate_backfill_target(config)
 
     connection.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("key_value", ["1", 1.0, True], ids=["str", "float", "bool"])
+def test_mysql_backfill_rejects_non_integer_source_key_before_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_value: Any
+) -> None:
+    config = _capable_destination_config("mysql")
+    sync = _sync_for_destination(config)
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=1))
+    monkeypatch.setattr(destination, "load", load)
+    monkeypatch.setattr(destination, "validate_backfill_target", lambda _config: None)
+    state = MemoryState()
+
+    with pytest.raises(ValueError, match=r"integer source value.*integer surrogate key"):
+        run_sync(
+            sync,
+            WindowSource([{"cursor": 1, "tenant_id": 1, "id": key_value}]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(state),
+        )
+
+    load.assert_not_called()
+    assert state.value is None
 
 
 @pytest.mark.parametrize(("on_error", "checkpoint"), [("skip", "9"), ("fail", None)])

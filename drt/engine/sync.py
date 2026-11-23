@@ -1669,6 +1669,7 @@ def _run_sync_body(
                     window_key_row_ordinal = validate_window_upsert_keys(
                         record_batch,
                         upsert_key,
+                        destination_type=sync.destination.type,
                         sync_name=sync.name,
                         low=window_bounds[0],
                         high=window_bounds[1],

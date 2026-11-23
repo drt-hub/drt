@@ -38,32 +38,14 @@ from drt.destinations.sql_utils import backtick_quote_ident_part
 
 _MYSQL_DUPLICATE_ENTRY = 1062
 _MYSQL_DUPLICATE_COLUMN = 1060
-_EXACT_BACKFILL_KEY_TYPES = {
+_BACKFILL_KEY_TYPES = {
     "bigint",
-    "binary",
     "int",
     "integer",
     "mediumint",
     "smallint",
     "tinyint",
-    "varbinary",
 }
-_COLLATED_BACKFILL_KEY_TYPES = {
-    "char",
-    "longtext",
-    "mediumtext",
-    "text",
-    "tinytext",
-    "varchar",
-}
-
-
-def _has_exact_backfill_key_equality(data_type: str, collation: str | None) -> bool:
-    return data_type in _EXACT_BACKFILL_KEY_TYPES or (
-        data_type in _COLLATED_BACKFILL_KEY_TYPES
-        and collation is not None
-        and (collation == "binary" or collation.endswith("_bin"))
-    )
 
 
 def _is_duplicate_entry(exc: Exception) -> bool:
@@ -218,7 +200,7 @@ class MySQLDestination(BaseSqlDestination):
             params = [table]
         cur.execute(
             "SELECT s.index_name, s.column_name, s.seq_in_index, s.sub_part, c.is_nullable, "
-            "c.data_type, c.collation_name "
+            "c.data_type "
             "FROM information_schema.statistics AS s "
             "JOIN information_schema.columns AS c "
             "ON c.table_schema = s.table_schema AND c.table_name = s.table_name "
@@ -227,7 +209,7 @@ class MySQLDestination(BaseSqlDestination):
             "ORDER BY s.index_name, s.seq_in_index",
             params,
         )
-        indexes: dict[str, list[tuple[int, str, int | None, bool, str, str | None]]] = {}
+        indexes: dict[str, list[tuple[int, str, int | None, bool, str]]] = {}
         for row in cur.fetchall():
             values = list(row.values()) if isinstance(row, dict) else list(row)
             sub_part = None if values[3] is None else int(values[3])
@@ -238,27 +220,23 @@ class MySQLDestination(BaseSqlDestination):
                     sub_part,
                     str(values[4]).upper() == "YES",
                     str(values[5]).lower() if len(values) > 5 else "",
-                    (None if len(values) <= 6 or values[6] is None else str(values[6]).lower()),
                 )
             )
         expected = sorted(column.lower() for column in upsert_keys)
         matching = [
             (index_name, columns)
             for index_name, columns in indexes.items()
-            if sorted(column for _, column, _, _, _, _ in columns) == expected
-            and all(sub_part is None for _, _, sub_part, _, _, _ in columns)
+            if sorted(column for _, column, _, _, _ in columns) == expected
+            and all(sub_part is None for _, _, sub_part, _, _ in columns)
             and (
                 index_name.upper() == "PRIMARY"
-                or all(not nullable for _, _, _, nullable, _, _ in columns)
+                or all(not nullable for _, _, _, nullable, _ in columns)
             )
         ]
         if matching and not require_exact_comparison:
             return
         if matching and any(
-            all(
-                _has_exact_backfill_key_equality(data_type, collation)
-                for _, _, _, _, data_type, collation in columns
-            )
+            all(data_type in _BACKFILL_KEY_TYPES for _, _, _, _, data_type in columns)
             for _, columns in matching
         ):
             return
@@ -267,17 +245,15 @@ class MySQLDestination(BaseSqlDestination):
                 {
                     column
                     for _, columns in matching
-                    for _, column, _, _, data_type, collation in columns
-                    if not _has_exact_backfill_key_equality(data_type, collation)
+                    for _, column, _, _, data_type in columns
+                    if data_type not in _BACKFILL_KEY_TYPES
                 }
             )
             raise ValueError(
                 f"Destination table {config.table!r} cannot safely run a windowed "
-                f"backfill: destination.upsert_key columns {unsafe} do not use exact "
-                "MySQL comparison semantics. Use integer, BINARY/VARBINARY, or a string "
-                "column with a binary collation such as utf8mb4_0900_bin/*_bin; ALTER "
-                "the column collation or choose a different key. Case/accent-insensitive "
-                "collations and coercing numeric/date-time types are refused."
+                f"backfill: destination.upsert_key columns {unsafe} are not integer "
+                "columns. Use an integer surrogate key for MySQL backfill in v1, or "
+                "choose another destination."
             )
         raise ValueError(
             f"Destination table {config.table!r} must have a full-column PRIMARY or UNIQUE "

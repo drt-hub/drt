@@ -852,13 +852,13 @@ not equate two values that the type-tagged digest distinguishes.
 | Destination | Key-equality stance |
 |---|---|
 | PostgreSQL | Default deterministic, type-native equality is admitted. `citext`, nondeterministic ICU collations, and custom equality/operator classes are outside the v1 contract and must not be used for a backfill key. |
-| MySQL | Enforced before extraction. Every key column must be an integer type, BINARY/VARBINARY, or a string with a binary `*_bin` collation; float/double/decimal, date/time, and case/accent-insensitive collations are refused with ALTER-collation/key-choice guidance. The existing full-column PRIMARY/UNIQUE and NOT NULL proof still applies. |
+| MySQL | Enforced before extraction and write: integer keys only in v1 (`TINYINT` through `BIGINT`, signed or unsigned), with integer source values (`int`, never `bool`). Every string/binary, decimal/float, date/time, enum/set, JSON, and other domain is refused. PAD SPACE and NO PAD collation behavior, fixed-width padding, and MySQL coercion make those domains unsafe for the engine's type-tagged digest. Use an integer surrogate key or another destination. The existing full-column PRIMARY/UNIQUE and NOT NULL proof still applies. |
 | Snowflake | Only uncollated, target-typed key columns are in contract. Snowflake collated columns or collated MERGE expressions are outside v1. |
 | BigQuery | Only the default binary string equality and target-typed scalar keys are in contract. A key with `COLLATE`, including `und:ci`, is outside v1. |
 | Databricks | Only uncollated/default `UTF8_BINARY`, target-typed keys are in contract. `UTF8_LCASE` and other non-binary collations are outside v1. |
 
-MySQL has a runtime schema preflight because its commonplace default string
-collations violate this contract. The other four stances are explicit v1
+MySQL has a runtime schema preflight because string collation and padding rules,
+binary padding, and value coercion violate this contract. The other four stances are explicit v1
 schema contracts; adding metadata preflights for their opt-in/custom collation
 features is additive future hardening, not permission for those features now.
 

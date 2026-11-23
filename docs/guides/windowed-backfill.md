@@ -88,7 +88,7 @@ unsupported until their implementation opts in and proves the same contract.
 | Destination | v1 status | Required configuration or exclusion reason |
 |---|---|---|
 | PostgreSQL | Supported | A non-empty `destination.upsert_key`; use ordinary deterministic, type-native equality. `citext` and nondeterministic ICU collations are outside the key contract. |
-| MySQL | Supported | A full-column PRIMARY/UNIQUE NOT NULL key whose columns are integer, BINARY/VARBINARY, or strings with a binary `*_bin` collation. The runtime preflight refuses coercing types and case/accent-insensitive collations. |
+| MySQL | Supported | Integer keys only in v1: a full-column PRIMARY/UNIQUE NOT NULL key using `TINYINT` through `BIGINT` (signed or unsigned), with integer source values. Strings and binary types are refused regardless of PAD SPACE/NO PAD collation because padding and coercion can collapse values the engine digest keeps distinct. Use an integer surrogate key or another destination. |
 | Snowflake | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and uncollated key columns. Insert mode and collated key expressions are outside the contract. |
 | Databricks | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and `UTF8_BINARY`/uncollated key columns. Case-insensitive and other non-binary collations are outside the contract. |
 | BigQuery | Supported | `destination.mode: merge`, a non-empty `upsert_key`, and uncollated/default-binary key columns. Streaming insert mode and `COLLATE 'und:ci'` keys are outside the contract. |

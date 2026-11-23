@@ -30,7 +30,7 @@ SUPPORTED_TYPES = {"bigquery", "databricks", "mysql", "postgres", "snowflake"}
 
 KEY_EQUALITY_STANCES = {
     "postgres": "nondeterministic ICU collations",
-    "mysql": "binary `*_bin` collation",
+    "mysql": "integer keys only in v1",
     "snowflake": "Snowflake collated columns",
     "bigquery": "`COLLATE`, including `und:ci`",
     "databricks": "`UTF8_LCASE`",

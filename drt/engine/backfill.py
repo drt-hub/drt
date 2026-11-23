@@ -302,6 +302,7 @@ def validate_window_upsert_keys(
     records: list[dict[str, Any]],
     upsert_key: list[str],
     *,
+    destination_type: str,
     sync_name: str,
     low: BackfillBound,
     high: BackfillBound,
@@ -333,6 +334,18 @@ def validate_window_upsert_keys(
                     f"in record {record_index} for window [{low!r}, {high!r}); "
                     "refusing the destination write and checkpoint."
                 )
+        if destination_type == "mysql":
+            for column in upsert_key:
+                value = record[column]
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError(
+                        f"Windowed backfill sync {sync_name!r} cannot replay safely: "
+                        f"MySQL destination.upsert_key column {column!r} must have an "
+                        f"integer source value (not {type(value).__name__}) in record "
+                        f"{record_index} for window [{low!r}, {high!r}); use an integer "
+                        "surrogate key for MySQL backfill in v1, or choose another "
+                        "destination."
+                    )
         key = tuple(record[column] for column in upsert_key)
         digest = _window_upsert_key_digest(key)
         if digest in seen_key_digests:
