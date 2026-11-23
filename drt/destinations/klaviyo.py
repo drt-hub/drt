@@ -1,14 +1,11 @@
 """Klaviyo destination — upsert profiles or track events via the Klaviyo API.
 
 Syncs DWH customer rows into Klaviyo profiles (the common Reverse-ETL pattern:
-push LTV / churn-risk / segment attributes to the marketing platform). Each row
-is upserted by **email**:
-
-1. ``POST /api/profiles/`` to create.
-2. On ``409`` (the profile already exists), the existing id is read from the
-   error's ``meta.duplicate_profile_id`` and the profile is updated with
-   ``PATCH /api/profiles/{id}/``.
-3. If ``list_id`` is set, the profile is added to that Klaviyo list.
+push LTV / churn-risk / segment attributes to the marketing platform). Normal
+upserts use Klaviyo's email-keyed ``POST /api/profile-import`` endpoint. The
+``create_only`` and ``update_only`` match policies use create/conflict and exact
+email lookup plus ID-addressed update respectively. If ``list_id`` is set, the
+profile is added to that Klaviyo list.
 
 With ``endpoint: event``, each row is instead sent to ``POST /api/events/``
 with an email-identified profile, a metric name, properties, a required stable
@@ -52,7 +49,9 @@ Example sync YAML — event tracking:
 from __future__ import annotations
 
 import json
+import logging
 import math
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -72,11 +71,24 @@ from drt.destinations.rate_limiter import (
     RateLimiterBackend,
     resolve_rate_limiter,
 )
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
 _BASE = "https://a.klaviyo.com/api"
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ProfileWriteOutcome:
+    profile_id: str | None = None
+    skipped: bool = False
 
 
 class KlaviyoDestination:
@@ -113,6 +125,11 @@ class KlaviyoDestination:
             for index, record in enumerate(records):
                 try:
                     if config.endpoint == "event":
+                        if sync_options.match_policy != "upsert":
+                            raise ValueError(
+                                "Klaviyo destination: sync.match_policy applies only to "
+                                "endpoint: profile."
+                            )
                         self._send_event(
                             client,
                             config,
@@ -122,9 +139,32 @@ class KlaviyoDestination:
                             rate_limiter,
                         )
                     else:
-                        rate_limiter.acquire()
-                        self._upsert(client, config, headers, record, list_id, retry_config)
+                        written = self._write_profile(
+                            client,
+                            config,
+                            headers,
+                            record,
+                            list_id,
+                            sync_options.match_policy,
+                            retry_config,
+                            rate_limiter,
+                        )
+                        if not written:
+                            result.skipped += 1
+                            result.skipped_no_match += 1
+                            continue
                     result.success += 1
+                except DeliveryUnknownError as e:
+                    record_row_error(
+                        result,
+                        index,
+                        str(record)[:200],
+                        e,
+                        http_status=e.http_status,
+                        error_message=str(e),
+                    )
+                    if sync_options.on_error == "fail":
+                        break
                 except httpx.HTTPStatusError as e:
                     record_row_error(
                         result,
@@ -218,17 +258,163 @@ class KlaviyoDestination:
             response.raise_for_status()
             return response
 
-        with_retry(_post, retry_config)
+        with_retry(_post, retry_config, operation=OperationSafety.KEYED)
 
-    def _upsert(
+    @staticmethod
+    def _search_profile_ids(
+        client: httpx.Client,
+        headers: dict[str, str],
+        email: str,
+        retry_config: RetryConfig,
+        rate_limiter: RateLimiterBackend,
+        *,
+        list_id: str | None = None,
+    ) -> list[str]:
+        """Find at most two profiles by exact email, optionally within one list."""
+        path = (
+            f"{_BASE}/lists/{list_id}/relationships/profiles/"
+            if list_id is not None
+            else f"{_BASE}/profiles/"
+        )
+        escaped_email = email.replace("\\", "\\\\").replace('"', '\\"')
+
+        def _get() -> httpx.Response:
+            rate_limiter.acquire()
+            response = client.get(
+                path,
+                headers=headers,
+                params={"filter": f'equals(email,"{escaped_email}")', "page[size]": 2},
+            )
+            response.raise_for_status()
+            return response
+
+        response = with_retry(_get, retry_config, operation=OperationSafety.IDEMPOTENT)
+        try:
+            data = response.json()["data"]
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError("Invalid Klaviyo profile-search response: missing data list.") from e
+        if not isinstance(data, list):
+            raise ValueError("Invalid Klaviyo profile-search response: data is not a list.")
+
+        profile_ids: list[str] = []
+        for profile in data:
+            if not isinstance(profile, dict) or profile.get("id") in (None, ""):
+                raise ValueError("Invalid Klaviyo profile-search response: profile is missing id.")
+            profile_id = str(profile["id"])
+            if profile_id not in profile_ids:
+                profile_ids.append(profile_id)
+        return profile_ids
+
+    @staticmethod
+    def _patch_profile(
+        client: httpx.Client,
+        headers: dict[str, str],
+        profile_id: str,
+        attributes: dict[str, Any],
+        retry_config: RetryConfig,
+        rate_limiter: RateLimiterBackend,
+        *,
+        missing_is_skip: bool = False,
+    ) -> bool:
+        """Retry an update addressed to one fixed Klaviyo profile ID."""
+
+        def _patch() -> bool:
+            rate_limiter.acquire()
+            response = client.patch(
+                f"{_BASE}/profiles/{profile_id}/",
+                headers=headers,
+                json={
+                    "data": {
+                        "type": "profile",
+                        "id": profile_id,
+                        "attributes": attributes,
+                    }
+                },
+            )
+            if missing_is_skip and response.status_code == 404:
+                return False
+            response.raise_for_status()
+            return True
+
+        return with_retry(_patch, retry_config, operation=OperationSafety.IDEMPOTENT)
+
+    def _create_profile(
+        self,
+        client: httpx.Client,
+        config: KlaviyoDestinationConfig,
+        headers: dict[str, str],
+        email: str,
+        attributes: dict[str, Any],
+        retry_config: RetryConfig,
+        rate_limiter: RateLimiterBackend,
+    ) -> _ProfileWriteOutcome:
+        """Create once for ``create_only``, reconciling before any blind replay."""
+
+        def _create() -> _ProfileWriteOutcome:
+            rate_limiter.acquire()
+            response = client.post(
+                f"{_BASE}/profiles/",
+                headers=headers,
+                json={"data": {"type": "profile", "attributes": attributes}},
+            )
+            if response.status_code == 409:
+                return _ProfileWriteOutcome(skipped=True)
+            response.raise_for_status()
+            return _ProfileWriteOutcome(profile_id=_created_id(response))
+
+        def _reconcile(error: Exception, attempt: int) -> _ProfileWriteOutcome | RetryDirective:
+            profile_ids = self._search_profile_ids(
+                client,
+                headers,
+                email,
+                retry_config,
+                rate_limiter,
+            )
+            if len(profile_ids) > 1:
+                raise ValueError(
+                    "Klaviyo destination: profile-create delivery is unknown and exact "
+                    f"email reconciliation matched multiple profiles; profile ids: "
+                    f"{profile_ids}. Refusing to guess or create another profile."
+                ) from error
+            if profile_ids:
+                return _ProfileWriteOutcome(profile_id=profile_ids[0])
+            if config.retry_creates and attempt < retry_config.max_attempts:
+                logger.warning(
+                    "Klaviyo retry_creates=true: retrying delivery-unknown POST /profiles "
+                    "after exact email reconciliation found no match (attempt %d/%d); "
+                    "duplicate profile risk.",
+                    attempt,
+                    retry_config.max_attempts,
+                )
+                return RetryDirective.RETRY
+            raise DeliveryUnknownError(
+                "Klaviyo profile-create delivery is unknown: the request may have committed, "
+                "but an exact email reconciliation search found no profile. Klaviyo results "
+                "can lag after asynchronous writes, so drt refused a second POST. Verify "
+                "Klaviyo before manual replay; destination.retry_creates: true restores "
+                "blind retries with duplicate risk.",
+                cause=error,
+                attempt=attempt,
+            ) from error
+
+        return with_retry(
+            _create,
+            retry_config,
+            operation=OperationSafety.RECONCILIABLE_CREATE,
+            on_delivery_unknown=_reconcile,
+        )
+
+    def _write_profile(
         self,
         client: httpx.Client,
         config: KlaviyoDestinationConfig,
         headers: dict[str, str],
         record: dict[str, Any],
         list_id: str | None,
+        match_policy: str,
         retry_config: RetryConfig,
-    ) -> None:
+        rate_limiter: RateLimiterBackend,
+    ) -> bool:
         email = record.get(config.email_field)
         if email is None or str(email).strip() == "":
             raise ValueError(f"Row missing email field {config.email_field!r}.")
@@ -238,64 +424,143 @@ class KlaviyoDestination:
         if properties:
             attributes["properties"] = properties
 
-        def _create() -> httpx.Response:
-            resp = client.post(
-                f"{_BASE}/profiles/",
-                headers=headers,
-                json={"data": {"type": "profile", "attributes": attributes}},
+        email_text = str(email)
+        profile_id: str | None
+        if match_policy == "update_only":
+            profile_ids = self._search_profile_ids(
+                client, headers, email_text, retry_config, rate_limiter
             )
-            if resp.status_code == 409:
-                return resp  # existing profile — handled below, outside retry
-            resp.raise_for_status()
-            return resp
-
-        resp = with_retry(_create, retry_config)
-
-        if resp.status_code == 409:
-            profile_id = _duplicate_id(resp)
-            if not profile_id:
-                resp.raise_for_status()  # can't recover the id — surface the 409
-
-            def _patch() -> httpx.Response:
-                r = client.patch(
-                    f"{_BASE}/profiles/{profile_id}/",
-                    headers=headers,
-                    json={
-                        "data": {
-                            "type": "profile",
-                            "id": profile_id,
-                            "attributes": attributes,
-                        }
-                    },
+            if len(profile_ids) > 1:
+                raise ValueError(
+                    "Klaviyo destination: update_only matched multiple profiles by exact "
+                    f"email; profile ids: {profile_ids}."
                 )
-                r.raise_for_status()
-                return r
-
-            with_retry(_patch, retry_config)
+            if not profile_ids:
+                return False
+            written = self._patch_profile(
+                client,
+                headers,
+                profile_ids[0],
+                attributes,
+                retry_config,
+                rate_limiter,
+                missing_is_skip=True,
+            )
+            if not written:
+                return False
+            profile_id = profile_ids[0]
+        elif match_policy == "create_only":
+            outcome = self._create_profile(
+                client,
+                config,
+                headers,
+                email_text,
+                attributes,
+                retry_config,
+                rate_limiter,
+            )
+            if outcome.skipped:
+                return False
+            profile_id = outcome.profile_id
         else:
-            profile_id = _created_id(resp)
+
+            def _upsert() -> httpx.Response:
+                rate_limiter.acquire()
+                response = client.post(
+                    f"{_BASE}/profile-import",
+                    headers=headers,
+                    json={"data": {"type": "profile", "attributes": attributes}},
+                )
+                response.raise_for_status()
+                return response
+
+            response = with_retry(
+                _upsert,
+                retry_config,
+                operation=OperationSafety.KEYED,
+            )
+            profile_id = _created_id(response)
 
         if list_id and profile_id:
-            self._add_to_list(client, headers, list_id, profile_id, retry_config)
+            self._add_to_list(
+                client,
+                config,
+                headers,
+                list_id,
+                profile_id,
+                email_text,
+                retry_config,
+                rate_limiter,
+            )
+        return True
 
     def _add_to_list(
         self,
         client: httpx.Client,
+        config: KlaviyoDestinationConfig,
         headers: dict[str, str],
         list_id: str,
         profile_id: str,
+        email: str,
         retry_config: RetryConfig,
+        rate_limiter: RateLimiterBackend,
     ) -> None:
         def _post() -> httpx.Response:
-            r = client.post(
+            rate_limiter.acquire()
+            response = client.post(
                 f"{_BASE}/lists/{list_id}/relationships/profiles/",
                 headers=headers,
                 json={"data": [{"type": "profile", "id": profile_id}]},
             )
-            r.raise_for_status()
-            return r
+            response.raise_for_status()
+            return response
 
-        with_retry(_post, retry_config)
+        def _reconcile(error: Exception, attempt: int) -> httpx.Response | RetryDirective:
+            profile_ids = self._search_profile_ids(
+                client,
+                headers,
+                email,
+                retry_config,
+                rate_limiter,
+                list_id=list_id,
+            )
+            if len(profile_ids) > 1:
+                raise ValueError(
+                    "Klaviyo destination: list-membership delivery is unknown and exact "
+                    f"email reconciliation matched multiple profiles; profile ids: "
+                    f"{profile_ids}. Refusing to guess or add the relationship again."
+                ) from error
+            if profile_ids == [profile_id]:
+                return httpx.Response(204)
+            if profile_ids:
+                raise ValueError(
+                    "Klaviyo destination: list-membership reconciliation returned profile "
+                    f"{profile_ids[0]!r}, expected {profile_id!r}; refusing to replay."
+                ) from error
+            if config.retry_creates and attempt < retry_config.max_attempts:
+                logger.warning(
+                    "Klaviyo retry_creates=true: retrying delivery-unknown list-membership "
+                    "POST after exact email reconciliation found no match (attempt %d/%d); "
+                    "duplicate relationship risk.",
+                    attempt,
+                    retry_config.max_attempts,
+                )
+                return RetryDirective.RETRY
+            raise DeliveryUnknownError(
+                "Klaviyo list-membership delivery is unknown: the request may have committed, "
+                "but an exact list lookup found no profile. Klaviyo read results can lag, so "
+                "drt refused a second POST. Verify list membership before manual replay; "
+                "destination.retry_creates: true restores blind retries with duplicate risk.",
+                cause=error,
+                attempt=attempt,
+            ) from error
+
+        with_retry(
+            _post,
+            retry_config,
+            operation=OperationSafety.RECONCILIABLE_CREATE,
+            on_delivery_unknown=_reconcile,
+        )
 
     @staticmethod
     def _properties(record: dict[str, Any], config: KlaviyoDestinationConfig) -> dict[str, Any]:
@@ -352,6 +617,10 @@ class KlaviyoDestination:
             if resp.status_code == 403 and _permission_denied(resp):
                 return
             resp.raise_for_status()
+
+    def supported_match_policies(self) -> frozenset[str]:
+        """Profile writes support upsert, update-only and create-only semantics."""
+        return frozenset({"upsert", "update_only", "create_only"})
 
 
 def _decimal_to_json_safe(value: Decimal) -> float:
@@ -417,18 +686,6 @@ def _permission_denied(resp: httpx.Response) -> bool:
         return any(err.get("code") == "permission_denied" for err in errors)
     except Exception:
         return False
-
-
-def _duplicate_id(resp: httpx.Response) -> str | None:
-    try:
-        errors = resp.json().get("errors", [])
-        for err in errors:
-            dup = err.get("meta", {}).get("duplicate_profile_id")
-            if dup:
-                return str(dup)
-    except Exception:
-        return None
-    return None
 
 
 def _created_id(resp: httpx.Response) -> str | None:

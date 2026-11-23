@@ -1,8 +1,9 @@
 """Shared HTTP fault injection for non-idempotent create tests (ADR 0023).
 
 The harness is deliberately blind by default: every POST creates a new remote
-object. It records the side effect before either dropping the response or
-returning a proxy-style 5xx, reproducing the ambiguous-success window that a
+object. Keyed vendor endpoints can opt into deduplication with ``replay_mode``
+and ``dedup_key``. It records the side effect before either dropping the response
+or returning a proxy-style 5xx, reproducing the ambiguous-success window that a
 mock which raises before recording cannot exercise.
 """
 
@@ -16,9 +17,10 @@ import httpx
 import pytest
 
 FaultMode = Literal["commit-then-drop", "commit-then-5xx"]
-ReplayMode = Literal["blind-default"]
+ReplayMode = Literal["blind-default", "keyed"]
 ResponseFactory = Callable[[httpx.Request, int], httpx.Response]
 FallbackHandler = Callable[[httpx.Request, "BlindCreateFaultHarness"], httpx.Response]
+DedupKey = Callable[[dict[str, Any]], object]
 
 
 class BlindCreateFaultHarness:
@@ -32,12 +34,14 @@ class BlindCreateFaultHarness:
         fallback: FallbackHandler,
         create_response: ResponseFactory,
         replay_mode: ReplayMode = "blind-default",
+        dedup_key: DedupKey | None = None,
     ) -> None:
         self.create_path = create_path
         self.mode = mode
         self.replay_mode = replay_mode
         self.fallback = fallback
         self.create_response = create_response
+        self.dedup_key = dedup_key
         self.remote_objects: list[dict[str, Any]] = []
         self.requests: list[httpx.Request] = []
         self.create_attempts = 0
@@ -52,8 +56,20 @@ class BlindCreateFaultHarness:
         decoded = json.loads(request.content)
         if not isinstance(decoded, dict):
             raise AssertionError("create payload must be a JSON object")
-        object_id = len(self.remote_objects) + 1
-        self.remote_objects.append({**decoded, "id": object_id})
+        existing = None
+        if self.replay_mode == "keyed":
+            if self.dedup_key is None:
+                raise AssertionError("keyed replay mode requires dedup_key")
+            key = self.dedup_key(decoded)
+            existing = next(
+                (item for item in self.remote_objects if self.dedup_key(item) == key),
+                None,
+            )
+        if existing is None:
+            object_id = len(self.remote_objects) + 1
+            self.remote_objects.append({**decoded, "id": object_id})
+        else:
+            object_id = int(existing["id"])
 
         if not self._fault_injected:
             self._fault_injected = True

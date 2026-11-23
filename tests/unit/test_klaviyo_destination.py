@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -17,8 +18,13 @@ from drt.config.models import (
     RetryConfig,
     SyncOptions,
 )
-from drt.destinations.base import ConnectionTestable
+from drt.destinations.base import ConnectionTestable, MatchPolicyCapable
 from drt.destinations.klaviyo import KlaviyoDestination
+from tests.http_fault_injection import (
+    BlindCreateFaultHarness,
+    FaultMode,
+    install_mock_transport,
+)
 
 
 def _config(**overrides: Any) -> KlaviyoDestinationConfig:
@@ -60,10 +66,41 @@ def _patch_client(client: MagicMock) -> Any:
     return patch("drt.destinations.klaviyo.httpx.Client", return_value=cm)
 
 
+def _profile_fault_fallback(
+    request: httpx.Request, harness: BlindCreateFaultHarness
+) -> httpx.Response:
+    if request.method == "GET" and request.url.path == "/api/profiles/":
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"type": "profile", "id": str(item["id"])} for item in harness.remote_objects
+                ]
+            },
+            request=request,
+        )
+    raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+
+def _profile_fault_harness(mode: FaultMode) -> BlindCreateFaultHarness:
+    return BlindCreateFaultHarness(
+        "/api/profiles/",
+        mode=mode,
+        fallback=_profile_fault_fallback,
+        create_response=lambda request, object_id: httpx.Response(
+            201, json={"data": {"id": str(object_id)}}, request=request
+        ),
+    )
+
+
 class TestKlaviyoConfig:
     def test_valid(self) -> None:
         assert _config().email_field == "email"
         assert _config().endpoint == "profile"
+        assert _config().retry_creates is False
+
+    def test_retry_creates_is_explicit_destination_policy(self) -> None:
+        assert _config(retry_creates=True).retry_creates is True
 
     def test_event_requires_metric_name_configuration(self) -> None:
         with pytest.raises(ValueError, match="metric_name or metric_name_field"):
@@ -165,7 +202,7 @@ class TestKlaviyoLoad:
             )
 
         assert result.success == 1
-        assert client.post.call_args.args == ("https://a.klaviyo.com/api/profiles/",)
+        assert client.post.call_args.args == ("https://a.klaviyo.com/api/profile-import",)
         assert client.post.call_args.kwargs == {
             "headers": {
                 "Authorization": "Klaviyo-API-Key pk_test",
@@ -184,26 +221,26 @@ class TestKlaviyoLoad:
             },
         }
 
-    def test_upsert_409_patches_existing(self) -> None:
+    def test_upsert_uses_native_create_or_update_endpoint(self) -> None:
         client = MagicMock()
-        client.post.return_value = _resp(
-            409, {"errors": [{"meta": {"duplicate_profile_id": "P9"}}]}
-        )
-        client.patch.return_value = _resp(200, {"data": {"id": "P9"}})
+        client.post.return_value = _resp(200, {"data": {"id": "P9"}})
         with _patch_client(client):
             result = KlaviyoDestination().load([{"email": "a@x.com"}], _config(), _options())
         assert result.success == 1
-        assert "/profiles/P9/" in client.patch.call_args.args[0]
-        assert client.patch.call_args.kwargs["json"]["data"]["id"] == "P9"
+        assert client.post.call_args.args == ("https://a.klaviyo.com/api/profile-import",)
+        client.patch.assert_not_called()
 
-    def test_409_without_duplicate_id_fails(self) -> None:
+    def test_create_only_409_skips_without_update(self) -> None:
         client = MagicMock()
         client.post.return_value = _resp(409, {"errors": [{"meta": {}}]})
         with _patch_client(client):
             result = KlaviyoDestination().load(
-                [{"email": "a@x.com"}], _config(), _options(on_error="skip")
+                [{"email": "a@x.com"}],
+                _config(),
+                _options(on_error="skip", match_policy="create_only"),
             )
-        assert result.failed == 1
+        assert (result.success, result.skipped, result.failed) == (0, 1, 0)
+        assert result.skipped_no_match == 1
         client.patch.assert_not_called()
 
     def test_list_membership_added(self) -> None:
@@ -460,7 +497,319 @@ class TestKlaviyoLoad:
             KlaviyoDestination().load([{"email": "a@x.com"}], config, _options())
 
 
+class TestKlaviyoProfileRetrySafety:
+    def test_declares_match_policy_capability(self) -> None:
+        destination = KlaviyoDestination()
+        assert isinstance(destination, MatchPolicyCapable)
+        assert destination.supported_match_policies() == frozenset(
+            {"upsert", "update_only", "create_only"}
+        )
+
+    def test_update_only_exact_search_then_id_addressed_patch(self) -> None:
+        client = MagicMock()
+        client.get.return_value = _resp(200, {"data": [{"type": "profile", "id": "P9"}]})
+        client.patch.return_value = _resp(200, {"data": {"id": "P9"}})
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "plan": "pro"}],
+                _config(),
+                _options(match_policy="update_only"),
+            )
+
+        assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+        client.post.assert_not_called()
+        assert client.get.call_args.kwargs["params"] == {
+            "filter": 'equals(email,"a@x.com")',
+            "page[size]": 2,
+        }
+        assert client.patch.call_args.args == ("https://a.klaviyo.com/api/profiles/P9/",)
+
+    def test_update_only_search_miss_skips_without_post(self) -> None:
+        client = MagicMock()
+        client.get.return_value = _resp(200, {"data": []})
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "missing@x.com"}],
+                _config(),
+                _options(match_policy="update_only"),
+            )
+
+        assert (result.success, result.skipped, result.failed) == (0, 1, 0)
+        assert result.skipped_no_match == 1
+        client.post.assert_not_called()
+        client.patch.assert_not_called()
+
+    @pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+    def test_native_profile_import_retries_one_logical_profile(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: FaultMode,
+    ) -> None:
+        harness = BlindCreateFaultHarness(
+            "/api/profile-import",
+            mode=mode,
+            replay_mode="keyed",
+            dedup_key=lambda payload: payload["data"]["attributes"]["email"],
+            fallback=lambda request, _harness: (_ for _ in ()).throw(
+                AssertionError(f"unexpected request: {request.method} {request.url}")
+            ),
+            create_response=lambda request, object_id: httpx.Response(
+                200, json={"data": {"id": str(object_id)}}, request=request
+            ),
+        )
+        install_mock_transport(monkeypatch, harness)
+
+        result = KlaviyoDestination().load(
+            [{"email": "ada@example.com", "plan": "pro"}],
+            _config(),
+            _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+        )
+
+        assert (result.success, result.failed) == (1, 0)
+        assert harness.create_attempts == 2
+        assert len(harness.remote_objects) == 1
+        assert all(request.url.path == "/api/profile-import" for request in harness.requests)
+
+    @pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+    @pytest.mark.parametrize("on_error", ["fail", "skip"])
+    def test_create_only_commit_then_failure_reconciles_without_duplicate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: FaultMode,
+        on_error: str,
+    ) -> None:
+        harness = _profile_fault_harness(mode)
+        install_mock_transport(monkeypatch, harness)
+
+        result = KlaviyoDestination().load(
+            [{"email": "ada@example.com"}],
+            _config(),
+            _options(
+                match_policy="create_only",
+                on_error=on_error,
+                retry=RetryConfig(max_attempts=2, initial_backoff=0.0),
+            ),
+        )
+
+        assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+        assert harness.create_attempts == 1
+        assert len(harness.remote_objects) == 1
+        assert [(request.method, request.url.path) for request in harness.requests] == [
+            ("POST", "/api/profiles/"),
+            ("GET", "/api/profiles/"),
+        ]
+
+    def test_create_reconciliation_multiple_matches_are_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = _profile_fault_harness("commit-then-drop")
+
+        def duplicate_search(
+            request: httpx.Request, state: BlindCreateFaultHarness
+        ) -> httpx.Response:
+            if request.method == "GET" and request.url.path == "/api/profiles/":
+                state.remote_objects.append(
+                    {
+                        "data": {
+                            "type": "profile",
+                            "attributes": {"email": "ada@example.com"},
+                        },
+                        "id": 99,
+                    }
+                )
+                return _profile_fault_fallback(request, state)
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        harness.fallback = duplicate_search
+        install_mock_transport(monkeypatch, harness)
+
+        result = KlaviyoDestination().load(
+            [{"email": "ada@example.com"}],
+            _config(),
+            _options(
+                match_policy="create_only",
+                retry=RetryConfig(max_attempts=3, initial_backoff=0.0),
+            ),
+        )
+
+        assert (result.success, result.failed) == (0, 1)
+        assert "matched multiple profiles" in result.row_errors[0].error_message
+        assert harness.create_attempts == 1
+
+    @pytest.mark.parametrize(
+        ("mode", "expected_status"),
+        [("commit-then-drop", None), ("commit-then-5xx", 503)],
+    )
+    def test_create_reconciliation_miss_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: FaultMode,
+        expected_status: int | None,
+    ) -> None:
+        harness = _profile_fault_harness(mode)
+        harness.fallback = lambda request, _harness: httpx.Response(
+            200, json={"data": []}, request=request
+        )
+        install_mock_transport(monkeypatch, harness)
+
+        result = KlaviyoDestination().load(
+            [{"email": "ada@example.com"}],
+            _config(),
+            _options(
+                match_policy="create_only",
+                retry=RetryConfig(max_attempts=3, initial_backoff=0.0),
+            ),
+        )
+
+        assert (result.success, result.failed) == (0, 1)
+        assert result.row_errors[0].http_status == expected_status
+        assert "delivery is unknown" in result.row_errors[0].error_message
+        assert harness.create_attempts == 1
+        assert len(harness.remote_objects) == 1
+
+    def test_retry_creates_true_restores_blind_profile_replay_with_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        harness = _profile_fault_harness("commit-then-drop")
+        harness.fallback = lambda request, _harness: httpx.Response(
+            200, json={"data": []}, request=request
+        )
+        install_mock_transport(monkeypatch, harness)
+        caplog.set_level(logging.WARNING, logger="drt.destinations.klaviyo")
+
+        result = KlaviyoDestination().load(
+            [{"email": "ada@example.com"}],
+            _config(retry_creates=True),
+            _options(
+                match_policy="create_only",
+                retry=RetryConfig(max_attempts=2, initial_backoff=0.0),
+            ),
+        )
+
+        assert (result.success, result.failed) == (1, 0)
+        assert harness.create_attempts == 2
+        assert len(harness.remote_objects) == 2
+        assert "duplicate profile risk" in caplog.text
+
+    def test_429_create_is_retried_without_reconciliation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+            return httpx.Response(201, json={"data": {"id": "P1"}}, request=request)
+
+        install_mock_transport(monkeypatch, handler)
+        result = KlaviyoDestination().load(
+            [{"email": "ada@example.com"}],
+            _config(),
+            _options(
+                match_policy="create_only",
+                retry=RetryConfig(max_attempts=2, initial_backoff=0.0),
+            ),
+        )
+
+        assert (result.success, result.failed) == (1, 0)
+        assert [(request.method, request.url.path) for request in requests] == [
+            ("POST", "/api/profiles/"),
+            ("POST", "/api/profiles/"),
+        ]
+
+    @pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+    def test_list_membership_commit_then_failure_reconciles_without_replay(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: FaultMode,
+    ) -> None:
+        def fallback(request: httpx.Request, state: BlindCreateFaultHarness) -> httpx.Response:
+            if request.method == "POST" and request.url.path == "/api/profile-import":
+                return httpx.Response(201, json={"data": {"id": "P1"}}, request=request)
+            if request.method == "GET":
+                membership_id = state.remote_objects[0]["data"][0]["id"]
+                return httpx.Response(
+                    200,
+                    json={"data": [{"type": "profile", "id": membership_id}]},
+                    request=request,
+                )
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        harness = BlindCreateFaultHarness(
+            "/api/lists/L1/relationships/profiles/",
+            mode=mode,
+            fallback=fallback,
+            create_response=lambda request, _object_id: httpx.Response(204, request=request),
+        )
+        install_mock_transport(monkeypatch, harness)
+
+        result = KlaviyoDestination().load(
+            [{"email": "ada@example.com"}],
+            _config(list_id="L1"),
+            _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+        )
+
+        assert (result.success, result.failed) == (1, 0)
+        assert harness.create_attempts == 1
+        assert len(harness.remote_objects) == 1
+        assert [(request.method, request.url.path) for request in harness.requests] == [
+            ("POST", "/api/profile-import"),
+            ("POST", "/api/lists/L1/relationships/profiles/"),
+            ("GET", "/api/lists/L1/relationships/profiles/"),
+        ]
+
+
 class TestKlaviyoEventLoad:
+    @pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+    def test_event_unique_id_retries_one_logical_event(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: FaultMode,
+    ) -> None:
+        def event_key(payload: dict[str, Any]) -> tuple[str, str, str]:
+            attributes = payload["data"]["attributes"]
+            return (
+                attributes["profile"]["data"]["attributes"]["email"],
+                attributes["metric"]["data"]["attributes"]["name"],
+                attributes["unique_id"],
+            )
+
+        harness = BlindCreateFaultHarness(
+            "/api/events/",
+            mode=mode,
+            replay_mode="keyed",
+            dedup_key=event_key,
+            fallback=lambda request, _harness: (_ for _ in ()).throw(
+                AssertionError(f"unexpected request: {request.method} {request.url}")
+            ),
+            create_response=lambda request, _object_id: httpx.Response(202, request=request),
+        )
+        install_mock_transport(monkeypatch, harness)
+        config = _config(
+            endpoint="event",
+            metric_name="Purchased",
+            unique_id_field="event_id",
+            backfill=True,
+        )
+
+        result = KlaviyoDestination().load(
+            [{"email": "ada@example.com", "event_id": "evt-7"}],
+            config,
+            _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+        )
+
+        assert (result.success, result.failed) == (1, 0)
+        assert harness.create_attempts == 2
+        assert len(harness.remote_objects) == 1
+        attributes = harness.remote_objects[0]["data"]["attributes"]
+        assert attributes["unique_id"] == "evt-7"
+        assert attributes["backfill"] is True
+
     def test_event_payload_with_all_optional_fields(self) -> None:
         client = MagicMock()
         client.post.return_value = _resp(202)
