@@ -21,7 +21,7 @@ from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import record_preview, record_row_error
+from drt.destinations.row_errors import record_row_error
 
 
 class KafkaDestination:

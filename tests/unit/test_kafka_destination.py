@@ -16,6 +16,29 @@ from drt.destinations.kafka import KafkaDestination
 from drt.state.idempotency import successful_indices
 
 
+class FakeKafkaError(Exception):
+    _AUTHENTICATION = -169
+    _INVALID_ARG = -186
+    _SSL = -181
+    SASL_AUTHENTICATION_FAILED = 58
+    TOPIC_AUTHORIZATION_FAILED = 29
+    CLUSTER_AUTHORIZATION_FAILED = 31
+    INVALID_CONFIG = 40
+    UNSUPPORTED_SASL_MECHANISM = 33
+    ILLEGAL_SASL_STATE = 34
+
+    def __init__(self, message: str, *, fatal: bool = False, code: int = 0) -> None:
+        super().__init__(message)
+        self._fatal = fatal
+        self._code = code
+
+    def fatal(self) -> bool:
+        return self._fatal
+
+    def code(self) -> int:
+        return self._code
+
+
 class FakeProducer:
     def __init__(self) -> None:
         self.settings: dict[str, Any] = {}
@@ -33,6 +56,7 @@ class FakeProducer:
         self.closed = False
         self.purged = False
         self.purge_reports: set[int] = set()
+        self.error_events: list[FakeKafkaError] = []
 
     def __len__(self) -> int:
         return len(self.pending)
@@ -54,12 +78,17 @@ class FakeProducer:
         self.messages[index]["on_delivery"](error, None)
 
     def poll(self, timeout: float) -> int:
+        while self.error_events:
+            error = self.error_events.pop(0)
+            callback = self.settings.get("error_cb")
+            if callback is not None:
+                callback(error)
         ready = self.pending & self.purge_reports
         if self.report_on_poll:
             ready |= self.pending - self.held
         for index in sorted(ready):
             error = (
-                RuntimeError("purged") if index in self.purge_reports else self.errors.get(index)
+                FakeKafkaError("purged") if index in self.purge_reports else self.errors.get(index)
             )
             self.complete(index, error)
         self.purge_reports.difference_update(ready)
@@ -87,6 +116,8 @@ class FakeProducer:
 
 
 class FakeSDK:
+    KafkaError = FakeKafkaError
+
     def __init__(self) -> None:
         self.producers: list[FakeProducer] = []
         self.next_producer = FakeProducer()
@@ -168,7 +199,7 @@ def test_reuses_producer_across_batches_then_closes_and_starts_fresh(sdk: FakeSD
 def test_counts_only_delivery_reports_and_correlates_reordered_callbacks(sdk: FakeSDK) -> None:
     producer = sdk.next_producer
     producer.reverse_reports = True
-    producer.errors[0] = RuntimeError("broker rejected record")
+    producer.errors[0] = FakeKafkaError("broker rejected record")
     records = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
     destination = KafkaDestination()
     result = destination.load(records, config(), options())
@@ -182,7 +213,7 @@ def test_counts_only_delivery_reports_and_correlates_reordered_callbacks(sdk: Fa
 
 def test_batch_indices_remain_correct_after_validation_and_delivery_failures(sdk: FakeSDK) -> None:
     producer = sdk.next_producer
-    producer.errors[0] = RuntimeError("first produced message failed")
+    producer.errors[0] = FakeKafkaError("first produced message failed")
     producer.reverse_reports = True
     records: list[dict[str, Any]] = [{"id": None}, {"id": "b"}, {"id": "c"}]
     destination = KafkaDestination()
@@ -193,7 +224,19 @@ def test_batch_indices_remain_correct_after_validation_and_delivery_failures(sdk
     destination.finalize_sync(config(), options())
 
 
-@pytest.mark.parametrize("record", [{}, {"id": None}, {"id": []}, {"id": {}}, {"id": (1,)}])
+@pytest.mark.parametrize(
+    "record",
+    [
+        {},
+        {"id": None},
+        {"id": []},
+        {"id": {}},
+        {"id": (1,)},
+        {"id": True},
+        {"id": False},
+        {"id": ""},
+    ],
+)
 def test_invalid_key_is_a_row_error_and_is_never_enqueued(
     sdk: FakeSDK, record: dict[str, Any]
 ) -> None:
@@ -267,7 +310,7 @@ def test_fail_policy_drains_enqueued_rows_and_skips_unattempted_rows(sdk: FakeSD
 def test_fail_policy_stops_when_a_delivery_failure_is_observed_while_polling(sdk: FakeSDK) -> None:
     producer = sdk.next_producer
     producer.report_on_poll = True
-    producer.errors[0] = RuntimeError("delivery failed")
+    producer.errors[0] = FakeKafkaError("delivery failed")
     destination = KafkaDestination()
     result = destination.load([{"id": 1}, {"id": 2}], config(), options(on_error="fail"))
     assert (result.success, result.failed, result.skipped) == (0, 1, 1)
@@ -338,8 +381,9 @@ def test_reset_closes_producer_after_a_batch_level_exception(sdk: FakeSDK) -> No
     with pytest.raises(RuntimeError, match="poll loop failed"):
         destination.load([{"id": 1}], config(), options())
     producer.flush_error = None
-    with pytest.raises(RuntimeError, match="undelivered|outstanding|unconfirmed"):
-        destination.reset_write_state(config(), options())
+    assert producer.purged
+    assert not producer.pending
+    destination.reset_write_state(config(), options())
     assert producer.closed
 
 
@@ -417,11 +461,26 @@ def test_rate_limit_identity_uses_normalized_brokers_and_topic(
         return RateLimiter(key=key, requests_per_second=requests_per_second, burst=burst)
 
     monkeypatch.setattr("drt.destinations.rate_limiter.get_rate_limiter_backend", lambda: factory)
-    destination = KafkaDestination()
-    cfg = config(rate_limit={"requests_per_second": 100000})
-    destination.load([{"id": 1}], cfg, options())
-    assert seen == ["kafka:broker-a:9092,broker-b:9092:events"]
-    destination.finalize_sync(cfg, options())
+    from drt.destinations.rate_limiter import _reset_limiter_registry
+
+    _reset_limiter_registry()
+    for brokers, topic in [
+        ("broker-a:9092,broker-b:9092", "private-events"),
+        (" broker-b:9092,broker-a:9092,broker-a:9092 ", "private-events"),
+        ("broker-a:9092,broker-b:9092", "other-events"),
+        ("broker-c:9092", "private-events"),
+    ]:
+        _reset_limiter_registry()
+        monkeypatch.setenv("KAFKA_BROKERS", brokers)
+        destination = KafkaDestination()
+        cfg = config(topic=topic, rate_limit={"requests_per_second": 100000})
+        destination.load([{"id": 1}], cfg, options())
+        destination.finalize_sync(cfg, options())
+    assert seen[0] == seen[1]
+    assert len(set(seen)) == 3
+    assert all(key.startswith("kafka:") for key in seen)
+    assert all("broker" not in key and "events" not in key for key in seen)
+    _reset_limiter_registry()
 
 
 @pytest.mark.parametrize("brokers", [None, "", "   ", ", ,"])
@@ -502,7 +561,8 @@ def test_native_producer_settings_and_auth_resolution(
     cfg = config(auth=auth, delivery_timeout_s=2.5)
     result = destination.load([{"id": 1}], cfg, options())
     assert result.success == 1
-    settings = sdk.producers[0].settings
+    settings = sdk.producers[0].settings.copy()
+    assert callable(settings.pop("error_cb", None))
     assert settings == {
         "bootstrap.servers": "broker-a:9092,broker-b:9092",
         "enable.idempotence": True,
@@ -562,7 +622,7 @@ def test_queue_full_poll_observing_failure_keeps_unsent_row_skipped(
     producer = sdk.next_producer
     producer.report_on_poll = True
     producer.held = {0}
-    producer.errors[0] = RuntimeError("earlier delivery failed")
+    producer.errors[0] = FakeKafkaError("earlier delivery failed")
     produce = producer.produce
 
     def queue_full_on_second_row(**message: Any) -> None:
@@ -580,4 +640,177 @@ def test_queue_full_poll_observing_failure_keeps_unsent_row_skipped(
     )
     assert (result.success, result.failed, result.skipped) == (0, 1, 1)
     assert [error.batch_index for error in result.row_errors] == [0]
+    destination.finalize_sync(config(), options())
+
+
+@pytest.mark.parametrize("on_error", ["skip", "fail"])
+@pytest.mark.parametrize("report_on_poll", [False, True])
+@pytest.mark.parametrize(
+    "error",
+    [
+        FakeKafkaError("idempotence lost", fatal=True),
+        FakeKafkaError("authentication failed", code=FakeKafkaError._AUTHENTICATION),
+        FakeKafkaError("bad config", code=FakeKafkaError.INVALID_CONFIG),
+    ],
+)
+def test_fatal_delivery_reports_abort_and_purge_the_rest_of_the_batch(
+    sdk: FakeSDK, on_error: str, report_on_poll: bool, error: FakeKafkaError
+) -> None:
+    producer = sdk.next_producer
+    producer.report_on_poll = report_on_poll
+    producer.errors[0] = error
+    destination = KafkaDestination()
+    with pytest.raises(RuntimeError, match=str(error)):
+        destination.load([{"id": 1}, {"id": 2}], config(), options(on_error=on_error))
+    assert producer.purged
+    assert not producer.pending
+    assert producer.attempts == (1 if report_on_poll else 2)
+    destination.reset_write_state(config(), options())
+    assert producer.closed
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FakeKafkaError("idempotence lost", fatal=True),
+        *[
+            FakeKafkaError("auth/config failed", code=code)
+            for code in (
+                FakeKafkaError._AUTHENTICATION,
+                FakeKafkaError._INVALID_ARG,
+                FakeKafkaError._SSL,
+                FakeKafkaError.SASL_AUTHENTICATION_FAILED,
+                FakeKafkaError.TOPIC_AUTHORIZATION_FAILED,
+                FakeKafkaError.CLUSTER_AUTHORIZATION_FAILED,
+                FakeKafkaError.INVALID_CONFIG,
+                FakeKafkaError.UNSUPPORTED_SASL_MECHANISM,
+                FakeKafkaError.ILLEGAL_SASL_STATE,
+            )
+        ],
+    ],
+)
+def test_global_fatal_auth_and_config_events_abort_under_skip(
+    sdk: FakeSDK, error: FakeKafkaError
+) -> None:
+    producer = sdk.next_producer
+    producer.error_events.append(error)
+    with pytest.raises(RuntimeError, match=str(error)):
+        KafkaDestination().load([{"id": 1}], config(), options(on_error="skip"))
+    assert not producer.messages
+
+
+def test_recoverable_global_errors_do_not_abort_a_batch(sdk: FakeSDK) -> None:
+    producer = sdk.next_producer
+    producer.error_events.append(FakeKafkaError("temporary broker disconnect"))
+    destination = KafkaDestination()
+    result = destination.load([{"id": 1}], config(), options())
+    assert result.success == 1 and result.failed == 0
+    destination.finalize_sync(config(), options())
+
+
+@pytest.mark.parametrize("failure_at", ["produce", "poll"])
+@pytest.mark.parametrize("error", [RuntimeError("interrupted send"), KeyboardInterrupt()])
+def test_exceptional_load_purges_before_reset_can_deliver_unconfirmed_rows(
+    sdk: FakeSDK, monkeypatch: pytest.MonkeyPatch, failure_at: str, error: BaseException
+) -> None:
+    producer = sdk.next_producer
+    original = getattr(producer, failure_at)
+    raised = False
+
+    def fail_after_first_enqueue(*args: Any, **kwargs: Any) -> Any:
+        nonlocal raised
+        if producer.messages and not raised:
+            raised = True
+            raise error
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(producer, failure_at, fail_after_first_enqueue)
+    destination = KafkaDestination()
+    with pytest.raises(type(error)) as caught:
+        destination.load([{"id": 1}, {"id": 2}], config(), options())
+    assert caught.value is error
+    assert producer.purged
+    assert not producer.pending
+    destination.reset_write_state(config(), options())
+    assert producer.closed
+    assert not producer.flush_timeouts
+
+
+def test_deeply_nested_json_is_a_row_error_under_skip(sdk: FakeSDK) -> None:
+    nested: list[Any] = []
+    for _ in range(max(10000, sys.getrecursionlimit() + 100)):
+        nested = [nested]
+    destination = KafkaDestination()
+    result = destination.load([{"deep": nested}, {"ok": True}], config(), options())
+    assert (result.success, result.failed, result.skipped) == (1, 1, 0)
+    assert result.row_errors[0].batch_index == 0
+    assert len(result.row_errors[0].record_preview) <= 200
+    destination.finalize_sync(config(), options())
+
+
+def test_failure_preview_does_not_serialize_the_whole_record(sdk: FakeSDK) -> None:
+    class UntouchedTail:
+        def __str__(self) -> str:
+            pytest.fail("preview must stop before serializing the tail")
+
+        def __repr__(self) -> str:
+            pytest.fail("preview must stop before rendering the tail")
+
+    record = {"id": None, "large": [*range(100), UntouchedTail()]}
+    destination = KafkaDestination()
+    result = destination.load([record], config(key_field="id"), options())
+    assert result.failed == 1
+    assert len(result.row_errors[0].record_preview) <= 200
+    destination.finalize_sync(config(), options())
+
+
+@pytest.mark.parametrize(
+    "failure_at", ["purge_leftover", "purge_raises", "close_false", "close_raises"]
+)
+def test_failed_cleanup_detaches_client_and_is_safe_to_repeat(
+    sdk: FakeSDK, monkeypatch: pytest.MonkeyPatch, failure_at: str
+) -> None:
+    destination = KafkaDestination()
+    destination.load([{"id": 1}], config(), options())
+    producer = sdk.producers[0]
+
+    def fail_cleanup() -> None:
+        raise RuntimeError("cleanup failed")
+
+    if failure_at.startswith("purge"):
+        producer.held = {1}
+        producer.produce(topic="events", value=b"unexpected", on_delivery=lambda *_: None)
+        monkeypatch.setattr(
+            producer, "purge", fail_cleanup if failure_at == "purge_raises" else lambda: None
+        )
+    else:
+        monkeypatch.setattr(
+            producer, "close", fail_cleanup if failure_at == "close_raises" else lambda: False
+        )
+    with pytest.raises(RuntimeError):
+        destination.finalize_sync(config(), options())
+    destination.reset_write_state(config(), options())
+    assert destination.load([{"id": 2}], config(), options()).success == 1
+    assert len(sdk.producers) == 2
+    destination.reset_write_state(config(), options())
+
+
+def test_failure_observed_by_pre_send_poll_keeps_current_row_skipped(
+    sdk: FakeSDK, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    producer = sdk.next_producer
+    producer.report_on_poll = True
+    producer.held = {0}
+    producer.errors[0] = FakeKafkaError("earlier delivery failed")
+
+    class Limiter:
+        def acquire(self) -> None:
+            if producer.messages:
+                producer.held.clear()
+
+    monkeypatch.setattr("drt.destinations.kafka.resolve_rate_limiter", lambda *a, **kw: Limiter())
+    destination = KafkaDestination()
+    result = destination.load([{"id": 1}, {"id": 2}], config(), options(on_error="fail"))
+    assert (result.success, result.failed, result.skipped) == (0, 1, 1)
+    assert producer.attempts == 1
     destination.finalize_sync(config(), options())
