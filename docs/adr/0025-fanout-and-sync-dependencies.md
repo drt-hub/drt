@@ -20,12 +20,12 @@ connect to `api.github.com`. The checked-out roadmap identifies #425 as
 (`ROADMAP.md:310`), and earlier roadmap entries place both in the older
 orchestration backlog (`ROADMAP.md:182`, `ROADMAP.md:208`, `ROADMAP.md:236`).
 
-**Unverified — issue text/comments unavailable:** the issue bodies, acceptance
-criteria, examples, and all comments on #425/#426 could not be read. This ADR
-therefore treats only the two issue titles and the scope explicitly requested
-for this draft as inputs. It does not attribute any further requirement or
-opinion to an issue author. The maintainer must compare this proposal with the
-live threads before accepting it.
+**Unverified offline — issue text/comments unavailable:** the issue bodies,
+acceptance criteria, examples, and all comments on #425/#426 could not be read.
+Their contents must be checked by the maintainer before this ADR is accepted.
+This ADR therefore treats only the two issue titles and the scope explicitly
+requested for this draft as inputs. It does not attribute any further
+requirement or opinion to an issue author.
 
 ## Context
 
@@ -45,8 +45,9 @@ The CLI loads sync files in sorted path order and appends each parsed config to
 one list (`drt/config/parser.py:279-304`). Selection preserves that definition
 order, unions repeated selectors, subtracts exclusions, and deduplicates
 repeated selector hits by sync name (`drt/cli/_selection.py:1-21`,
-`drt/cli/_selection.py:93-126`). With no selector, every loaded sync remains
-selected. `--failed` then intersects the
+`drt/cli/_selection.py:93-126`). With no `--select`, selection starts from every
+loaded sync, then `--exclude` still subtracts matching syncs
+(`drt/cli/_selection.py:121-126`). `--failed` then intersects the
 selection with syncs whose stored status is not success
 (`drt/cli/commands/run.py:998-1055`).
 
@@ -79,7 +80,10 @@ The current durability boundary is the sync name:
   (`drt/engine/sync.py:703-738`).
 - The DLQ is one queue per sync, and `drt retry <sync>` replays that queue to
   the sync's one configured destination (`drt/state/dlq.py:1-17`,
-  `drt/state/dlq.py:178-210`, `drt/cli/commands/retry.py:89-132`).
+  `drt/state/dlq.py:178-210`, `drt/cli/commands/retry.py:39-86`,
+  `drt/cli/commands/retry.py:89-157`,
+  `drt/cli/commands/retry.py:286-299`,
+  `drt/cli/commands/retry.py:546-560`).
 - `HistoryEntry` is “One execution of one sync,” carries one `sync_name`, and
   local history uses one JSONL file per sync (`drt/state/history.py:53-84`,
   `drt/state/history.py:129-169`).
@@ -87,9 +91,12 @@ The current durability boundary is the sync name:
   the engine checks and marks keys around the one destination load
   (`drt/state/idempotency.py:116-159`, `drt/engine/sync.py:1200-1219`,
   `drt/engine/sync.py:1250-1279`).
-- Failure alerts and one history row are emitted from the outer lifetime of one
-  `run_sync()` call, while degraded alerts are evaluated by `_run_one()` using
-  that sync's result and DLQ depth (`drt/engine/sync.py:506-601`,
+- On a non-dry run, `run_sync()` attempts a failure alert only when it raised or
+  accumulated failed rows; alert dispatch is best-effort. It attempts one
+  history row only when a history manager was supplied, also best-effort.
+  Degraded alerts are separately evaluated, best-effort and only for non-dry
+  CLI `_run_one()` results with configured degraded conditions, using that
+  sync's result and DLQ depth (`drt/engine/sync.py:506-587`,
   `drt/cli/commands/run.py:413-456`).
 
 On the normal return path, `StatePersistingObserver` writes one status and one
@@ -97,14 +104,20 @@ cursor for the sync, and optionally one external watermark
 (`drt/engine/observer.py:250-349`). If `on_error: skip` permits a result with
 row failures to return, its status may be partial and its cursor follows the
 existing single-destination policy. If `run_sync()` raises before
-`on_sync_completed`, the outer history/alert/DLQ-flush paths still run but the
-completion observer does not advance state (`drt/engine/sync.py:448-505`,
+`on_sync_completed`, a non-dry run still attempts its configured best-effort
+failure alert, optional history append, and observer/DLQ final flush, but the
+completion observer does not advance state (`drt/engine/sync.py:448-587`,
 `drt/engine/sync.py:650-658`, `drt/engine/sync.py:1466-1475`).
 
-One CLI invocation allocates one `run_id`, gives it to every selected sync, and
-writes one `target/drt/run_results.json` containing one result entry per
-attempted or skipped sync (`drt/cli/commands/run.py:977-990`,
-`drt/cli/commands/run.py:574-654`, `drt/cli/commands/run.py:1292-1307`). The
+After project, profile, variables, and sync discovery succeed, one CLI `drt run`
+invocation allocates one `run_id` and gives it to each sync it actually runs.
+Its `finally` block makes one best-effort write of
+`target/drt/run_results.json`; the artifact contains entries for attempted and
+fail-fast-skipped syncs, and may contain an empty result list for a post-discovery
+no-op or rejected invocation. Preflight failures before sync discovery do not
+write the artifact, and library or MCP engine calls do not acquire this CLI
+`run_id` or artifact (`drt/cli/commands/run.py:574-654`,
+`drt/cli/commands/run.py:968-990`, `drt/cli/commands/run.py:1292-1307`). The
 artifact deliberately has no per-sync watermark-before/after pair because the
 post-run value is owned by the persistence observer, not returned to the CLI
 (`drt/cli/commands/run.py:629-634`).
@@ -118,8 +131,11 @@ surfaces or accept ambiguous recovery.
 
 The CLI owns selection and the thread pool. The MCP `drt_run_sync` tool accepts
 one `sync_name`, resolves one destination, and calls engine `run_sync()`
-directly (`drt/mcp/tools/run_sync.py:19-38`,
-`drt/mcp/tools/run_sync.py:65-131`). ADR 0022 already identifies this split and
+directly without the CLI scheduler, CLI observer stack, or invocation `run_id`;
+it also does not produce the CLI's `run_results.json`
+(`drt/mcp/tools/run_sync.py:19-38`,
+`drt/mcp/tools/run_sync.py:65-131`, `drt/engine/sync.py:316-330`,
+`drt/engine/sync.py:416-427`). ADR 0022 already identifies this split and
 requires a shared invocation runner before run-level hooks can behave the same
 through CLI, MCP, `serve`, Airflow, and Prefect. **Verified current-code fact:**
 that shared runner and ADR 0022's hook config are not present in this checkout;
@@ -132,8 +148,8 @@ has shipped.
 ADR 0011 keeps the OSS core CLI-first and excludes a hosted runtime and web UI.
 ADR 0004 rejects a drt-owned watcher and explicitly says that ordering between
 syncs is an orchestrator's job; its Tier 2 path delegates durable cursors,
-backfill, and task ordering to Dagster (`docs/adr/0004-streaming-and-event-triggered-syncs.md:155-181`,
-`docs/adr/0004-streaming-and-event-triggered-syncs.md:237-241`). A dependency
+backfill, and task ordering to Dagster (`docs/adr/0004-streaming-and-event-triggered-syncs.md:162-191`,
+`docs/adr/0004-streaming-and-event-triggered-syncs.md:234-240`). A dependency
 graph that orders a bounded `drt run` invocation is smaller than a watcher, but
 it is still an orchestration feature and must justify reversing that explicit
 boundary rather than arriving as an assumed convenience.
@@ -182,8 +198,15 @@ name: customers_to_salesforce
 tags: [customers_fanout]
 model: ref('customers')
 destination:
-  type: salesforce
-  object: Contact
+  type: salesforce_bulk
+  instance_url_env: SF_INSTANCE_URL
+  object_name: Contact
+  operation: upsert
+  external_id_field: External_Id__c
+  client_id_env: SF_CLIENT_ID
+  client_secret_env: SF_CLIENT_SECRET
+  username_env: SF_USERNAME
+  password_env: SF_PASSWORD
 sync:
   mode: upsert
 ```
@@ -345,10 +368,13 @@ while `drt retry B` can replay only B's persisted DLQ rows. **Current-code cavea
 `--failed` reads `StateStore`, and the raised path does not call the state
 completion observer, so it is not a guaranteed selector for B after an
 exception (`drt/cli/commands/run.py:1022-1032`,
-`drt/engine/sync.py:448-505`). A does not rerun unless explicitly selected. If
-a destination returns a partial result under the existing `on_error: skip`
-contract, that sync retains today's cursor and DLQ behavior; fan-out
-composition adds no stronger all-record guarantee.
+`drt/engine/sync.py:448-505`). An ordinary later `drt run` without `--select`
+starts from all loaded syncs and therefore reruns A unless another filter or
+`--exclude` removes it. Only `drt retry B` and `drt run --select B` are B-only;
+A's already-persisted success is not rolled back. If a destination returns a
+partial result under the existing `on_error: skip` contract, that sync retains
+today's cursor and DLQ behavior; fan-out composition adds no stronger all-record
+guarantee.
 
 This is partial success, not atomic fan-out. No design in scope can atomically
 commit a CRM API, a queue, and a SQL database. Operators who require downstream
@@ -391,11 +417,16 @@ These semantics are proposed contingencies, not current behavior.
 
 ### ADR 0021 — windowed backfill
 
-With F1, each destination sync owns its own backfill checkpoint and processes
-its windows independently. Two fan-out legs may be at different windows and
-may capture different run ceilings. That is the expected consequence of
-independent recovery. A failed leg resumes from its own checkpoint; a successful
-leg is not rolled back.
+**Accepted future design, not current behavior:** ADR 0021 is accepted, but
+backfill execution is still disabled by `BACKFILL_EXECUTION_ENABLED = False`;
+the current engine rejects configured backfills before extraction
+(`drt/config/sync_options.py:84-91`, `drt/config/sync_options.py:884-887`,
+`drt/engine/sync.py:416-418`). Under that future design, F1 gives each
+destination sync its own backfill checkpoint and independent window processing.
+Two fan-out legs may be at different windows and may capture different run
+ceilings. That is the expected consequence of independent recovery. A failed
+leg would resume from its own checkpoint; a successful leg would not be rolled
+back.
 
 F2 would force the same unsafe watermark choice at every window: replay
 successful destinations when one leg fails, or maintain per-destination window
@@ -467,8 +498,9 @@ If either rejected feature is later accepted:
   completion, `run`, `build`, `test`, `plan`, `apply`, `docs`, `serve`, and
   deploy scaffolds must state whether they operate on the selected node only or
   a graph closure. No command may silently choose a different rule.
-- MCP/CLI parity is mandatory. The current MCP tool runs exactly one sync and
-  bypasses the CLI scheduler. A core dependency feature cannot be advertised
+- MCP/CLI parity is mandatory. The current MCP tool calls the engine directly
+  for exactly one sync, without the CLI scheduler, CLI observer stack, or
+  `run_id`. A core dependency feature cannot be advertised
   through CLI while MCP ignores it; both must call the shared invocation runner
   anticipated by ADR 0022. Direct `engine.run_sync()` should remain the
   single-sync primitive and should not recursively schedule dependencies.
@@ -583,5 +615,5 @@ checking the live issue threads.
    “advance on any” (data loss) and “advance on all” (implicit replay of
    successes) as a composite default.
 9. **Do the unavailable issue bodies/comments contain requirements that change
-   these recommendations?** **Unverified.** The maintainer must confirm this
-   ADR against `gh issue view 425/426 --comments` before acceptance.
+   these recommendations?** **Unverified offline.** The maintainer must check
+   the live #425/#426 thread contents before acceptance.
