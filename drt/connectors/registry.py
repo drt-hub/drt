@@ -242,6 +242,7 @@ def _register_all_connectors() -> None:
         HubSpotDestinationConfig,
         IntercomDestinationConfig,
         JiraDestinationConfig,
+        KafkaDestinationConfig,
         KlaviyoDestinationConfig,
         LinearDestinationConfig,
         MetaConversionsDestinationConfig,
@@ -282,6 +283,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.intercom import IntercomDestination
     from drt.destinations.jira import JiraDestination
+    from drt.destinations.kafka import KafkaDestination
     from drt.destinations.klaviyo import KlaviyoDestination
     from drt.destinations.linear import LinearDestination
     from drt.destinations.meta_conversions import MetaConversionsDestination
@@ -322,6 +324,7 @@ def _register_all_connectors() -> None:
     register_destination("rest_api", RestApiDestinationConfig, RestApiDestination)
     register_destination("slack", SlackDestinationConfig, SlackDestination)
     register_destination("sqs", SQSDestinationConfig, SQSDestination)
+    register_destination("kafka", KafkaDestinationConfig, KafkaDestination)
     register_destination("twilio", TwilioDestinationConfig, TwilioDestination)
     register_destination("discord", DiscordDestinationConfig, DiscordDestination)
     register_destination("github_actions", GitHubActionsDestinationConfig, GitHubActionsDestination)
