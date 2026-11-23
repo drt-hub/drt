@@ -279,7 +279,7 @@ destination:                # required: see Destination Configs below
 sync:                       # optional: all fields have defaults
   mode: full                # "full" (default) | "incremental" | "upsert" | "replace" | "mirror". replace/mirror: Postgres, MySQL, ClickHouse, Snowflake, Databricks, BigQuery
   replace_strategy: truncate # "truncate" (default) | "swap"; only valid with mode: replace
-  match_policy: upsert      # optional (#757): "upsert" (default) | "update_only" (only touch rows that already exist — no-match rows are SKIPPED, counted in SyncResult.skipped with a skipped_no_match breakdown; `drt run` prints "N skipped (M no match)" and --output json adds rows_skipped / rows_skipped_no_match) | "create_only" (only insert rows that don't exist — existing rows untouched). Applies to the upsert write path (mode: full/upsert/incremental); rejected for replace/mirror; fails fast on destinations that don't implement it. Postgres + MySQL + HubSpot + Intercom; other SaaS destinations follow per-PR
+  match_policy: upsert      # optional (#757): "upsert" (default) | "update_only" (only touch rows that already exist — no-match rows are SKIPPED, counted in SyncResult.skipped with a skipped_no_match breakdown; `drt run` prints "N skipped (M no match)" and --output json adds rows_skipped / rows_skipped_no_match) | "create_only" (only insert rows that don't exist — existing rows untouched). Applies to the upsert write path (mode: full/upsert/incremental); rejected for replace/mirror; fails fast on destinations that don't implement it. Postgres + MySQL + HubSpot + Intercom + Klaviyo profiles + Pipedrive; other SaaS destinations follow per-PR
   write_policy: overwrite  # optional (#1238): "overwrite" (default) | "fill_empty"; fill only NULL/blank destination values, new rows in full; rejected for replace
   write_policy_overrides:  # optional: exact destination column/property name -> policy
     lifecycle_stage: overwrite
@@ -1495,7 +1495,7 @@ destination:
     client_secret_env: GOOGLE_ADS_CLIENT_SECRET
 ```
 
-### `type: klaviyo` — safe historical events
+### `type: klaviyo` — replay-safe profiles and safe historical events
 
 ```yaml
 destination:
@@ -1509,6 +1509,7 @@ destination:
   value_field: amount                   # optional
   backfill: true                        # event only: record history without firing live flows
   revision: "2026-07-15"                # default and minimum when backfill=true
+  retry_creates: false                   # duplicate-risk profile/list escape hatch
 ```
 
 Use `backfill: true` for a first full event load or historical
@@ -1516,6 +1517,21 @@ Use `backfill: true` for a first full event load or historical
 without re-triggering customer-facing automations. It is rejected for profile
 mode and with a revision older than `2026-07-15`; turn it back off for live
 incremental events.
+
+For `endpoint: profile`, default `upsert` uses Klaviyo's native email-keyed
+`POST /api/profile-import` create-or-update endpoint, so retries reuse the same
+logical identity. `create_only` uses `POST /api/profiles/` and reconciles an
+ambiguous response with an exact email filter; `update_only` uses the same lookup
+and an ID-addressed PATCH. One match is accepted, multiple matches are refused,
+and a miss fails delivery-unknown because read visibility may lag. List-membership
+POSTs use the same fail-closed reconciliation rule. `retry_creates: true` allows
+a blind replay after a miss and emits a duplicate-risk warning. 429 and proven
+pre-send connection failures remain retryable; searches and ID-addressed updates
+keep normal retries. These paths are mock-verified only; no live Klaviyo account
+was available. Non-default match policies are rejected for `endpoint: event`.
+Event retries are keyed by the required stable `unique_id_field` together with
+the profile and metric, matching Klaviyo's documented deduplication tuple;
+`backfill` remains part of the unchanged retried payload.
 
 ### `type: meta_conversions`
 

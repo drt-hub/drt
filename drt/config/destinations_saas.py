@@ -517,6 +517,9 @@ class KlaviyoDestinationConfig(BaseModel):
     # for events that already happened. The event still counts toward
     # metrics/segmentation -- only flow triggering is suppressed.
     backfill: bool = False
+    # Blind replay after a profile-create or list-membership reconciliation miss is an
+    # explicit duplicate-risk opt-in. Native profile-import upserts do not need this.
+    retry_creates: bool = False
     retry: RetryConfig | None = None
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
