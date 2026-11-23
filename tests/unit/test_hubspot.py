@@ -13,6 +13,7 @@ httpx is mocked — no network.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +30,11 @@ from drt.config.models import (
 )
 from drt.destinations.base import MatchPolicyCapable, SyncResult, WritePolicyCapable
 from drt.destinations.hubspot import HubSpotDestination
+from tests.http_fault_injection import (
+    BlindCreateFaultHarness,
+    FaultMode,
+    install_mock_transport,
+)
 
 
 def _config(**overrides: Any) -> HubSpotDestinationConfig:
@@ -69,6 +75,38 @@ def _response(status_code: int = 200) -> MagicMock:
 _RECORD = {"email": "a@b.com", "firstname": "Ada"}
 
 
+def _fault_fallback(request: httpx.Request, harness: BlindCreateFaultHarness) -> httpx.Response:
+    if request.method == "POST" and request.url.path.endswith("/search"):
+        body = json.loads(request.content)
+        search_filter = body["filterGroups"][0]["filters"][0]
+        matching_ids = [
+            str(item["id"])
+            for item in harness.remote_objects
+            if item["properties"].get(search_filter["propertyName"]) == search_filter["value"]
+        ]
+        return httpx.Response(
+            200,
+            json={"results": [{"id": value} for value in matching_ids]},
+            request=request,
+        )
+    if request.method == "PATCH":
+        return httpx.Response(
+            200, json={"id": request.url.path.rsplit("/", 1)[-1]}, request=request
+        )
+    raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+
+def _fault_harness(object_type: str, mode: FaultMode) -> BlindCreateFaultHarness:
+    return BlindCreateFaultHarness(
+        f"/crm/v3/objects/{object_type}",
+        mode=mode,
+        fallback=_fault_fallback,
+        create_response=lambda request, object_id: httpx.Response(
+            201, json={"id": str(object_id)}, request=request
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Capability
 # ---------------------------------------------------------------------------
@@ -85,6 +123,16 @@ def test_hubspot_declares_write_policy_capability() -> None:
     assert isinstance(dest, WritePolicyCapable)
     assert dest.identifiers_case_insensitive is False
     assert dest.supported_write_policies() == frozenset({"overwrite", "fill_empty"})
+
+
+def test_retry_creates_defaults_false_and_custom_object_types_are_supported() -> None:
+    assert _config().retry_creates is False
+    custom = _config(object_type="2-1234567", id_property="external_id", retry_creates=True)
+    assert (custom.object_type, custom.id_property, custom.retry_creates) == (
+        "2-1234567",
+        "external_id",
+        True,
+    )
 
 
 @pytest.mark.parametrize("mode", ["full", "upsert", "incremental"])
@@ -223,6 +271,304 @@ def test_mixed_batch_update_only_counts_hits_and_skips() -> None:
     assert result.skipped_no_match == 1
     assert patch_call.call_count == 2
     post.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+@pytest.mark.parametrize("match_policy", ["upsert", "create_only"])
+@pytest.mark.parametrize(
+    ("object_type", "id_property", "record"),
+    [
+        ("contacts", "email", {"email": "ada@example.com", "firstname": "Ada"}),
+        ("companies", "domain", {"domain": "example.com", "name": "Example"}),
+        ("deals", "external_id", {"external_id": "deal-7", "dealname": "Renewal"}),
+        ("2-1234567", "external_id", {"external_id": "custom-9", "name": "Custom"}),
+    ],
+)
+def test_create_commit_then_failure_reconciles_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: FaultMode,
+    match_policy: str,
+    object_type: str,
+    id_property: str,
+    record: dict[str, Any],
+) -> None:
+    harness = _fault_harness(object_type, mode)
+    install_mock_transport(monkeypatch, harness)
+
+    result = HubSpotDestination().load(
+        [record],
+        _config(object_type=object_type, id_property=id_property),
+        _options(
+            match_policy,
+            retry=RetryConfig(max_attempts=2, initial_backoff=0.0),
+        ),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+    expected = [
+        ("POST", f"/crm/v3/objects/{object_type}"),
+        ("POST", f"/crm/v3/objects/{object_type}/search"),
+    ]
+    if match_policy == "upsert":
+        expected.append(("PATCH", f"/crm/v3/objects/{object_type}/1"))
+    assert [(request.method, request.url.path) for request in harness.requests] == expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status"),
+    [("commit-then-drop", None), ("commit-then-5xx", 503)],
+)
+def test_create_reconciliation_miss_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: FaultMode,
+    expected_status: int | None,
+) -> None:
+    harness = _fault_harness("contacts", mode)
+
+    def stale_search(request: httpx.Request, _harness: BlindCreateFaultHarness) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(200, json={"results": []}, request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = stale_search
+    install_mock_transport(monkeypatch, harness)
+
+    result = HubSpotDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (0, 0, 1)
+    assert result.row_errors[0].http_status == expected_status
+    assert "delivery is unknown" in result.row_errors[0].error_message
+    assert "refused a second POST" in result.row_errors[0].error_message
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+
+
+def test_create_without_reconciliation_key_is_blind_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _fault_harness("deals", "commit-then-drop")
+    install_mock_transport(monkeypatch, harness)
+
+    result = HubSpotDestination().load(
+        [{"dealname": "Renewal"}],
+        _config(object_type="deals", id_property="external_id"),
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (0, 0, 1)
+    assert "no non-empty 'external_id' reconciliation key" in result.row_errors[0].error_message
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+    assert [(request.method, request.url.path) for request in harness.requests] == [
+        ("POST", "/crm/v3/objects/deals")
+    ]
+
+
+def test_multiple_reconciliation_matches_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _fault_harness("contacts", "commit-then-drop")
+
+    def duplicate_after_commit(
+        request: httpx.Request, state: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            state.remote_objects.append(
+                {"id": 99, "properties": {"email": "a@b.com", "firstname": "Other"}}
+            )
+            return _fault_fallback(request, state)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = duplicate_after_commit
+    install_mock_transport(monkeypatch, harness)
+
+    result = HubSpotDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (0, 0, 1)
+    assert "matched multiple contacts objects" in result.row_errors[0].error_message
+    assert "['1', '99']" in result.row_errors[0].error_message
+    assert harness.create_attempts == 1
+
+
+def test_retry_creates_true_restores_blind_replay_with_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = _fault_harness("contacts", "commit-then-drop")
+
+    def stale_search(request: httpx.Request, _harness: BlindCreateFaultHarness) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(200, json={"results": []}, request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = stale_search
+    install_mock_transport(monkeypatch, harness)
+    caplog.set_level(logging.WARNING, logger="drt.destinations.hubspot")
+
+    result = HubSpotDestination().load(
+        [_RECORD],
+        _config(retry_creates=True),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+    assert harness.create_attempts == 2
+    assert len(harness.remote_objects) == 2
+    assert "duplicate object risk" in caplog.text
+
+
+def test_retry_creates_true_allows_create_without_reconciliation_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = _fault_harness("deals", "commit-then-drop")
+    install_mock_transport(monkeypatch, harness)
+    caplog.set_level(logging.WARNING, logger="drt.destinations.hubspot")
+
+    result = HubSpotDestination().load(
+        [{"dealname": "Renewal"}],
+        _config(object_type="deals", id_property="external_id", retry_creates=True),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert harness.create_attempts == 2
+    assert len(harness.remote_objects) == 2
+    assert "without a reconciliation key" in caplog.text
+
+
+def test_429_on_create_is_retried_without_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+        return httpx.Response(201, json={"id": "1"}, request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    result = HubSpotDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", "/crm/v3/objects/contacts"),
+        ("POST", "/crm/v3/objects/contacts"),
+    ]
+
+
+def test_pre_send_connect_error_on_create_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ConnectError("not connected", request=request)
+        return httpx.Response(201, json={"id": "1"}, request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    result = HubSpotDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert len(requests) == 2
+
+
+def test_reconciliation_search_and_id_update_keep_normal_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _fault_harness("contacts", "commit-then-drop")
+    search_attempts = 0
+    patch_attempts = 0
+
+    def transient_reads_and_updates(
+        request: httpx.Request, state: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        nonlocal search_attempts, patch_attempts
+        if request.url.path.endswith("/search"):
+            search_attempts += 1
+            if search_attempts == 1:
+                return httpx.Response(503, request=request)
+            return _fault_fallback(request, state)
+        if request.method == "PATCH":
+            patch_attempts += 1
+            if patch_attempts == 1:
+                return httpx.Response(503, request=request)
+            return httpx.Response(200, json={"id": "1"}, request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = transient_reads_and_updates
+    install_mock_transport(monkeypatch, harness)
+
+    result = HubSpotDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert (harness.create_attempts, search_attempts, patch_attempts) == (1, 2, 2)
+    assert len(harness.remote_objects) == 1
+
+
+def test_fill_empty_ambiguous_create_reconciles_then_updates_by_object_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _fault_harness("contacts", "commit-then-drop")
+
+    def fill_fallback(request: httpx.Request, state: BlindCreateFaultHarness) -> httpx.Response:
+        if request.url.path.endswith("/batch/read"):
+            return httpx.Response(
+                207,
+                json={
+                    "status": "COMPLETE",
+                    "results": [],
+                    "numErrors": 1,
+                    "errors": [_not_found("a@b.com")],
+                },
+                request=request,
+            )
+        return _fault_fallback(request, state)
+
+    harness.fallback = fill_fallback
+    install_mock_transport(monkeypatch, harness)
+
+    result = HubSpotDestination().load(
+        [_RECORD],
+        _config(),
+        _options(
+            write_policy="fill_empty",
+            retry=RetryConfig(max_attempts=2, initial_backoff=0.0),
+        ),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+    assert [(request.method, request.url.path) for request in harness.requests] == [
+        ("POST", "/crm/v3/objects/contacts/batch/read"),
+        ("POST", "/crm/v3/objects/contacts"),
+        ("POST", "/crm/v3/objects/contacts/search"),
+        ("PATCH", "/crm/v3/objects/contacts/1"),
+    ]
 
 
 # ---------------------------------------------------------------------------

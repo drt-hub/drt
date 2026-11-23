@@ -297,13 +297,16 @@ class GoogleSheetsDestinationConfig(DescribableConfig):
 class HubSpotDestinationConfig(DescribableConfig):
     _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["hubspot"]
-    object_type: Literal["contacts", "deals", "companies"] = "contacts"
+    # Standard names or a custom object's fully qualified name / object type ID.
+    object_type: str = "contacts"
     # Property used as upsert key (contacts → email, deals → dealname, etc.)
     id_property: str = "email"
     # Jinja2 template → JSON object of HubSpot properties
     # Example: '{"email": "{{ row.email }}", "firstname": "{{ row.name }}"}'
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    # Blind replay after create reconciliation misses is an explicit duplicate-risk opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
