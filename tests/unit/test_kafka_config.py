@@ -67,7 +67,7 @@ def test_kafka_config_preserves_explicit_overrides() -> None:
     assert config.retry is not None and config.retry.max_attempts == 2
     assert config.rate_limit is not None and config.rate_limit.burst == 3
     assert config.auth.scram_mechanism == "SCRAM-SHA-256"
-    assert config.describe() == "kafka (customer_scores)"
+    assert config.describe() == config.describe_safe() == "kafka"
 
 
 @pytest.mark.parametrize(
