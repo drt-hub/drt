@@ -2043,11 +2043,6 @@
         },
         "object_type": {
           "default": "contacts",
-          "enum": [
-            "contacts",
-            "deals",
-            "companies"
-          ],
           "title": "Object Type",
           "type": "string"
         },
@@ -2070,6 +2065,11 @@
         },
         "auth": {
           "$ref": "#/$defs/BearerAuth"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [

@@ -19,6 +19,7 @@ destination:
   auth:
     type: bearer
     token_env: HUBSPOT_TOKEN
+  retry_creates: false
 ```
 
 ## Configuration
@@ -26,10 +27,11 @@ destination:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `type` | `"hubspot"` | — | Required |
-| `object_type` | `contacts\|deals\|companies` | `contacts` | CRM object type |
+| `object_type` | string | `contacts` | Standard CRM object name (`contacts`, `companies`, or `deals`) or a custom object's fully qualified name / object type ID |
 | `id_property` | string | `email` | Property used for upsert deduplication |
 | `properties_template` | string \| null | null | Jinja2 template for properties JSON |
 | `auth` | BearerAuth | — | Bearer token auth |
+| `retry_creates` | boolean | `false` | After an ambiguous create and an exact reconciliation miss, allow another blind `POST`. This can create a duplicate object; reconciliation itself does not require this option |
 
 ## Authentication
 
@@ -86,6 +88,27 @@ destination:
 ```
 
 The classic reverse-ETL activation case: push warehouse-computed scores/traits into contacts your reps already created in HubSpot, **without spraying a new contact for every warehouse row**. `update_only` PATCHes by `id_property` directly — a record with no HubSpot match (404) is **skipped**, never created. `create_only` is the inverse: POST only, and a record that already exists (409) is **skipped**, so a seed audience is never overwritten. Skipped rows are counted in the run's `skipped` total (`drt run` prints `… N skipped`), not as errors. The default `upsert` is unchanged (POST, then PATCH on 409).
+
+## Errors and retries
+
+- Batch reads, exact reconciliation searches, and ID-addressed `PATCH` updates keep ordinary configured retries. A create also retries HTTP 429 and proven connection-establishment failures because the operation was not accepted or no request bytes were sent.
+- A lost response or retryable 5xx after `POST /crm/v3/objects/{object_type}` is delivery-unknown. When the rendered properties contain a non-empty configured `id_property`, drt makes one bounded search using HubSpot's exact `EQ` filter. One object is accepted as delivered; `upsert` then applies an update to that returned HubSpot object ID, while `create_only` records success without updating. Multiple object IDs are refused as a row error.
+- A search miss fails closed because [HubSpot documents that newly created or updated CRM objects may take a few moments to appear in search](https://developers.hubspot.com/docs/api-reference/latest/crm/search-the-crm#limits). A create whose rendered properties omit `id_property` or give it an empty value is blind and cannot be reconciled; it also fails closed after an ambiguous attempt.
+- The existing match-policy responses remain unchanged: a definite create `409` becomes an `idProperty`-addressed update for `upsert` or a policy skip for `create_only`; `update_only` uses an `idProperty`-addressed PATCH and treats `404` as a policy skip.
+
+### Retry safety and operator recovery
+
+HubSpot's [CRM search API](https://developers.hubspot.com/docs/api-reference/latest/crm/search-the-crm) accepts property filters across standard and custom CRM objects. drt uses `EQ`, requests at most two results, and requires exactly one ID before it considers ambiguous delivery reconciled.
+
+| Operation | Classification | Protection and remaining risk |
+|---|---|---|
+| Batch read; `POST .../{object_type}/search`; `PATCH .../{object_id}` or `PATCH .../{id_property}?idProperty=...` | Idempotent read / addressed update | Ordinary retries remain enabled. Updates target the same record ID or configured unique property |
+| Object `POST` with a non-empty configured `id_property` value | Reconciliable create | One exact search protects the immediate ambiguous attempt. HubSpot native idempotency-key support is unverified; index lag makes a search miss non-authoritative |
+| Object `POST` without a non-empty configured `id_property` value | Blind create | No automatic replay after a possibly sent attempt because there is no exact reconciliation key |
+
+When a RowError says create delivery is unknown, assume the first POST may have worked. Wait for HubSpot's search index, search the same object type by the exact rendered `id_property`, and merge/remove duplicates if necessary before using `drt retry` or manually replaying the row. The warehouse delivery ledger cannot resolve a response lost inside one `load()` call because it marks only confirmed success. Set `destination.retry_creates: true` only when availability is worth the duplicate-object risk; drt warns whenever that opt-in authorizes a blind replay.
+
+This retry behavior is verified against the shared HTTP fault-injection mock only. No live HubSpot account was available for verification.
 
 **Fill only empty HubSpot properties (`write_policy: fill_empty`, [#1238](https://github.com/drt-hub/drt/issues/1238)):**
 
@@ -161,7 +184,8 @@ destination:
 Rate limiting counts logical operations: one properties lookup, batch read, or
 row write consumes one limiter slot. Retries within that operation do not consume
 another slot, and the default-policy POST-409-to-PATCH fallback remains one
-logical write.
+logical write. An ambiguous create additionally consumes one search slot and,
+for `upsert`, one ID-addressed update slot.
 
 > **Syncing to more than one portal? Use `auth.token_env`, not an inline `auth.token`.**
 > Pacing is per portal, and drt identifies the portal by the *name* of the env var holding the token — it deliberately never derives the key from the token value itself. Two destinations that inline a literal token are therefore indistinguishable to the limiter and share one bucket, so they pace against each other even when they point at different portals. The failure mode is a slower sync, never a 429; giving each portal its own env var gives each its own bucket.
@@ -177,5 +201,5 @@ logical write.
 ## Notes
 
 - HubSpot rate limit: ~100 requests/10s for private apps. drt caps at 9 req/s automatically
-- Upsert: POST with `idProperty` deduplicates. On 409 Conflict, drt retries as PATCH. `sync.match_policy: update_only` / `create_only` narrow this to one side (see Common Patterns above)
+- Upsert: POST with `idProperty` deduplicates. On 409 Conflict, drt follows with PATCH. `sync.match_policy: update_only` / `create_only` narrow this to one side (see Common Patterns above)
 - `properties_template` must produce a JSON object of HubSpot property names

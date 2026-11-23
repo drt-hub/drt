@@ -979,7 +979,7 @@ destination:
 ```yaml
 destination:
   type: hubspot
-  object_type: contacts           # "contacts" | "deals" | "companies", default: "contacts"
+  object_type: contacts           # contacts | companies | deals | custom object name/ID
   id_property: email              # default: "email" — upsert deduplication key
   properties_template: |          # optional Jinja2 template → JSON object of HubSpot properties
     {
@@ -991,6 +991,7 @@ destination:
   auth:
     type: bearer
     token_env: HUBSPOT_TOKEN      # Private App token with CRM write scope
+  retry_creates: false            # default; true allows duplicate-risk blind replay
 ```
 
 HubSpot supports `sync.write_policy: fill_empty` for `mode: full`, `upsert`, and
@@ -1017,6 +1018,17 @@ write beyond `id_property` is skipped without incrementing `skipped_no_match`;
 the aggregated `SyncResult.kept_values` counts kept properties and `drt run`
 prints them. This leg is mock-verified only, not verified against a live HubSpot
 account. HubSpot has no `drt plan` / `--dry-run --diff` support today (#472).
+
+After a lost create response or retryable 5xx, drt searches the same standard or
+custom object type with an exact `EQ` filter on the rendered `id_property`. One
+result is accepted and receives an ID-addressed update for `upsert`; multiple IDs
+are refused, and no result fails delivery-unknown because HubSpot documents search
+index lag after creates. A missing/empty `id_property` is a blind create and also
+fails closed. HTTP 429 and proven pre-send connection failures remain retryable,
+as do searches, batch reads, and addressed updates. `retry_creates: true` permits
+a blind replay after a miss and emits a duplicate-object-risk warning. See the
+[HubSpot connector docs](../connectors/hubspot.md) for recovery steps and the
+mock-only verification boundary.
 
 ### `type: intercom`
 

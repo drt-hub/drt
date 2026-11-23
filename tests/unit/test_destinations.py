@@ -348,7 +348,9 @@ class TestHubSpotDestination:
 
         def handler(_request):  # type: ignore[no-untyped-def]
             call_count["n"] += 1
-            return Response('{"error": "busy"}', status=503)
+            # 429 is rejected before the create is processed, so it stays retryable
+            # (ADR 0023); a 503 on a create is delivery-unknown and is not replayed.
+            return Response('{"error": "busy"}', status=429)
 
         httpserver.expect_request("/crm/v3/objects/contacts").respond_with_handler(handler)
         config = HubSpotDestinationConfig(
