@@ -1,6 +1,8 @@
 # ADR 0025 — Multi-destination fan-out and sync dependencies
 
-- **Status:** Proposed.
+- **Status:** Accepted 2026-11-23 (decisions 1-4: decline in drt-core; decisions
+  5-8 recorded as reserved design only; decision 9, the check of the live issue
+  threads, remains with the maintainer).
 - **Date:** 2026-11-22.
 - **Issues:** [#425](https://github.com/drt-hub/drt/issues/425)
   (multi-destination fan-out) and
@@ -617,3 +619,38 @@ checking the live issue threads.
 9. **Do the unavailable issue bodies/comments contain requirements that change
    these recommendations?** **Unverified offline.** The maintainer must check
    the live #425/#426 thread contents before acceptance.
+
+## Decisions (owner-approved 2026-11-23)
+
+The maintainer accepted the recommended answer to questions 1-4. Questions 5-8
+only apply if #426 were ever reopened; they are recorded as reserved design and
+are **not** accepted for implementation.
+
+1. **First-class `destinations:` list for #425?** No. Fan-out is N independently
+   named syncs sharing one model and tag; each keeps its own
+   state/watermark/DLQ/history/ledger identity. #425 is re-scoped to
+   documentation of that pattern.
+2. **Avoiding repeated source queries a v1.4 requirement?** No. A durable
+   broadcast/cache design needs its own ADR if measured cost or snapshot
+   inconsistency ever makes it necessary.
+3. **A thin fan-out group construct?** No. Tags plus `--select tag:<name>`
+   already provide the selection alias.
+4. **Core dependency scheduling for #426?** No. Dependency graphs are delegated
+   to Dagster/Airflow/Prefect, warehouse-native jobs or CI, reaffirming ADR 0004
+   and ADR 0011. Hosted products ship this as a managed feature (for example
+   Hightouch and Census "Sequences"); drt-core deliberately does not.
+5.-8. **Reserved, not accepted.** If #426 is reopened: per-sync `depends_on`
+   (never a separate DAG file), no silent selection of unselected parents,
+   dependency-blocked children recorded only as skipped in the invocation
+   artifact, and no shared fan-out watermark (each sync advances only its own
+   progress).
+9. **Live issue threads.** Still to be checked by the maintainer; if they contain
+   requirements that change decisions 1-4, amend this ADR before acting on them.
+
+### Follow-up work this decision implies
+
+- Document the fan-out pattern (N syncs, one model, shared tag, `--select
+  tag:<name>`) in the guides, including the per-destination state/DLQ/retry
+  consequences and the fact that each leg reads the source independently.
+- Comment on #425 and #426 with the decision and close or re-scope them; the
+  text is reviewed with the maintainer before posting.
