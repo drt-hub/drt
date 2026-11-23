@@ -79,11 +79,7 @@ class KafkaDestination:
         discarding = False
 
         def fail(index: int, exc: Exception) -> None:
-            try:
-                preview = record_preview(records[index])
-            except (TypeError, ValueError):
-                # A JSON serialization failure can also make the shared preview fail.
-                preview = repr(records[index])[:200]
+            preview = bounded_repr(records[index])[:200]
             record_row_error(result, index, preview, exc)
             result.errors.append(str(exc))
 
