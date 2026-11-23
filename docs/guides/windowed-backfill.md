@@ -109,6 +109,14 @@ masking. The engine checks this before the destination write; if a key is
 missing or NULL, it reports the sync, column, and window and leaves that window
 uncheckpointed so an operator can correct the source data and retry safely.
 
+Keep every backfill key component stable across retries. A key cannot overlap
+the destination targets of `metadata_columns.synced_at`,
+`metadata_columns.run_id`, or a future `metadata_columns.sync_run_id`, and it
+cannot be produced by `computed_fields`. The engine resolves computed-field
+names through `field_mappings` and refuses either overlap before extraction.
+Alias stable source identity in the model SQL when the destination needs a
+different key name.
+
 Upsert keys must be unique within each window as well. drt tracks a canonical,
 type-tagged 16-byte BLAKE2b digest for every destination-facing composite key
 across all streamed batches in the window. The shared engine admits only exact
@@ -138,6 +146,13 @@ has no room, the queue and checkpoint stay unchanged; the original row,
 extraction, interruption, or contract failure remains the primary failure and
 the capacity error is reported with it. Raise the cap or drain the queue with
 `drt retry NAME`. Backfill cleanup never uses the ordinary capped append.
+
+Backfill DLQ IDs are derived from the window bounds plus the validated
+destination upsert key, not from the final payload, so retry-specific metadata
+does not create duplicate entries. Keyless plugin capabilities fall back to the
+record captured before metadata injection. This ID scheme replaces only IDs
+from earlier unreleased slice-3 commits: mainline has not enabled backfill
+execution, so no compatibility migration is needed.
 
 ## Recovery and state safety
 

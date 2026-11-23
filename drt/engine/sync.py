@@ -41,6 +41,7 @@ from drt.engine.backfill import (
     BackfillBound,
     BackfillWindow,
     apply_lag_then_clamp,
+    canonical_window_upsert_key,
     canonicalize_bound,
     plan_windows,
     validate_window_row,
@@ -59,6 +60,7 @@ from drt.engine.contract import (
 )
 from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
+from drt.engine.key_safety import backfill_key_safety_error
 from drt.engine.masking import apply_mask
 from drt.engine.metadata_columns import apply_metadata_columns
 from drt.engine.observer import (
@@ -230,13 +232,14 @@ def _build_audit_entries(
 
 def _dead_letter_for_record(
     *,
-    sync_name: str,
     record: dict[str, Any],
     error_message: str,
     http_status: int | None,
     timestamp: str,
     sync_run_id: str | None,
     window_bounds: BackfillWindow | None,
+    validated_upsert_key: list[str] | None = None,
+    pre_metadata_record: dict[str, Any] | None = None,
 ) -> DeadLetter:
     """Build a stable backfill entry while preserving legacy random ids."""
     if window_bounds is None:
@@ -247,6 +250,17 @@ def _dead_letter_for_record(
             timestamp=timestamp,
             sync_run_id=sync_run_id,
         )
+    stable_identity: dict[str, Any]
+    if validated_upsert_key:
+        stable_identity = {
+            "destination_upsert_key": canonical_window_upsert_key(record, validated_upsert_key)
+        }
+    else:
+        stable_identity = {
+            "pre_metadata_record": pre_metadata_record
+            if pre_metadata_record is not None
+            else record
+        }
     return DeadLetter(
         record=record,
         error_message=error_message,
@@ -254,10 +268,9 @@ def _dead_letter_for_record(
         timestamp=timestamp,
         sync_run_id=sync_run_id,
         id=backfill_dead_letter_id(
-            sync_name,
             window_bounds[0],
             window_bounds[1],
-            record,
+            stable_identity,
         ),
     )
 
@@ -508,6 +521,9 @@ def run_sync(
             raise ValueError(
                 "drt plan/apply does not support sync.backfill yet (ADR 0021 slices 5-6)."
             )
+        key_safety_error = backfill_key_safety_error(sync)
+        if key_safety_error is not None:
+            raise ValueError(key_safety_error)
         if not is_window_checkpoint_capable(observer):
             raise RuntimeError(
                 "sync.backfill requires one designated checkpoint-capable observer; "
@@ -1425,6 +1441,7 @@ def _run_sync_body(
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
     staged_records: list[dict[str, Any]] = []
+    staged_pre_metadata_records: list[dict[str, Any] | None] = []
     batches_processed = 0
     # 0-based index of each batch handed to ``destination.load()`` — used as
     # the ``batch_index`` attribute on the per-batch ``drt.sync.load`` span.
@@ -1494,8 +1511,12 @@ def _run_sync_body(
     stream_consumed = True
     window_key_digests: set[bytes] = set()
     window_key_row_ordinal = 0
+    window_upsert_key = (
+        getattr(sync.destination, "upsert_key", None) if window_bounds is not None else None
+    )
     try:
         for record_batch in batch(records_iter, sync.sync.batch_size):
+            pre_metadata_records: dict[int, dict[str, Any]] = {}
             # Cooperative shutdown — break before processing this batch.
             # Existing batches are already finalized; partial state save below
             # stays consistent because the loop body never starts on this batch.
@@ -1531,7 +1552,6 @@ def _run_sync_body(
                         sync.name,
                         [
                             _dead_letter_for_record(
-                                sync_name=sync.name,
                                 record=record_batch[error.batch_index],
                                 error_message=error.error_message,
                                 http_status=error.http_status,
@@ -1655,6 +1675,12 @@ def _run_sync_body(
             # destination-facing (chosen directly in metadata_columns
             # config) and values are engine bookkeeping, not source data
             # that a rename or masking rule should ever touch.
+            if window_bounds is not None:
+                # A keyless backfill-capable plugin may need the DLQ fallback
+                # identity. Preserve the destination-shaped row before
+                # engine-owned run metadata is injected; the persisted dead
+                # letter still carries the final payload for retry.
+                pre_metadata_records = {id(record): dict(record) for record in record_batch}
             record_batch = apply_metadata_columns(
                 record_batch,
                 sync.sync.metadata_columns,
@@ -1664,11 +1690,10 @@ def _run_sync_body(
             )
 
             if window_bounds is not None:
-                upsert_key = getattr(sync.destination, "upsert_key", None)
-                if upsert_key:
+                if window_upsert_key:
                     window_key_row_ordinal = validate_window_upsert_keys(
                         record_batch,
-                        upsert_key,
+                        window_upsert_key,
                         destination_type=sync.destination.type,
                         sync_name=sync.name,
                         low=window_bounds[0],
@@ -1766,6 +1791,9 @@ def _run_sync_body(
                     destination.stage(record_batch, sync.destination, sync.sync)
                 staged_count += len(record_batch)
                 staged_records.extend(record_batch)
+                staged_pre_metadata_records.extend(
+                    pre_metadata_records.get(id(record)) for record in record_batch
+                )
             else:
                 assert isinstance(destination, Destination)
                 # Per-batch load span (child of drt.sync.run). Only the
@@ -1855,13 +1883,16 @@ def _run_sync_body(
                 if result.row_errors:
                     dead_letters = [
                         _dead_letter_for_record(
-                            sync_name=sync.name,
                             record=record_batch[err.batch_index],
                             error_message=err.error_message,
                             http_status=err.http_status,
                             timestamp=err.timestamp,
                             sync_run_id=total_result.sync_run_id,
                             window_bounds=window_bounds,
+                            validated_upsert_key=window_upsert_key,
+                            pre_metadata_record=pre_metadata_records.get(
+                                id(record_batch[err.batch_index])
+                            ),
                         )
                         for err in result.row_errors
                         if 0 <= err.batch_index < len(record_batch)
@@ -1948,13 +1979,14 @@ def _run_sync_body(
         if finalize_result.row_errors:
             dead_letters = [
                 _dead_letter_for_record(
-                    sync_name=sync.name,
                     record=staged_records[error.batch_index],
                     error_message=error.error_message,
                     http_status=error.http_status,
                     timestamp=error.timestamp,
                     sync_run_id=total_result.sync_run_id,
                     window_bounds=window_bounds,
+                    validated_upsert_key=window_upsert_key,
+                    pre_metadata_record=staged_pre_metadata_records[error.batch_index],
                 )
                 for error in finalize_result.row_errors
                 if 0 <= error.batch_index < len(staged_records)

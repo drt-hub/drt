@@ -24,6 +24,7 @@ from drt.config.models import (
     BigQueryDestinationConfig,
     DatabricksDestinationConfig,
     DestinationConfig,
+    MetadataColumnsConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
     SnowflakeDestinationConfig,
@@ -278,11 +279,12 @@ def _capable_destination_config(destination_type: str) -> Any:
     return configs[destination_type]
 
 
-def _sync_for_destination(config: Any) -> SyncConfig:
+def _sync_for_destination(config: Any, *, sync_options: dict[str, Any] | None = None) -> SyncConfig:
     payload = _sync(end=3).model_dump(mode="json", by_alias=True, exclude_none=True)
     payload["destination"] = config.model_dump(
         mode="json", by_alias=True, exclude_none=True, exclude_defaults=True
     )
+    payload["sync"].update(sync_options or {})
     return SyncConfig.model_validate(payload)
 
 
@@ -1132,6 +1134,82 @@ def test_engine_temporary_guards_precede_extraction(tmp_path: Path, kwargs: dict
     assert source.windows == []
 
 
+def test_backfill_rejects_run_metadata_upsert_key_before_extraction(
+    tmp_path: Path,
+) -> None:
+    config = _capable_destination_config("postgres").model_copy(
+        update={"upsert_key": ["cursor", "load_id"]}
+    )
+    sync = _sync_for_destination(
+        config,
+        sync_options={"metadata_columns": {"run_id": "load_id"}},
+    )
+    source = WindowSource([{"cursor": 1}])
+    destination = RecordingDestination()
+
+    with pytest.raises(
+        ValueError,
+        match=r"run-varying sync\.metadata_columns.*refusing before extraction",
+    ):
+        run_sync(
+            sync,
+            source,
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(MemoryState()),
+        )
+
+    assert source.windows == []
+    assert destination.calls == []
+
+
+@pytest.mark.parametrize(
+    ("computed_fields", "field_mappings", "upsert_key"),
+    [
+        ({"load_id": "{{ row.cursor }}"}, None, ["cursor", "load_id"]),
+        (
+            {"derived_id": "{{ row.cursor }}"},
+            {"derived_id": "load_id"},
+            ["cursor", "load_id"],
+        ),
+    ],
+    ids=["direct", "destination-facing-rename"],
+)
+def test_backfill_rejects_computed_upsert_key_before_extraction(
+    tmp_path: Path,
+    computed_fields: dict[str, str],
+    field_mappings: dict[str, str] | None,
+    upsert_key: list[str],
+) -> None:
+    config = _capable_destination_config("postgres").model_copy(update={"upsert_key": upsert_key})
+    sync = _sync_for_destination(
+        config,
+        sync_options={
+            "computed_fields": computed_fields,
+            "field_mappings": field_mappings,
+        },
+    )
+    source = WindowSource([{"cursor": 1}])
+    destination = RecordingDestination()
+
+    with pytest.raises(
+        ValueError,
+        match=r"computed_fields destination column.*cannot prove.*refusing before extraction",
+    ):
+        run_sync(
+            sync,
+            source,
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(MemoryState()),
+        )
+
+    assert source.windows == []
+    assert destination.calls == []
+
+
 def test_plan_and_apply_gate_remains_closed() -> None:
     reason = unsupported_reason(_sync())
     assert reason is not None
@@ -1515,6 +1593,113 @@ def test_every_strict_dlq_backend_checks_prospective_ids_inside_append(
     method = type(_strict_dlq_backend(backend, tmp_path))._append_strict
     source = inspect.getsource(method)
     assert "prepare_strict_dlq_append(" in source
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
+def test_metadata_retry_replaces_same_keyed_dead_letter_across_strict_backends(
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RowFailingDestination(RecordingDestination):
+        def load(
+            self,
+            records: list[dict[str, Any]],
+            config: DestinationConfig,
+            sync_options: SyncOptions,
+        ) -> SyncResult:
+            return SyncResult(
+                failed=len(records),
+                row_errors=[RowError(0, "row", None, "rejected")],
+            )
+
+    class FailingCheckpoint(StatePersistingObserver):
+        def checkpoint_window(
+            self,
+            sync_name: str,
+            started_at: str,
+            result: SyncResult,
+            cursor_field: str,
+            high: str | int,
+        ) -> str:
+            raise RuntimeError("checkpoint unavailable")
+
+    config = _capable_destination_config("postgres").model_copy(update={"upsert_key": ["cursor"]})
+    sync = _sync_for_destination(
+        config,
+        sync_options={"metadata_columns": {"run_id": "load_id"}, "on_error": "skip"},
+    )
+    store = _strict_dlq_backend(backend, tmp_path)
+    queue: list[DeadLetter] = []
+
+    def append(
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int:
+        strict_entries = prepare_strict_dlq_append(
+            sync_name,
+            {entry.id for entry in queue},
+            len(queue),
+            entries,
+            max_records=max_records,
+            incoming_ids=incoming_ids,
+        )
+        positions = {entry.id: index for index, entry in enumerate(queue)}
+        for entry in strict_entries:
+            index = positions.get(entry.id)
+            if index is None:
+                positions[entry.id] = len(queue)
+                queue.append(entry)
+            else:
+                queue[index] = entry
+        return len(queue)
+
+    monkeypatch.setattr(store, "_append_strict", append)
+    state = MemoryState()
+    failing_checkpoint = FailingCheckpoint(state, None)
+    first_observer = CompositeObserver(
+        [failing_checkpoint, DlqObserver(store, max_records=1)],
+        checkpoint_observer=failing_checkpoint,
+    )
+
+    with pytest.raises(RuntimeError, match="checkpoint unavailable"):
+        run_sync(
+            sync,
+            WindowSource([{"cursor": 1, "payload": "same"}]),
+            RowFailingDestination(),
+            _profile(),
+            tmp_path,
+            observer=first_observer,
+            run_id="first-run",
+        )
+
+    assert len(queue) == 1
+    first_id = queue[0].id
+    assert queue[0].record["load_id"] == "first-run"
+
+    checkpoint = StatePersistingObserver(state, None)
+    retry_observer = CompositeObserver(
+        [checkpoint, DlqObserver(store, max_records=1)], checkpoint_observer=checkpoint
+    )
+    run_sync(
+        sync,
+        WindowSource([{"cursor": 1, "payload": "same"}]),
+        RowFailingDestination(),
+        _profile(),
+        tmp_path,
+        observer=retry_observer,
+        run_id="retry-run",
+    )
+
+    assert len(queue) == 1
+    assert queue[0].id == first_id
+    assert queue[0].record["load_id"] == "retry-run"
 
 
 @pytest.mark.parametrize(
@@ -1979,6 +2164,7 @@ def test_checkpoint_failure_then_retry_keeps_one_backfill_dead_letter(tmp_path: 
         checkpoint_observer=failing_checkpoint,
     )
     sync = _sync(end=3, on_error="skip")
+    sync.sync.metadata_columns = MetadataColumnsConfig(run_id="load_id")
     source_rows = [{"cursor": 1, "payload": "same"}]
 
     with pytest.raises(RuntimeError, match="checkpoint unavailable"):
@@ -1989,6 +2175,7 @@ def test_checkpoint_failure_then_retry_keeps_one_backfill_dead_letter(tmp_path: 
             _profile(),
             tmp_path,
             observer=first_observer,
+            run_id="first-run",
         )
 
     first = store.read("events")
@@ -2005,11 +2192,13 @@ def test_checkpoint_failure_then_retry_keeps_one_backfill_dead_letter(tmp_path: 
         _profile(),
         tmp_path,
         observer=retry_observer,
+        run_id="retry-run",
     )
 
     retried = store.read("events")
     assert len(retried) == 1
     assert retried[0].id == first[0].id
+    assert retried[0].record["load_id"] == "retry-run"
 
 
 def test_interrupted_backfill_history_and_state_are_partial(tmp_path: Path) -> None:

@@ -84,23 +84,23 @@ class DeadLetter:
 
 
 def backfill_dead_letter_id(
-    sync_name: str,
     low: str | int,
     high: str | int,
-    record: Mapping[str, Any],
+    stable_identity: Mapping[str, Any],
 ) -> str:
     """Return the stable identity of one failed row in one backfill window.
 
     A window may be delivered and DLQ-flushed before its checkpoint write
     fails.  Retrying that uncheckpointed window must update the existing dead
-    letter, not append a second retryable copy of the same row.
+    letter, not append a second retryable copy of the same row. The identity is
+    deliberately separate from the persisted post-transform record: injected
+    run metadata changes on retry and must not create a new queue entry.
     """
     payload = json.dumps(
         {
-            "sync_name": sync_name,
             "low": low,
             "high": high,
-            "record": record,
+            "identity": stable_identity,
         },
         sort_keys=True,
         separators=(",", ":"),

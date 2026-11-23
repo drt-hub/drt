@@ -776,11 +776,11 @@ necessary.
    `read_window_checkpoint()`. An `exclusive` marker still refuses legacy `>`
    execution before extraction.
 6. **Backfill DLQ identity is deterministic and append is idempotent.** A
-   backfill dead letter id hashes the sync name, canonical window bounds, and
-   destination-facing record content. Local, object-store, and warehouse DLQ
-   appends replace/upsert an existing id rather than append a duplicate. A
-   checkpoint failure followed by a window retry therefore leaves one retryable
-   entry. Non-backfill dead letters keep their legacy random UUID identity.
+   backfill dead letter id hashes canonical window bounds and stable row
+   identity. Local, object-store, and warehouse DLQ appends replace/upsert an
+   existing id rather than append a duplicate. A checkpoint failure followed
+   by a window retry therefore leaves one retryable entry. Non-backfill dead
+   letters keep their legacy random UUID identity.
 7. **A committed atomic replacement never reports failure afterward.** Local
    atomic JSON writes still fsync the file, replace it, and attempt the POSIX
    directory fsync. Directory open/fsync/close errors after `os.replace` are
@@ -900,3 +900,28 @@ MySQL remains integer-only. Date/time, UUID, and bytes are also refused because
 their precision, normalization, textual form, or padding is not trivially exact
 across every destination. A violation fails before its batch write and leaves
 the window uncheckpointed.
+
+## Amendment 2026-11-23 (slice 3 round 13)
+
+**Backfill keys cannot contain run-varying or unproved derived columns.** Before
+extraction, the shared engine compares the destination-facing upsert key with
+the targets of `metadata_columns.synced_at`, `metadata_columns.run_id`, and any
+future `metadata_columns.sync_run_id`. An overlap is refused because a retry
+injects a new value and would turn the same logical row into a new destination
+key. Computed-field outputs are also refused as key components: templates can
+read only the source row, but drt cannot statically prove that an arbitrary
+template remains stable across extraction retries. Computed field names are
+resolved through the one-pass `field_mappings` rename before comparison.
+
+**Backfill DLQ IDs use stable identity, not the delivered payload.** For keyed
+rows the hash input is only the canonical window bounds and the validated,
+destination-facing, type-tagged upsert key. A keyless capability uses the
+destination-shaped record captured before engine metadata injection. The DLQ
+continues to persist the final delivered payload, but changing `run_id` or
+`synced_at` on retry now replaces the prior ID across local, object-store, and
+warehouse strict-append implementations instead of consuming capacity.
+
+This changes deterministic IDs produced by earlier commits on this unreleased
+slice only. Mainline accepts backfill configuration but keeps execution
+disabled, so no released queue can contain these IDs and no compatibility shim
+is required.

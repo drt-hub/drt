@@ -378,6 +378,17 @@ def _window_upsert_key_digest(key: tuple[Any, ...]) -> bytes:
     return hashlib.blake2b(encoded, digest_size=16).digest()
 
 
+def canonical_window_upsert_key(record: dict[str, Any], upsert_key: list[str]) -> list[list[Any]]:
+    """Encode one already-validated destination key for durable identity.
+
+    The column name and type tag make composite ordering and the exact
+    integer/string domain explicit. Callers must run
+    :func:`validate_window_upsert_keys` first so missing, null, or unsupported
+    values fail with its operator-facing diagnostics.
+    """
+    return [[column, *_type_tagged_key_value(record[column])] for column in upsert_key]
+
+
 def _type_tagged_key_value(value: Any) -> list[Any]:
     """Encode the engine's exact, deliberately narrow backfill key domain."""
     if type(value) is int:
