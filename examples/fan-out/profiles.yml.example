@@ -1,0 +1,3 @@
+local:
+  type: sqlite
+  database: ":memory:"
