@@ -5,6 +5,7 @@ Rust-migration note: pure logic, no I/O. Easily portable to Rust.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -56,6 +57,45 @@ class DeliveryUnknownError(RuntimeError):
         if isinstance(self.cause, httpx.HTTPStatusError):
             return self.cause.response.status_code
         return None
+
+
+def handle_blind_delivery_unknown(
+    error: Exception,
+    attempt: int,
+    *,
+    retry_creates: bool,
+    max_attempts: int,
+    destination: str,
+    operation: str,
+    logger: logging.Logger,
+) -> RetryDirective:
+    """Apply the shared blind-create escape hatch and recovery message.
+
+    The provider-specific call sites supply only safe labels: neither payloads,
+    endpoint credentials nor idempotency keys are logged.  This is deliberately
+    a decision helper rather than another retry loop, so ``with_retry`` remains
+    the single owner of attempt counts and backoff (ADR 0023).
+    """
+    if retry_creates and attempt < max_attempts:
+        logger.warning(
+            "%s retry_creates=true: retrying delivery-unknown %s "
+            "(attempt %d/%d); duplicate-message or side-effect risk.",
+            destination,
+            operation,
+            attempt,
+            max_attempts,
+        )
+        return RetryDirective.RETRY
+
+    raise DeliveryUnknownError(
+        f"{destination} {operation} delivery is unknown: the request may have "
+        "committed remotely. Assume it may have been delivered; verify the "
+        "destination before manual replay and do not auto-resend. "
+        "destination.retry_creates: true restores blind retries with duplicate "
+        "message or side-effect risk.",
+        cause=error,
+        attempt=attempt,
+    ) from error
 
 
 def classify_failure_safety(

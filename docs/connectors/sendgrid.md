@@ -29,6 +29,7 @@ destination:
 | `to_email_field` | string | `"email"` | Row field containing the recipient address. |
 | `list_ids` | list[str] \| null | null | When set, contacts are added to these SendGrid marketing list IDs (contact-upsert mode) instead of (or in addition to) sending mail. |
 | `auth` | Bearer | bearer | Token auth — set `token_env` to your SendGrid API key. |
+| `retry_creates` | boolean | `false` | Allow a blind Mail Send replay after an ambiguous failure. Can send duplicate email and logs a warning. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 
 ## Authentication
@@ -54,6 +55,23 @@ destination:
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
 
 The limiter is shared per **API key**: the sending quota belongs to the key, not the From address, so two syncs sending as different senders on one key share one bucket even under `drt run --threads 4`. When they request different rates, the lowest wins for both.
+
+## Retry safety
+
+`POST /v3/mail/send` is a **blind side effect**. SendGrid's documented
+[`batch_id`](https://www.twilio.com/docs/sendgrid/for-developers/sending-email/scheduling-parameters)
+groups scheduled sends for pause/cancellation, while
+[`custom_args`](https://www.twilio.com/docs/sendgrid/for-developers/sending-email/unique-arguments)
+are tracking metadata; neither is documented as a replay-dedup key for Mail Send.
+After a dropped response or retryable 5xx, drt returns a delivery-unknown
+`RowError` after one request. Assume the email may have been delivered, inspect
+SendGrid activity before replay, and do not auto-resend.
+
+HTTP 429 and proven pre-send connection failures remain retryable.
+`retry_creates: true` restores the legacy blind second send and logs a
+duplicate-email warning. The warehouse ledger cannot resolve a response lost
+inside this request. See [retry safety](../guides/retry-safety.md). Vendor
+contract rechecked 2026-11-23.
 
 ## Notes
 

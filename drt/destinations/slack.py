@@ -35,6 +35,7 @@ Block Kit example:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -43,9 +44,18 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SlackDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    handle_blind_delivery_unknown,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
+
+logger = logging.getLogger(__name__)
 
 
 class SlackDestination:
@@ -87,8 +97,35 @@ class SlackDestination:
                         response.raise_for_status()
                         return response
 
-                    with_retry(do_post, retry_config)
+                    def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+                        return handle_blind_delivery_unknown(
+                            error,
+                            attempt,
+                            retry_creates=config.retry_creates,
+                            max_attempts=retry_config.max_attempts,
+                            destination="Slack",
+                            operation="incoming-webhook POST",
+                            logger=logger,
+                        )
+
+                    with_retry(
+                        do_post,
+                        retry_config,
+                        operation=OperationSafety.BLIND_CREATE,
+                        on_delivery_unknown=on_delivery_unknown,
+                    )
                     result.success += 1
+                except DeliveryUnknownError as e:
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
+                        http_status=e.http_status,
+                        error_message=str(e),
+                    )
+                    if sync_options.on_error == "fail":
+                        break
                 except httpx.HTTPStatusError as e:
                     record_row_error(
                         result,

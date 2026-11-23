@@ -30,7 +30,14 @@ from drt.config.models import (
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    handle_blind_delivery_unknown,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import RowError, record_row_error
 from drt.templates.renderer import render_template
 
@@ -160,9 +167,37 @@ class RestApiDestination:
                         response.raise_for_status()
                         return response
 
+                    def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+                        return handle_blind_delivery_unknown(
+                            error,
+                            attempt,
+                            retry_creates=config.retry_creates,
+                            max_attempts=retry_config.max_attempts,
+                            destination="REST API",
+                            operation="batch POST",
+                            logger=logger,
+                        )
+
                     try:
-                        with_retry(do_batch_request, retry_config)
+                        with_retry(
+                            do_batch_request,
+                            retry_config,
+                            operation=(
+                                OperationSafety.BLIND_CREATE if config.method == "POST" else None
+                            ),
+                            on_delivery_unknown=on_delivery_unknown,
+                        )
                         result.success += len(sub_chunk)
+                    except DeliveryUnknownError as e:
+                        self._fail_chunk(
+                            result,
+                            sub_chunk,
+                            offset,
+                            http_status=e.http_status,
+                            error_message=str(e),
+                        )
+                        if sync_options.on_error == "fail":
+                            return result
                     except httpx.HTTPStatusError as e:
                         failed_before = result.failed
                         self._handle_batch_http_error(
@@ -216,6 +251,7 @@ class RestApiDestination:
                     body = record
 
                 request_headers = headers
+                has_nonempty_native_key = False
                 if config.native_idempotency_key:
                     # A content-derived key is the point in record mode
                     # (unlike batch mode's random request_id): retrying the
@@ -239,6 +275,7 @@ class RestApiDestination:
                             return result
                         continue
                     request_headers = {**headers, config.native_idempotency_header: idem_value}
+                    has_nonempty_native_key = bool(idem_value.strip())
 
                 def do_request(
                     _body: dict[str, Any] | str = body,
@@ -254,9 +291,43 @@ class RestApiDestination:
                     response.raise_for_status()
                     return response
 
+                def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+                    return handle_blind_delivery_unknown(
+                        error,
+                        attempt,
+                        retry_creates=config.retry_creates,
+                        max_attempts=retry_config.max_attempts,
+                        destination="REST API",
+                        operation="record POST",
+                        logger=logger,
+                    )
+
+                operation = None
+                if config.method == "POST":
+                    operation = (
+                        OperationSafety.KEYED
+                        if has_nonempty_native_key
+                        else OperationSafety.BLIND_CREATE
+                    )
                 try:
-                    with_retry(do_request, retry_config)
+                    with_retry(
+                        do_request,
+                        retry_config,
+                        operation=operation,
+                        on_delivery_unknown=on_delivery_unknown,
+                    )
                     result.success += 1
+                except DeliveryUnknownError as e:
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
+                        http_status=e.http_status,
+                        error_message=str(e),
+                    )
+                    if sync_options.on_error == "fail":
+                        return result
                 except httpx.HTTPStatusError as e:
                     record_row_error(
                         result,
@@ -431,7 +502,11 @@ class RestApiDestination:
                         response.raise_for_status()
                         return response
 
-                    response = with_retry(do_request, resolve_retry(config.retry, sync_options))
+                    response = with_retry(
+                        do_request,
+                        resolve_retry(config.retry, sync_options),
+                        operation=OperationSafety.IDEMPOTENT,
+                    )
 
                     # Extract records from response
                     records_count_before = len(all_records)

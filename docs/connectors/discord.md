@@ -20,6 +20,7 @@ destination:
 | `webhook_url_env` | string \| null | null | Env var holding the webhook URL. One of `webhook_url` / `webhook_url_env` is required. |
 | `message_template` | string | `"{{ row }}"` | Jinja2 template rendered per row. Plain text, or a JSON `embeds` payload (see `embeds`). |
 | `embeds` | bool | `false` | When `true`, `message_template` is treated as a JSON payload with an `embeds` array (rich messages) instead of plain text. |
+| `retry_creates` | boolean | `false` | Allow a blind webhook replay after an ambiguous failure. Can post duplicate messages/embeds and logs a warning. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 
 ## Authentication
@@ -56,6 +57,20 @@ destination:
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
 
 The limiter is shared per **webhook URL**, so several syncs posting to the same webhook concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. Different webhooks never throttle each other. When two syncs share a webhook but request different rates, the lowest wins for both.
+
+## Retry safety
+
+Discord's [Execute Webhook](https://docs.discord.com/developers/resources/webhook#execute-webhook)
+is a **blind message create**. Its documented request parameters expose no
+idempotency key; `wait` asks for server confirmation but does not deduplicate a
+replay. After a dropped response or retryable 5xx, drt returns a
+delivery-unknown `RowError` after one POST. Assume the message or embed may be
+visible; inspect the channel before replay and do not auto-resend.
+
+HTTP 429 and proven pre-send connection failures remain retryable.
+`retry_creates: true` restores the legacy blind second POST and logs a
+duplicate-message warning. See [retry safety](../guides/retry-safety.md). Vendor
+contract rechecked 2026-11-23.
 
 ## Notes
 

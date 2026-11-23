@@ -27,6 +27,7 @@ destination:
 | `from_number` | string | — | Twilio sending number in **E.164** format (`+15551234567`) |
 | `to_template` | string | — | Jinja2 template → recipient number (E.164) |
 | `message_template` | string | — | Jinja2 template → SMS body |
+| `retry_creates` | boolean | `false` | Allow a blind Messages create replay after an ambiguous failure. Can send and bill duplicate SMS and logs a warning. |
 | `retry` | object \| null | null | Per-destination retry override |
 
 One of `account_sid` / `account_sid_env` and one of `auth_token` /
@@ -93,6 +94,22 @@ The limiter is shared per **account** (the account SID), not per sending
 number — the quota follows the account. Several syncs sending under one
 account concurrently (`drt run --threads 4`) pace through one bucket instead
 of one bucket each. When they request different rates, the lowest wins for both.
+
+## Retry safety
+
+The classic [`POST .../Messages.json` contract](https://www.twilio.com/docs/messaging/api/message-resource)
+is a **blind create**: it exposes no documented client-supplied replay key.
+Twilio's similarly named `I-Twilio-Idempotency-Token` is documented for
+[Twilio-to-application webhook retries](https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides),
+not for this outbound Messages create. After a dropped response or retryable
+5xx, drt returns a delivery-unknown `RowError` after one request. Assume the SMS
+may have been sent and billed; inspect Twilio message logs before replay and do
+not auto-resend.
+
+HTTP 429 and proven pre-send connection failures remain retryable.
+`retry_creates: true` restores the legacy blind second send and logs a
+duplicate-SMS warning. See [retry safety](../guides/retry-safety.md). Vendor
+contract rechecked 2026-11-23.
 
 ## References
 

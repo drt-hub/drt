@@ -876,6 +876,7 @@ destination:
   auth:                                      # optional — see Auth Configs
     type: bearer
     token_env: MY_API_TOKEN
+  retry_creates: false                       # default; true restores duplicate-risk blind POST replay
   native_idempotency_key: "{{ sync_name }}:{{ row.id }}" # optional (#897), record mode
   native_idempotency_header: Idempotency-Key # default; change for APIs using another header
 ```
@@ -899,7 +900,13 @@ Rate limiting is charged once per outer request in batch mode (a request now buy
 
 `native_idempotency_key` is rendered once before drt's retry loop and sent in
 `native_idempotency_header`. It protects against an ambiguous HTTP response
-only when the receiving API actually deduplicates that header. Several other
+only when the receiving API actually deduplicates that header and the rendered
+record-mode value is non-empty. Batch POST remains blind: its generated
+`request_id` is local to one chunk/run and proves no receiver behavior. Unkeyed
+record POST and every batch POST stop after an ambiguous transport failure or
+retryable 5xx with a delivery-unknown RowError. HTTP 429 and proven pre-send
+connection failures remain retryable. `retry_creates: true` restores blind POST
+replay with a warning. Several other
 fire-and-forget destination configs accept the field only so `drt validate`
 can warn that their APIs offer no mechanism to wire it to; do not treat a
 warning-only field as retry protection.
@@ -913,6 +920,7 @@ destination:
   webhook_url_env: SLACK_WEBHOOK_URL           # env var name
   message_template: "New user: {{ row.name }} ({{ row.email }})"  # Jinja2, default: "{{ row }}"
   block_kit: false                             # true = message_template is Block Kit JSON
+  retry_creates: false                         # default; true can duplicate messages
 ```
 
 Block Kit example:
@@ -929,6 +937,11 @@ Block Kit example:
     }
 ```
 
+Slack Incoming Webhook POST is blind: no documented replay key or returned
+message timestamp. Ambiguous failures become delivery-unknown RowErrors after
+one POST; inspect Slack before replay. 429 and proven pre-send connection errors
+still retry. `retry_creates: true` restores the legacy replay with a warning.
+
 ### `type: discord`
 
 ```yaml
@@ -938,6 +951,7 @@ destination:
   webhook_url_env: DISCORD_WEBHOOK_URL                 # env var name
   message_template: "New user: {{ row.name }} ({{ row.email }})"  # Jinja2, default: "{{ row }}"
   embeds: false                                        # true = message_template is embeds JSON
+  retry_creates: false                                 # default; true can duplicate messages
 ```
 
 Embeds example:
@@ -954,6 +968,12 @@ Embeds example:
       ]
     }
 ```
+
+Discord Execute Webhook POST is blind: the documented parameters expose no
+idempotency key (`wait` confirms; it does not deduplicate). Ambiguous failures
+become delivery-unknown RowErrors after one POST; inspect Discord before replay.
+429 and proven pre-send connection errors still retry. `retry_creates: true`
+restores the legacy replay with a warning.
 
 ### `type: github_actions`
 
@@ -1266,7 +1286,14 @@ destination:
   webhook_url_env: TEAMS_WEBHOOK_URL   # env var for Incoming Webhook URL
   message_template: "New alert: {{ row.message }}"  # Jinja2 plain text
   adaptive_card: false                 # true = message_template is Adaptive Card JSON
+  retry_creates: false                 # default; true can duplicate messages/workflow triggers
 ```
+
+Teams Incoming Webhook / Workflows POST is blind: Microsoft documents no client
+dedup key. Ambiguous failures become delivery-unknown RowErrors after one POST;
+inspect Teams and the workflow run history before replay. 429 and proven
+pre-send connection errors still retry. `retry_creates: true` restores the
+legacy replay with a warning.
 
 ### `type: parquet`
 
@@ -1312,7 +1339,34 @@ destination:
   to_field: email                      # row field for recipient email
   subject_template: "Alert: {{ row.title }}"  # Jinja2 template
   body_template: "{{ row.message }}"   # Jinja2 template for email body
+  retry_creates: false                 # default; true can send duplicate email
 ```
+
+SendGrid Mail Send is blind. `batch_id` controls scheduled-send grouping and
+`custom_args` are event metadata; neither is documented as a replay-dedup key.
+Ambiguous failures become delivery-unknown RowErrors after one POST; inspect
+SendGrid activity before replay. 429 and proven pre-send connection errors still
+retry. `retry_creates: true` restores the legacy replay with a warning.
+
+### `type: twilio`
+
+```yaml
+destination:
+  type: twilio
+  account_sid_env: TWILIO_ACCOUNT_SID
+  auth_token_env: TWILIO_AUTH_TOKEN
+  from_number: "+15551234567"
+  to_template: "{{ row.phone }}"
+  message_template: "Your order {{ row.order_id }} shipped."
+  retry_creates: false                 # default; true can send/bill duplicate SMS
+```
+
+Twilio's classic Messages create endpoint is blind: its request contract has no
+documented client replay key. `I-Twilio-Idempotency-Token` applies to Twilio's
+outbound webhook retries, not this API request. Ambiguous failures become
+delivery-unknown RowErrors after one POST; inspect Twilio message logs before
+replay. 429 and proven pre-send connection errors still retry.
+`retry_creates: true` restores the legacy replay with a warning.
 
 ### `type: staged_upload`
 

@@ -128,6 +128,10 @@ def test_retry_logic_triggered(base_config):
             success_response,
         ],
     ):
-        result = TwilioDestination().load(records, base_config, SyncOptions())
+        result = TwilioDestination().load(
+            records,
+            base_config.model_copy(update={"retry_creates": True}),
+            SyncOptions(),
+        )
 
     assert result.success == 1

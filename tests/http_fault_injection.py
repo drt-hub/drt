@@ -21,6 +21,14 @@ ReplayMode = Literal["blind-default", "keyed"]
 ResponseFactory = Callable[[httpx.Request, int], httpx.Response]
 FallbackHandler = Callable[[httpx.Request, "BlindCreateFaultHarness"], httpx.Response]
 DedupKey = Callable[[dict[str, Any]], object]
+RequestDecoder = Callable[[httpx.Request], dict[str, Any]]
+
+
+def _decode_json_object(request: httpx.Request) -> dict[str, Any]:
+    decoded = json.loads(request.content)
+    if not isinstance(decoded, dict):
+        raise AssertionError("create payload must be a JSON object")
+    return decoded
 
 
 class BlindCreateFaultHarness:
@@ -35,6 +43,7 @@ class BlindCreateFaultHarness:
         create_response: ResponseFactory,
         replay_mode: ReplayMode = "blind-default",
         dedup_key: DedupKey | None = None,
+        decode_request: RequestDecoder = _decode_json_object,
     ) -> None:
         self.create_path = create_path
         self.mode = mode
@@ -42,6 +51,7 @@ class BlindCreateFaultHarness:
         self.fallback = fallback
         self.create_response = create_response
         self.dedup_key = dedup_key
+        self.decode_request = decode_request
         self.remote_objects: list[dict[str, Any]] = []
         self.requests: list[httpx.Request] = []
         self.create_attempts = 0
@@ -53,9 +63,7 @@ class BlindCreateFaultHarness:
             return self.fallback(request, self)
 
         self.create_attempts += 1
-        decoded = json.loads(request.content)
-        if not isinstance(decoded, dict):
-            raise AssertionError("create payload must be a JSON object")
+        decoded = self.decode_request(request)
         existing = None
         if self.replay_mode == "keyed":
             if self.dedup_key is None:

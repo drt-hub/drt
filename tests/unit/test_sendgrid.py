@@ -137,7 +137,7 @@ class TestSendGridDestination:
         dest = SendGridDestination()
         result = dest.load(
             [{"first_name": "Alice", "email": "alice@example.com"}],
-            _config(),
+            _config(retry_creates=True),
             _sync_options(),
         )
 

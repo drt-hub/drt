@@ -80,6 +80,8 @@ class RestApiDestinationConfig(DescribableConfig):
     error_path: str | None = None
     auth: AuthConfig | None = None
     pagination: PaginationConfig | None = None
+    # Blind POST replay is an explicit duplicate-risk opt-in (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # Retry-safety for fire-and-forget destinations (#897): a Jinja template
@@ -155,6 +157,8 @@ class SlackDestinationConfig(DescribableConfig):
     message_template: str = "{{ row }}"
     # If True, treat message_template as a Block Kit JSON payload
     block_kit: bool = False
+    # Incoming-webhook messages have no documented replay key (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: Slack Incoming Webhooks have no native
@@ -191,6 +195,8 @@ class TwilioDestinationConfig(DescribableConfig):
 
     # Jinja2 template → SMS body
     message_template: str
+    # Classic Messages API creates have no documented replay key (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: Twilio's `I-Twilio-Idempotency-Token` is
@@ -235,6 +241,8 @@ class DiscordDestinationConfig(DescribableConfig):
     message_template: str = "{{ row }}"
     # If True, treat message_template as a JSON payload with embeds
     embeds: bool = False
+    # Webhook message creates have no documented replay key (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: no documented native idempotency mechanism
@@ -692,6 +700,8 @@ class SendGridDestinationConfig(BaseModel):
     to_email_field: str = "email"
     list_ids: list[str] | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    # Mail Send has no documented replay key; batch_id is not dedup (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: SendGrid v3 `mail/send` has no
@@ -753,6 +763,8 @@ class TeamsDestinationConfig(DescribableConfig):
     message_template: str = "{{ row }}"
     # If True, treat message_template as an Adaptive Card JSON payload
     adaptive_card: bool = False
+    # Incoming-webhook messages have no documented replay key (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: Microsoft's own community threads describe
