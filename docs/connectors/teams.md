@@ -21,6 +21,7 @@ destination:
 | `webhook_url_env` | string \| null | null | Env var containing the webhook URL |
 | `message_template` | string | `"{{ row }}"` | Jinja2 template for the message body |
 | `adaptive_card` | bool | `false` | If true, treat `message_template` as an Adaptive Card JSON payload |
+| `retry_creates` | boolean | `false` | Allow a blind webhook replay after an ambiguous failure. Can post/trigger duplicates and logs a warning. |
 | `retry` | object \| null | null | Per-destination retry override (see `sync.retry`) |
 
 ## Authentication
@@ -75,6 +76,19 @@ destination:
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
 
 The limiter is shared per **webhook URL** — and since a Teams webhook is channel-scoped, that means per channel. Several syncs posting to one channel concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. When two syncs share a webhook but request different rates, the lowest wins for both.
+
+## Retry safety
+
+The Microsoft [Incoming Webhook / Workflows contract](https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook)
+is a **blind trigger**: it documents no client-supplied idempotency or dedup key.
+After a dropped response or retryable 5xx, drt returns a delivery-unknown
+`RowError` after one POST. Assume the message/card may be visible or the workflow
+may have run; inspect Teams before replay and do not auto-resend.
+
+HTTP 429 and proven pre-send connection failures remain retryable.
+`retry_creates: true` restores the legacy blind second POST and logs a
+duplicate-message/trigger warning. See [retry safety](../guides/retry-safety.md).
+Vendor contract rechecked 2026-11-23.
 
 ## Notes
 

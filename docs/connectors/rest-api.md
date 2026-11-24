@@ -36,6 +36,10 @@ destination:
 | `max_records_per_request` | int \| null | null | Batch-mode request cap; `null` sends the engine-provided chunk in one request |
 | `error_path` | string \| null | null | Dotted path to an index-aligned per-record error list in a non-2xx JSON response |
 | `auth` | AuthConfig \| null | null | Authentication config (see below) |
+| `retry_creates` | boolean | `false` | Allow ambiguous blind POSTs to retry. This restores legacy behavior with duplicate-side-effect risk. |
+| `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
+| `native_idempotency_key` | string \| null | null | Header-value template. Record mode is retry-keyed only when this renders non-empty and the target API honors the header; batch mode remains blind. |
+| `native_idempotency_header` | string | `"Idempotency-Key"` | Header carrying `native_idempotency_key`. |
 
 ## Batch request bodies
 
@@ -176,10 +180,30 @@ body_template: |
 
 Anything else still raises `TypeError`, matching `json.dumps`. The default `tojson` filter is unchanged.
 
+## Retry safety
+
+An unkeyed record-mode `POST` and every batch-mode `POST` are **blind writes**.
+After a response-read failure or retryable 5xx, drt records delivery-unknown for
+the affected row or whole batch chunk and does not send a second POST. Assume the
+target may have committed the request; inspect it before manual replay.
+
+Record mode becomes **keyed** only when `native_idempotency_key` renders a
+non-empty stable value and the operator has verified that the target honors
+`native_idempotency_header`. The generic connector cannot verify that contract.
+Batch mode's generated `request_id` is stable only inside one immediate attempt
+loop, changes across chunks and runs, and proves no target behavior, so it remains
+blind per [ADR 0023](../adr/0023-non-idempotent-create-retries.md).
+
+HTTP 429 and proven pre-send connection failures still retry normally.
+`retry_creates: true` restores blind retries after ambiguous POST failures and
+logs a duplicate-side-effect warning. `GET` pagination is classified as a safe
+read. Other configured methods retain their existing retry behavior. See the
+[retry-safety guide](../guides/retry-safety.md) for recovery and ledger limits.
+
 ## Notes
 
 - In record mode, without `body_template`, each record is sent as-is as a JSON object
-- Rate limiting and retry are configured in the `sync` section, not the destination
+- Rate limiting and retry can be configured at the destination or sync level; destination values win
 - The generic REST API destination covers any HTTP endpoint — use specific destinations (Slack, HubSpot, etc.) when available for better defaults
 
 ---

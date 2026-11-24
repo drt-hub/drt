@@ -20,6 +20,8 @@ destination:
 | `webhook_url_env` | string \| null | null | Env var containing webhook URL |
 | `message_template` | string | `"{{ row }}"` | Jinja2 template for message content |
 | `block_kit` | bool | `false` | If true, treat template as Block Kit JSON |
+| `retry_creates` | boolean | `false` | Allow a blind webhook replay after an ambiguous failure. Can post duplicate messages and logs a warning. |
+| `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 
 ## Authentication
 
@@ -71,6 +73,20 @@ destination:
 The limiter is shared per **webhook URL**, so several syncs posting to the same webhook concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. When two syncs share a webhook but request different rates, the lowest wins for both.
 
 Webhooks are told apart by the **name of the env var** holding the URL (`webhook_url_env`) — the URL is itself a credential, so drt never derives the bucket key from its value. Distinct `webhook_url_env` names therefore never throttle each other, but two destinations that inline a literal `webhook_url` look identical to the limiter and **share one bucket** even when they post to different workspaces. The failure mode is a slower sync rather than a Slack 429, and it is another reason to keep the URL in an env var (see Notes below).
+
+## Retry safety
+
+Slack [Incoming Webhooks](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/)
+are **blind message creates**: the contract exposes no client idempotency key and
+does not return the posted message timestamp. After a dropped response or
+retryable 5xx, drt returns a delivery-unknown `RowError` after one POST. Assume
+the message may be visible in the channel; inspect Slack before replay and do
+not auto-resend.
+
+HTTP 429 and proven pre-send connection failures remain retryable.
+`retry_creates: true` restores the legacy blind second POST and logs a
+duplicate-message warning. See [retry safety](../guides/retry-safety.md). Vendor
+contract rechecked 2026-11-23.
 
 ## Notes
 

@@ -1245,6 +1245,11 @@
           "title": "Embeds",
           "type": "boolean"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
@@ -4108,6 +4113,11 @@
           "default": null,
           "title": "Pagination"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
@@ -4608,6 +4618,11 @@
         "auth": {
           "$ref": "#/$defs/BearerAuth"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
@@ -4734,6 +4749,11 @@
         "block_kit": {
           "default": false,
           "title": "Block Kit",
+          "type": "boolean"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
           "type": "boolean"
         },
         "retry": {
@@ -5647,6 +5667,11 @@
           "title": "Adaptive Card",
           "type": "boolean"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
@@ -5754,6 +5779,11 @@
         "message_template": {
           "title": "Message Template",
           "type": "string"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [

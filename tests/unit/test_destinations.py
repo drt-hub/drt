@@ -97,6 +97,7 @@ class TestSlackDestination:
             type="slack",
             webhook_url=httpserver.url_for("/webhook"),
             message_template="hi",
+            retry_creates=True,
             retry=RetryConfig(
                 max_attempts=4,
                 initial_backoff=0.0,
@@ -233,6 +234,7 @@ class TestDiscordDestination:
             type="discord",
             webhook_url=httpserver.url_for("/webhook"),
             message_template="{{ row.msg }}",
+            retry_creates=True,
             retry=RetryConfig(
                 max_attempts=4, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
             ),

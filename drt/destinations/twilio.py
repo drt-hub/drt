@@ -21,6 +21,7 @@ Example sync YAML:
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -34,12 +35,20 @@ from drt.config.models import (
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    handle_blind_delivery_unknown,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
 # E.164 format: + followed by 1–15 digits
 _E164_REGEX = re.compile(r"^\+[1-9]\d{1,14}$")
+logger = logging.getLogger(__name__)
 
 
 def _is_valid_e164(phone: str) -> bool:
@@ -106,7 +115,23 @@ class TwilioDestination:
                         response.raise_for_status()
                         return response
 
-                    response = with_retry(do_post, retry_config)
+                    def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+                        return handle_blind_delivery_unknown(
+                            error,
+                            attempt,
+                            retry_creates=config.retry_creates,
+                            max_attempts=retry_config.max_attempts,
+                            destination="Twilio",
+                            operation="POST Messages.json",
+                            logger=logger,
+                        )
+
+                    response = with_retry(
+                        do_post,
+                        retry_config,
+                        operation=OperationSafety.BLIND_CREATE,
+                        on_delivery_unknown=on_delivery_unknown,
+                    )
 
                     # Twilio returns JSON — check for API-level errors
                     try:
@@ -121,6 +146,17 @@ class TwilioDestination:
 
                     result.success += 1
 
+                except DeliveryUnknownError as e:
+                    record_row_error(
+                        result,
+                        i,
+                        str(record)[:200],
+                        e,
+                        http_status=e.http_status,
+                        error_message=str(e),
+                    )
+                    if sync_options.on_error == "fail":
+                        break
                 except httpx.HTTPStatusError as e:
                     record_row_error(
                         result,

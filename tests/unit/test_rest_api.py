@@ -359,6 +359,7 @@ class TestRestApiDestinationBatchMode:
             url="https://api.example.com/batch",
             body_mode="batch",
             batch_template="{{ rows | tojson_safe }}",
+            retry_creates=True,
         )
         limiter = MagicMock()
 
@@ -725,6 +726,7 @@ class TestRestApiDestinationRetryOverride:
             type="rest_api",
             url="https://api.example.com/x",
             method="POST",
+            retry_creates=True,
             retry=RetryConfig(max_attempts=5, initial_backoff=0.0, backoff_multiplier=1.0),
         )
         options = SyncOptions(
@@ -745,7 +747,11 @@ class TestRestApiDestinationRetryOverride:
 
     def test_sync_retry_used_when_no_destination_override(self) -> None:
         """Without destination.retry, sync.retry is used as before."""
-        config = _dest_config()  # no retry field set
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/webhook",
+            retry_creates=True,
+        )  # no destination.retry field set
         options = _sync_options(max_attempts=3)
 
         with patch("httpx.Client") as mock_client_cls:
@@ -1085,6 +1091,7 @@ class TestRestApiDestinationNativeIdempotencyKey:
             body_mode="batch",
             batch_template="{{ rows | tojson_safe }}",
             native_idempotency_key="{{ request_id }}",
+            retry_creates=True,
         )
         options = _sync_options(max_attempts=2)
 
