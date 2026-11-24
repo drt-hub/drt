@@ -13,6 +13,11 @@ def test_defaults() -> None:
     assert config.api_token_env == "PIPEDRIVE_API_TOKEN"
     assert config.object == "person"
     assert config.match_field == "email"
+    assert config.retry_creates is False
+
+
+def test_retry_creates_is_an_explicit_destination_option() -> None:
+    assert PipedriveDestinationConfig(type="pipedrive", retry_creates=True).retry_creates is True
 
 
 def test_requires_a_token_source() -> None:

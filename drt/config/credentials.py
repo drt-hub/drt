@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, is_dataclass, replace
 from inspect import signature
 from pathlib import Path
@@ -89,6 +91,23 @@ class ObservabilityConfig(BaseModel):
 # local file literally named ``md:x`` as ``./md:x``.
 _DUCKDB_REMOTE_DATABASE = re.compile(r"^(?:md|motherduck):|^[A-Za-z][A-Za-z0-9+.-]*://")
 
+_secrets_project_dir: ContextVar[Path | None] = ContextVar("drt_secrets_project_dir", default=None)
+
+
+@contextmanager
+def secrets_project_dir(project_dir: Path) -> Iterator[None]:
+    """Resolve project-local secrets against *project_dir* for one operation.
+
+    The default outside this scope remains the process working directory.
+    Context-local state keeps concurrent embedded operations isolated, and
+    resetting the token preserves an outer scope when scopes are nested.
+    """
+    token = _secrets_project_dir.set(project_dir.resolve())
+    try:
+        yield
+    finally:
+        _secrets_project_dir.reset(token)
+
 
 def resolve_profile_paths(
     profile: ProfileConfigLike,
@@ -142,7 +161,7 @@ def _load_secrets(project_dir: Path | None = None) -> dict[str, Any]:
     that normal commands can read the encrypted copy before deleting it.
     Returns a nested dict matching the TOML structure.
     """
-    secrets_dir = (project_dir or Path(".")) / ".drt"
+    secrets_dir = (project_dir if project_dir is not None else Path(".")) / ".drt"
     secrets_path = secrets_dir / "secrets.toml"
     encrypted_path = secrets_dir / "secrets.toml.enc"
     if not secrets_path.exists() and not encrypted_path.exists():
@@ -178,7 +197,7 @@ def _lookup_secrets_toml(env_var: str) -> str | None:
 
     Walks all nested dicts searching for a matching key.
     """
-    secrets = _load_secrets()
+    secrets = _load_secrets(_secrets_project_dir.get())
 
     def _search(d: dict[str, Any]) -> str | None:
         for k, v in d.items():
@@ -1038,5 +1057,6 @@ __all__ = [
     "resolve_env_dict",
     "resolve_profile_paths",
     "save_profile",
+    "secrets_project_dir",
     "write_raw_profile",
 ]

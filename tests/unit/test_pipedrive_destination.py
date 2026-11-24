@@ -8,8 +8,10 @@ new person. A local HTTP server stands in for Pipedrive: no network, no real tok
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
+import httpx
 import pytest
 from pytest_httpserver import HTTPServer
 
@@ -21,6 +23,11 @@ from drt.config.models import (
 )
 from drt.destinations.base import MatchPolicyCapable
 from drt.destinations.pipedrive import PipedriveDestination
+from tests.http_fault_injection import (
+    BlindCreateFaultHarness,
+    FaultMode,
+    install_mock_transport,
+)
 
 _RECORD = {"name": "Ada Lovelace", "email": "ada@example.com"}
 _SEARCH = "/api/v2/persons/search"
@@ -61,6 +68,35 @@ def _search_result(*ids: int) -> dict[str, Any]:
 
 def _calls(httpserver: HTTPServer) -> list[tuple[str, str]]:
     return [(request.method, request.path) for request, _response in httpserver.log]
+
+
+def _fault_search_response(
+    request: httpx.Request, harness: BlindCreateFaultHarness
+) -> httpx.Response:
+    if request.method == "GET" and request.url.path == "/api/v2/persons/search":
+        term = request.url.params["term"]
+        ids = [
+            int(person["id"])
+            for person in harness.remote_objects
+            if person.get("emails", [{}])[0].get("value") == term
+        ]
+        return httpx.Response(200, json=_search_result(*ids), request=request)
+    if request.method == "PATCH" and request.url.path.startswith("/api/v2/persons/"):
+        return httpx.Response(200, json={"success": True, "data": {}}, request=request)
+    raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+
+def _fault_harness(mode: FaultMode) -> BlindCreateFaultHarness:
+    return BlindCreateFaultHarness(
+        "/api/v2/persons",
+        mode=mode,
+        fallback=_fault_search_response,
+        create_response=lambda request, object_id: httpx.Response(
+            201,
+            json={"success": True, "data": {"id": object_id}},
+            request=request,
+        ),
+    )
 
 
 def test_pipedrive_declares_match_policy_capability() -> None:
@@ -114,6 +150,204 @@ def test_creates_person_when_search_finds_nothing(
 
     assert (result.success, result.skipped, result.failed) == (1, 0, 0)
     assert _calls(httpserver) == [("GET", _SEARCH), ("POST", _PERSONS)]
+
+
+@pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+@pytest.mark.parametrize("match_policy", ["upsert", "create_only"])
+def test_create_commit_then_failure_reconciles_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch, mode: FaultMode, match_policy: str
+) -> None:
+    harness = _fault_harness(mode)
+    install_mock_transport(monkeypatch, harness)
+    seen = _spy_limiters(monkeypatch)
+
+    result = PipedriveDestination().load(
+        [_RECORD],
+        _config(base_url="https://fault.test/api/v2"),
+        _options(
+            match_policy,
+            retry=RetryConfig(max_attempts=2, initial_backoff=0.0),
+        ),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+    assert result.row_errors == []
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+    expected_requests = [
+        ("GET", "/api/v2/persons/search"),
+        ("POST", "/api/v2/persons"),
+        ("GET", "/api/v2/persons/search"),
+    ]
+    if match_policy == "upsert":
+        expected_requests.append(("PATCH", "/api/v2/persons/1"))
+    assert [(request.method, request.url.path) for request in harness.requests] == expected_requests
+    assert seen["search"].acquired == 2  # initial lookup and reconciliation lookup
+    assert seen["write"].acquired == (2 if match_policy == "upsert" else 1)
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status"),
+    [("commit-then-drop", None), ("commit-then-5xx", 503)],
+)
+def test_create_reconciliation_miss_fails_closed_with_one_remote_person(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: FaultMode,
+    expected_status: int | None,
+) -> None:
+    harness = _fault_harness(mode)
+
+    def search_stays_stale(
+        request: httpx.Request, _harness: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_search_result(), request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = search_stays_stale
+    install_mock_transport(monkeypatch, harness)
+
+    result = PipedriveDestination().load(
+        [_RECORD],
+        _config(base_url="https://fault.test/api/v2"),
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (0, 0, 1)
+    assert result.row_errors[0].http_status == expected_status
+    assert "delivery is unknown" in result.row_errors[0].error_message
+    assert "refused a second POST" in result.row_errors[0].error_message
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+
+
+@pytest.mark.parametrize(
+    ("on_error", "expected_success", "expected_creates"),
+    [("skip", 1, 2), ("fail", 0, 1)],
+)
+def test_delivery_unknown_row_error_honors_on_error_without_skip_credit(
+    monkeypatch: pytest.MonkeyPatch,
+    on_error: str,
+    expected_success: int,
+    expected_creates: int,
+) -> None:
+    harness = _fault_harness("commit-then-drop")
+
+    def search_stays_stale(
+        request: httpx.Request, _harness: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_search_result(), request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = search_stays_stale
+    install_mock_transport(monkeypatch, harness)
+    records = [_RECORD, {"name": "Grace Hopper", "email": "grace@example.com"}]
+
+    result = PipedriveDestination().load(
+        records,
+        _config(base_url="https://fault.test/api/v2"),
+        _options(
+            on_error=on_error,
+            retry=RetryConfig(max_attempts=2, initial_backoff=0.0),
+        ),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (expected_success, 0, 1)
+    assert len(result.row_errors) == 1
+    assert harness.create_attempts == expected_creates
+    assert len(harness.remote_objects) == expected_creates
+
+
+def test_retry_creates_true_restores_blind_replay_with_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = _fault_harness("commit-then-drop")
+
+    def search_stays_stale(
+        request: httpx.Request, _harness: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_search_result(), request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = search_stays_stale
+    install_mock_transport(monkeypatch, harness)
+    caplog.set_level(logging.WARNING, logger="drt.destinations.pipedrive")
+
+    result = PipedriveDestination().load(
+        [_RECORD],
+        _config(base_url="https://fault.test/api/v2", retry_creates=True),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+    assert harness.create_attempts == 2
+    assert len(harness.remote_objects) == 2
+    assert "duplicate person risk" in caplog.text
+
+
+def test_multiple_matches_during_reconciliation_are_a_clear_row_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _fault_harness("commit-then-drop")
+    searches = 0
+
+    def duplicate_after_commit(
+        request: httpx.Request, state: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        nonlocal searches
+        if request.method != "GET":
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+        searches += 1
+        if searches == 1:
+            return httpx.Response(200, json=_search_result(), request=request)
+        state.remote_objects.append({"id": 99, "emails": [{"value": "ada@example.com"}]})
+        return httpx.Response(200, json=_search_result(1, 99), request=request)
+
+    harness.fallback = duplicate_after_commit
+    install_mock_transport(monkeypatch, harness)
+
+    result = PipedriveDestination().load(
+        [_RECORD],
+        _config(base_url="https://fault.test/api/v2"),
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (0, 0, 1)
+    assert "multiple persons" in result.row_errors[0].error_message
+    assert "[1, 99]" in result.row_errors[0].error_message
+    assert harness.create_attempts == 1
+
+
+def test_429_on_create_is_retried_without_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    create_attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal create_attempts
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json=_search_result(), request=request)
+        create_attempts += 1
+        if create_attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+        return httpx.Response(201, json={"success": True, "data": {"id": 1}}, request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    seen = _spy_limiters(monkeypatch)
+    result = PipedriveDestination().load(
+        [_RECORD],
+        _config(base_url="https://fault.test/api/v2"),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert create_attempts == 2
+    assert [request.method for request in requests] == ["GET", "POST", "POST"]
+    assert (seen["search"].acquired, seen["write"].acquired) == (1, 2)
 
 
 def test_updates_person_when_search_finds_a_match(
@@ -182,7 +416,7 @@ def test_repeated_match_value_in_one_batch_is_searched_only_once(
 
 @pytest.mark.parametrize(
     ("on_error", "expected_failed", "expected_calls"),
-    [("skip", 2, 4), ("fail", 1, 2)],
+    [("skip", 2, 6), ("fail", 1, 3)],
 )
 def test_write_failure_becomes_a_row_error(
     httpserver: HTTPServer,
@@ -203,6 +437,52 @@ def test_write_failure_becomes_a_row_error(
     assert (result.success, result.failed) == (0, expected_failed)
     assert all(error.http_status == 500 for error in result.row_errors)
     assert len(httpserver.log) == expected_calls
+
+
+def test_row_error_keeps_only_bounded_documented_pipedrive_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_search_result(), request=request)
+        return httpx.Response(
+            400,
+            json={
+                "success": False,
+                "error": "Invalid person",
+                "error_info": "See docs",
+                "code": "x" * 600,
+                "rejected_value": "ada.private@example.com",
+            },
+            request=request,
+        )
+
+    install_mock_transport(monkeypatch, handler)
+
+    result = PipedriveDestination().load(
+        [_RECORD], _config(base_url="https://fault.test/api/v2"), _options()
+    )
+
+    message = result.row_errors[0].error_message
+    assert message.startswith("error: Invalid person; error_info: See docs; code: ")
+    assert len(message) == 500
+    assert "ada.private@example.com" not in message
+    assert "rejected_value" not in message
+
+
+def test_non_json_error_body_is_not_copied_to_the_row_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="proxy rejected ada.private@example.com", request=request)
+
+    install_mock_transport(monkeypatch, handler)
+
+    result = PipedriveDestination().load(
+        [_RECORD], _config(base_url="https://fault.test/api/v2"), _options()
+    )
+
+    assert result.row_errors[0].error_message == "Pipedrive API request failed (HTTP 400)."
 
 
 def _body(httpserver: HTTPServer, index: int) -> dict[str, Any]:
@@ -576,46 +856,56 @@ def _spy_limiters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return seen
 
 
-def test_searches_have_their_own_bucket_below_the_search_ceiling(
-    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+def test_searches_and_writes_have_separate_documented_ceiling_buckets(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _use_server(httpserver, monkeypatch)
     seen = _spy_limiters(monkeypatch)
-    httpserver.expect_request(_SEARCH).respond_with_json(_search_result())
-    httpserver.expect_request(_PERSONS, method="POST").respond_with_json({"data": {"id": 9}})
 
-    result = PipedriveDestination().load([_RECORD], _config(), _options())
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _search_result() if request.method == "GET" else {"data": {"id": 9}}
+        return httpx.Response(200, json=body, request=request)
+
+    install_mock_transport(monkeypatch, handler)
+
+    result = PipedriveDestination().load(
+        [_RECORD], _config(base_url="https://fault.test/api/v2"), _options()
+    )
 
     assert result.success == 1
     search_kwargs = [k for k in seen["calls"] if k.get("key_override")]
+    write_kwargs = [k for k in seen["calls"] if not k.get("key_override")]
     assert len(search_kwargs) == 1
+    assert len(write_kwargs) == 1
     assert search_kwargs[0]["max_requests_per_second"] <= 5  # 10 requests / 2 s
+    assert write_kwargs[0]["max_requests_per_second"] <= 10  # Lite: 20 requests / 2 s
     assert search_kwargs[0]["key_override"].endswith(":search")
     assert (seen["search"].acquired, seen["write"].acquired) == (1, 1)
 
 
 def test_every_retry_attempt_spends_a_limiter_slot(
-    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _use_server(httpserver, monkeypatch)
     seen = _spy_limiters(monkeypatch)
-    from werkzeug.wrappers import Response
-
     attempts = {"n": 0}
 
-    def search(_request: Any) -> Response:
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            return Response("busy", status=503)
-        return Response(json.dumps(_search_result(7)), mimetype="application/json")
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return httpx.Response(503, text="busy", request=request)
+            return httpx.Response(200, json=_search_result(7), request=request)
+        return httpx.Response(200, json={"data": {}}, request=request)
 
-    httpserver.expect_request(_SEARCH).respond_with_handler(search)
-    httpserver.expect_request(f"{_PERSONS}/7", method="PATCH").respond_with_json({"data": {}})
+    install_mock_transport(monkeypatch, handler)
     options = _options(
         retry=RetryConfig(max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0)
     )
 
-    result = PipedriveDestination().load([{**_RECORD, "name": "Ada"}], _config(), options)
+    result = PipedriveDestination().load(
+        [{**_RECORD, "name": "Ada"}],
+        _config(base_url="https://fault.test/api/v2"),
+        options,
+    )
 
     assert result.success == 1
     assert attempts["n"] == 2

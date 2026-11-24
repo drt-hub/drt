@@ -26,6 +26,8 @@ batch, updates the person found or created earlier instead of creating a duplica
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -39,18 +41,35 @@ from drt.config.models import (
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiterBackend, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_preview, record_row_error
 
 _PIPEDRIVE_API = "https://api.pipedrive.com/api/v2"
-# Pipedrive's search endpoints have their own, tighter limit than the rest of the API
-# (reported as 10 requests per 2 seconds; taken from third-party documentation, not yet
-# confirmed against a live account, #1306). Searches get their own bucket below that
-# ceiling, so a run of misses (`update_only`) or hits (`create_only`) cannot exceed it.
+# Official Pipedrive docs, read 2026-11-22:
+# https://pipedrive.readme.io/docs/core-api-concepts-rate-limiting
+# https://developers.pipedrive.com/changelog/post/announcing-search-api-rate-limit
+# Search has a separate 10 requests / rolling 2 seconds limit; API-token traffic starts
+# at 20 / 2 seconds on Lite. Keep separate buckets, pace search conservatively below its
+# 5/s average, and cap writes at the lowest plan's 10/s average (#1306).
 _SEARCH_REQUESTS_PER_SECOND = 4.0
+_WRITE_REQUESTS_PER_SECOND = 10.0
+_ERROR_MESSAGE_MAX_LENGTH = 500
 
 _PASSTHROUGH_KEYS = frozenset({"name", "owner_id", "org_id", "visible_to", "label_ids"})
 _CONTACT_KEYS = {"email": "emails", "emails": "emails", "phone": "phones", "phones": "phones"}
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _CreateOutcome:
+    person_id: int | None
+    reconciled: bool
 
 
 def _match_value(raw: Any) -> str:
@@ -116,6 +135,22 @@ def _build_payload(
     return payload
 
 
+def _pipedrive_error_message(response: httpx.Response) -> str:
+    """Return only Pipedrive's documented error fields, never the raw response body."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    parts = []
+    if isinstance(body, dict):
+        for field in ("error", "error_info", "code"):
+            value = body.get(field)
+            if isinstance(value, str) and value:
+                parts.append(f"{field}: {value}")
+    message = "; ".join(parts) or f"Pipedrive API request failed (HTTP {response.status_code})."
+    return message[:_ERROR_MESSAGE_MAX_LENGTH]
+
+
 class _PipedriveApi:
     """Thin HTTP wrapper: token header, rate limiting and retries in one place."""
 
@@ -175,12 +210,64 @@ class _PipedriveApi:
             ids.append(int(item["id"]))
         return ids
 
-    def create(self, payload: dict[str, Any]) -> int | None:
-        """POST a new person; returns its id when the response carries one."""
-        body = self._request("POST", "/persons", json=payload).json()
-        data = body.get("data") if isinstance(body, dict) else None
-        person_id = data.get("id") if isinstance(data, dict) else None
-        return int(person_id) if person_id is not None else None
+    def create(
+        self,
+        payload: dict[str, Any],
+        *,
+        match_term: str,
+        match_field: str,
+        retry_creates: bool,
+    ) -> _CreateOutcome:
+        """Create once, reconciling an ambiguous response before any replay."""
+
+        def send() -> _CreateOutcome:
+            self._limiter.acquire()
+            response = self._client.request(
+                "POST", f"{self._base_url}/persons", headers=self._headers, json=payload
+            )
+            response.raise_for_status()
+            body = response.json()
+            data = body.get("data") if isinstance(body, dict) else None
+            person_id = data.get("id") if isinstance(data, dict) else None
+            return _CreateOutcome(
+                person_id=int(person_id) if person_id is not None else None,
+                reconciled=False,
+            )
+
+        def reconcile(error: Exception, attempt: int) -> _CreateOutcome | RetryDirective:
+            matches = self.search(match_term, match_field)
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Pipedrive: create delivery is unknown and reconciliation found "
+                    f"multiple persons for {match_field}; matching person ids: {matches}. "
+                    "Refusing to guess or create another person."
+                ) from error
+            if matches:
+                return _CreateOutcome(person_id=matches[0], reconciled=True)
+            if retry_creates and attempt < self._retry.max_attempts:
+                logger.warning(
+                    "Pipedrive retry_creates=true: retrying delivery-unknown POST /persons "
+                    "after reconciliation found no match (attempt %d/%d); duplicate person risk.",
+                    attempt,
+                    self._retry.max_attempts,
+                )
+                return RetryDirective.RETRY
+            raise DeliveryUnknownError(
+                "Pipedrive create delivery is unknown: the request may have committed, but "
+                f"an exact reconciliation search by {match_field} found no person. Search "
+                "indexes may lag, so drt refused a second POST. Verify Pipedrive before "
+                "manual replay; destination.retry_creates: true restores blind retries "
+                "with duplicate risk.",
+                cause=error,
+                attempt=attempt,
+            ) from error
+
+        return with_retry(
+            send,
+            self._retry,
+            operation=OperationSafety.RECONCILIABLE_CREATE,
+            on_delivery_unknown=reconcile,
+        )
 
     def update(self, person_id: int, payload: dict[str, Any]) -> None:
         self._request("PATCH", f"/persons/{person_id}", json=payload)
@@ -222,7 +309,11 @@ class PipedriveDestination:
                 client,
                 base_url,
                 {"x-api-token": token, "Accept": "application/json"},
-                resolve_rate_limiter(config, sync_options),
+                resolve_rate_limiter(
+                    config,
+                    sync_options,
+                    max_requests_per_second=_WRITE_REQUESTS_PER_SECOND,
+                ),
                 resolve_retry(config.retry, sync_options),
                 search_limiter=resolve_rate_limiter(
                     config,
@@ -236,6 +327,17 @@ class PipedriveDestination:
                     self._load_one(
                         api, config, sync_options.match_policy, record, known_ids, result
                     )
+                except DeliveryUnknownError as exc:
+                    record_row_error(
+                        result,
+                        index,
+                        record_preview(record),
+                        exc,
+                        http_status=exc.http_status,
+                        error_message=str(exc),
+                    )
+                    if sync_options.on_error == "fail":
+                        break
                 except httpx.HTTPStatusError as exc:
                     record_row_error(
                         result,
@@ -243,7 +345,7 @@ class PipedriveDestination:
                         record_preview(record),
                         exc,
                         http_status=exc.response.status_code,
-                        error_message=exc.response.text[:500],
+                        error_message=_pipedrive_error_message(exc.response),
                     )
                     if sync_options.on_error == "fail":
                         break
@@ -288,7 +390,7 @@ class PipedriveDestination:
             if len(matches) > 1:
                 raise ValueError(
                     f"Pipedrive: more than one person matches {config.match_field} {term!r}; "
-                    "refusing to guess which one to update."
+                    f"matching person ids: {matches}. Refusing to guess which one to update."
                 )
             if matches:
                 person_id = matches[0]
@@ -300,7 +402,22 @@ class PipedriveDestination:
                 result.skipped_no_match += 1
                 return
             create_record = {**record, config.match_field: term}
-            known_ids[cache_key] = api.create(_build_payload(create_record, creating=True))
+            create_outcome = api.create(
+                _build_payload(create_record, creating=True),
+                match_term=term,
+                match_field=config.match_field,
+                retry_creates=config.retry_creates,
+            )
+            # Cache only after the create response or a reconciliation search returned.
+            known_ids[cache_key] = create_outcome.person_id
+            if (
+                create_outcome.reconciled
+                and create_outcome.person_id is not None
+                and policy != "create_only"
+            ):
+                payload = _build_payload(record, creating=False, skip_field=config.match_field)
+                if payload:
+                    api.update(create_outcome.person_id, payload)
         else:
             if policy == "create_only":
                 result.skipped += 1

@@ -711,6 +711,7 @@ def serve(
     from pathlib import Path
 
     from drt.config.base import ProjectConfig
+    from drt.config.credentials import secrets_project_dir
     from drt.config.parser import load_project
     from drt.state.factory import build_state_bundle
 
@@ -727,20 +728,21 @@ def serve(
         oidc_email=oidc_email,
     )
 
-    project_path = Path(project_dir)
-    project = (
-        load_project(project_path)
-        if (project_path / "drt_project.yml").exists()
-        else ProjectConfig(name="drt")
-    )
-    state_manager = build_state_bundle(project, project_path).state
+    project_path = Path(project_dir).resolve()
+    with secrets_project_dir(project_path):
+        project = (
+            load_project(project_path)
+            if (project_path / "drt_project.yml").exists()
+            else ProjectConfig(name="drt")
+        )
+        state_manager = build_state_bundle(project, project_path).state
 
     def runner(sync_name: str, dry_run: bool) -> dict[str, Any]:
         from drt.integrations._runner import run_drt_sync
 
         return run_drt_sync(
             sync_name=sync_name,
-            project_dir=project_dir,
+            project_dir=str(project_path),
             dry_run=dry_run,
             state_manager=state_manager,
         )
@@ -748,7 +750,7 @@ def serve(
     def sync_exists(name: str) -> bool:
         from drt.config.parser import load_syncs
 
-        return any(s.name == name for s in load_syncs(Path(project_dir)))
+        return any(s.name == name for s in load_syncs(project_path))
 
     scheduler = SyncScheduler(runner)
     handler = make_handler(auth, scheduler, sync_exists)

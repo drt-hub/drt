@@ -297,13 +297,16 @@ class GoogleSheetsDestinationConfig(DescribableConfig):
 class HubSpotDestinationConfig(DescribableConfig):
     _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["hubspot"]
-    object_type: Literal["contacts", "deals", "companies"] = "contacts"
+    # Standard names or a custom object's fully qualified name / object type ID.
+    object_type: str = "contacts"
     # Property used as upsert key (contacts → email, deals → dealname, etc.)
     id_property: str = "email"
     # Jinja2 template → JSON object of HubSpot properties
     # Example: '{"email": "{{ row.email }}", "firstname": "{{ row.name }}"}'
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    # Blind replay after create reconciliation misses is an explicit duplicate-risk opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
@@ -334,6 +337,8 @@ class PipedriveDestinationConfig(DescribableConfig):
     base_url: str | None = None
     object: Literal["person"] = "person"  # organization / deal come in follow-up PRs
     match_field: Literal["email", "name", "phone"] = "email"
+    # Blind replay after create reconciliation misses is an explicit duplicate-risk opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
@@ -512,6 +517,9 @@ class KlaviyoDestinationConfig(BaseModel):
     # for events that already happened. The event still counts toward
     # metrics/segmentation -- only flow triggering is suppressed.
     backfill: bool = False
+    # Blind replay after a profile-create or list-membership reconciliation miss is an
+    # explicit duplicate-risk opt-in. Native profile-import upserts do not need this.
+    retry_creates: bool = False
     retry: RetryConfig | None = None
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
@@ -659,6 +667,8 @@ class IntercomDestinationConfig(DescribableConfig):
     # Jinja2 JSON template for contact payload
     properties_template: str
 
+    # Blind replay after create reconciliation misses is an explicit duplicate-risk opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 

@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from drt.cli.main import app
 from drt.config import encryption
-from drt.config.credentials import _load_secrets
+from drt.config.credentials import _load_secrets, resolve_env, secrets_project_dir
 from drt.config.encryption import (
     SECRETS_KEY_ENV_VAR,
     InvalidSecretsKeyError,
@@ -264,6 +264,22 @@ def test_encrypted_file_takes_precedence_over_plaintext(
     plaintext.write_text('[destinations]\nTOKEN = "stale-plaintext"\n')
 
     assert _load_secrets(tmp_path)["destinations"]["TOKEN"] == "encrypted-value"
+
+
+def test_encrypted_secrets_resolve_from_scoped_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_key: str
+) -> None:
+    project = tmp_path / "project"
+    secrets_dir = project / ".drt"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "secrets.toml.enc").write_bytes(
+        encrypt_secrets(b'[destinations]\nSCOPED_TOKEN = "encrypted-value"\n', age_key)
+    )
+    monkeypatch.setenv(SECRETS_KEY_ENV_VAR, age_key)
+    monkeypatch.delenv("SCOPED_TOKEN", raising=False)
+
+    with secrets_project_dir(project):
+        assert resolve_env(None, "SCOPED_TOKEN") == "encrypted-value"
 
 
 def test_encrypted_file_without_key_fails_clearly(

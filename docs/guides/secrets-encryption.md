@@ -56,6 +56,15 @@ temporary plaintext file. Commands such as `drt run`, `drt build`, `drt test`,
 and `drt serve` inherit this behavior through the same `resolve_env()`
 credential path.
 
+When an operation names a project directory explicitly, drt reads local
+secrets only from that project's `.drt/secrets.toml` or
+`.drt/secrets.toml.enc`. This includes every MCP tool registered by a server
+created for that project, `drt serve`, and the built-in Airflow/Prefect runner.
+If the scoped project has no secrets file, drt treats the key as missing; it
+does not fall back to the process working directory and risk using another
+project's credentials. Unscoped CLI and library calls retain the historical
+working-directory behavior.
+
 If the encrypted file exists but `DRT_SECRETS_KEY` is absent, invalid, or does
 not match, drt stops with an actionable error. It never silently falls back to
 the adjacent plaintext file; doing so would make a stale plaintext copy mask a

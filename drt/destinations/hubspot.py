@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -53,7 +54,13 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, HubSpotDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiterBackend, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
@@ -61,6 +68,13 @@ _HUBSPOT_API = "https://api.hubapi.com/crm/v3/objects"
 _HUBSPOT_PROPERTIES_API = "https://api.hubapi.com/crm/v3/properties"
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _CreateOutcome:
+    skipped: bool = False
+    update_url: str | None = None
+    reconciled: bool = False
 
 
 def _is_empty(value: Any) -> bool:
@@ -78,6 +92,196 @@ class HubSpotDestination:
         # later engine batches do not repeatedly call or warn for the same
         # object type and resolved token. The token itself is never retained.
         self._property_names: dict[tuple[str, str], frozenset[str] | None] = {}
+
+    @staticmethod
+    def _patch_object(
+        client: httpx.Client,
+        url: str,
+        headers: dict[str, str],
+        properties: dict[str, Any],
+        retry_config: RetryConfig,
+        *,
+        missing_is_skip: bool = False,
+    ) -> bool:
+        """Retry an update addressed to one fixed HubSpot object."""
+
+        def update() -> bool:
+            response = client.patch(url, json={"properties": properties}, headers=headers)
+            if missing_is_skip and response.status_code == 404:
+                return False
+            response.raise_for_status()
+            return True
+
+        return with_retry(update, retry_config, operation=OperationSafety.IDEMPOTENT)
+
+    @staticmethod
+    def _search_object_ids(
+        client: httpx.Client,
+        search_url: str,
+        headers: dict[str, str],
+        id_property: str,
+        id_value: Any,
+        rate_limiter: RateLimiterBackend,
+        retry_config: RetryConfig,
+    ) -> list[str]:
+        """Find up to two objects by exact property equality for reconciliation."""
+
+        def search() -> httpx.Response:
+            response = client.post(
+                search_url,
+                json={
+                    "filterGroups": [
+                        {
+                            "filters": [
+                                {
+                                    "propertyName": id_property,
+                                    "operator": "EQ",
+                                    "value": str(id_value),
+                                }
+                            ]
+                        }
+                    ],
+                    "properties": [id_property],
+                    "limit": 2,
+                },
+                headers=headers,
+            )
+            response.raise_for_status()
+            return response
+
+        rate_limiter.acquire()
+        response = with_retry(search, retry_config, operation=OperationSafety.IDEMPOTENT)
+        try:
+            results = response.json()["results"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("HubSpot search response has no usable results list") from exc
+        if not isinstance(results, list):
+            raise ValueError("HubSpot search response 'results' is not a list")
+
+        object_ids: list[str] = []
+        for item in results:
+            if not isinstance(item, dict) or item.get("id") in (None, ""):
+                raise ValueError("HubSpot search result is missing an object id")
+            object_id = str(item["id"])
+            if object_id not in object_ids:
+                object_ids.append(object_id)
+        return object_ids
+
+    def _write_object(
+        self,
+        client: httpx.Client,
+        upsert_url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        config: HubSpotDestinationConfig,
+        policy: str,
+        rate_limiter: RateLimiterBackend,
+        retry_config: RetryConfig,
+        *,
+        known_exists: bool = False,
+        fill_create_race_is_error: bool = False,
+    ) -> bool:
+        """Write one object without replaying an ambiguous create blindly."""
+        properties = payload["properties"]
+        id_value = properties.get(config.id_property)
+        property_url = f"{upsert_url}/{id_value}?idProperty={config.id_property}"
+
+        if known_exists:
+            return self._patch_object(client, property_url, headers, properties, retry_config)
+        if policy == "update_only":
+            return self._patch_object(
+                client,
+                property_url,
+                headers,
+                properties,
+                retry_config,
+                missing_is_skip=True,
+            )
+
+        def create() -> _CreateOutcome:
+            response = client.post(upsert_url, json=payload, headers=headers)
+            if response.status_code == 409:
+                if policy == "create_only":
+                    return _CreateOutcome(skipped=True)
+                if fill_create_race_is_error:
+                    raise ValueError(
+                        "HubSpot fill_empty: record appeared between read and write; re-run"
+                    )
+                return _CreateOutcome(update_url=property_url)
+            response.raise_for_status()
+            return _CreateOutcome()
+
+        has_reconciliation_key = id_value not in (None, "")
+
+        def reconcile(error: Exception, attempt: int) -> _CreateOutcome | RetryDirective:
+            if has_reconciliation_key:
+                object_ids = self._search_object_ids(
+                    client,
+                    f"{upsert_url}/search",
+                    headers,
+                    config.id_property,
+                    id_value,
+                    rate_limiter,
+                    retry_config,
+                )
+                if len(object_ids) > 1:
+                    raise ValueError(
+                        "HubSpot destination: create delivery is unknown and reconciliation "
+                        f"matched multiple {config.object_type} objects; matching object ids: "
+                        f"{object_ids}. Refusing to guess or create another object."
+                    ) from error
+                if object_ids:
+                    update_url = f"{upsert_url}/{object_ids[0]}" if policy == "upsert" else None
+                    return _CreateOutcome(update_url=update_url, reconciled=True)
+
+            if config.retry_creates and attempt < retry_config.max_attempts:
+                retry_reason = (
+                    "after reconciliation found no match"
+                    if has_reconciliation_key
+                    else "without a reconciliation key"
+                )
+                logger.warning(
+                    "HubSpot retry_creates=true: retrying delivery-unknown POST for %s %s "
+                    "(attempt %d/%d); duplicate object risk.",
+                    config.object_type,
+                    retry_reason,
+                    attempt,
+                    retry_config.max_attempts,
+                )
+                return RetryDirective.RETRY
+
+            searched = (
+                f"an exact {config.id_property!r} reconciliation search found no object"
+                if has_reconciliation_key
+                else f"the payload had no non-empty {config.id_property!r} reconciliation key"
+            )
+            raise DeliveryUnknownError(
+                "HubSpot create delivery is unknown: the request may have committed, but "
+                f"{searched}. HubSpot search indexing can lag for a few moments, so drt "
+                "refused a second POST. Verify HubSpot before manual replay; "
+                "destination.retry_creates: true restores blind retries with duplicate risk.",
+                cause=error,
+                attempt=attempt,
+            ) from error
+
+        operation = (
+            OperationSafety.RECONCILIABLE_CREATE
+            if has_reconciliation_key
+            else OperationSafety.BLIND_CREATE
+        )
+        outcome = with_retry(
+            create,
+            retry_config,
+            operation=operation,
+            on_delivery_unknown=reconcile,
+        )
+        if outcome.skipped:
+            return False
+        if outcome.update_url is not None:
+            if outcome.reconciled:
+                rate_limiter.acquire()
+            return self._patch_object(client, outcome.update_url, headers, properties, retry_config)
+        return True
 
     def load(
         self,
@@ -129,43 +333,33 @@ class HubSpotDestination:
 
                     payload = {"properties": properties, "idProperty": config.id_property}
 
-                    def do_write(
-                        _url: str = upsert_url,
-                        _headers: dict[str, str] = headers,
-                        _payload: dict[str, Any] = payload,
-                    ) -> httpx.Response | None:
-                        id_value = _payload["properties"].get(config.id_property)
-                        patch_url = f"{_url}/{id_value}?idProperty={config.id_property}"
-                        if policy == "update_only":
-                            response = client.patch(
-                                patch_url,
-                                json={"properties": _payload["properties"]},
-                                headers=_headers,
-                            )
-                            if response.status_code == 404:
-                                return None
-                            response.raise_for_status()
-                            return response
-
-                        response = client.post(_url, json=_payload, headers=_headers)
-                        if response.status_code == 409:
-                            if policy == "create_only":
-                                return None
-                            response = client.patch(
-                                patch_url,
-                                json={"properties": _payload["properties"]},
-                                headers=_headers,
-                            )
-                        response.raise_for_status()
-                        return response
-
                     try:
-                        written = with_retry(do_write, retry_config)
-                        if written is None:
+                        written = self._write_object(
+                            client,
+                            upsert_url,
+                            headers,
+                            payload,
+                            config,
+                            policy,
+                            rate_limiter,
+                            retry_config,
+                        )
+                        if not written:
                             result.skipped += 1
                             result.skipped_no_match += 1
                         else:
                             result.success += 1
+                    except DeliveryUnknownError as e:
+                        record_row_error(
+                            result,
+                            i,
+                            json.dumps(record, default=str)[:200],
+                            e,
+                            http_status=e.http_status,
+                            error_message=str(e),
+                        )
+                        if sync_options.on_error == "fail":
+                            break
                     except httpx.HTTPStatusError as e:
                         record_row_error(
                             result,
@@ -323,55 +517,20 @@ class HubSpotDestination:
                     }
                     rate_limiter.acquire()
 
-                    def do_fill_write(
-                        _url: str = upsert_url,
-                        _headers: dict[str, str] = headers,
-                        _payload: dict[str, Any] = payload,
-                        _exists: bool = exists,
-                    ) -> httpx.Response | None:
-                        patch_url = (
-                            f"{_url}/{_payload['properties'].get(config.id_property)}"
-                            f"?idProperty={config.id_property}"
-                        )
-                        if _exists:
-                            response = client.patch(
-                                patch_url,
-                                json={"properties": _payload["properties"]},
-                                headers=_headers,
-                            )
-                            response.raise_for_status()
-                            return response
-                        if policy == "update_only":
-                            response = client.patch(
-                                patch_url,
-                                json={"properties": _payload["properties"]},
-                                headers=_headers,
-                            )
-                            if response.status_code == 404:
-                                return None
-                            response.raise_for_status()
-                            return response
-
-                        response = client.post(_url, json=_payload, headers=_headers)
-                        if response.status_code == 409:
-                            if policy == "create_only":
-                                return None
-                            if fill_properties:
-                                raise ValueError(
-                                    "HubSpot fill_empty: record appeared between read and write; "
-                                    "re-run"
-                                )
-                            response = client.patch(
-                                patch_url,
-                                json={"properties": _payload["properties"]},
-                                headers=_headers,
-                            )
-                        response.raise_for_status()
-                        return response
-
                     try:
-                        written = with_retry(do_fill_write, retry_config)
-                        if written is None:
+                        written = self._write_object(
+                            client,
+                            upsert_url,
+                            headers,
+                            payload,
+                            config,
+                            policy,
+                            rate_limiter,
+                            retry_config,
+                            known_exists=exists,
+                            fill_create_race_is_error=bool(fill_properties),
+                        )
+                        if not written:
                             result.skipped += 1
                             result.skipped_no_match += 1
                         else:
@@ -379,6 +538,18 @@ class HubSpotDestination:
                             written_current_by_id.setdefault(id_key, {}).update(write_properties)
                             if fill_properties:
                                 current_by_id.setdefault(id_key, {}).update(write_properties)
+                    except DeliveryUnknownError as e:
+                        record_row_error(
+                            result,
+                            i,
+                            json.dumps(record, default=str)[:200],
+                            e,
+                            http_status=e.http_status,
+                            error_message=str(e),
+                        )
+                        if sync_options.on_error == "fail":
+                            stop = True
+                            break
                     except httpx.HTTPStatusError as e:
                         record_row_error(
                             result,

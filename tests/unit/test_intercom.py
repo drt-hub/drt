@@ -5,6 +5,8 @@ HTTP calls are mocked; these tests never contact Intercom.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 from unittest.mock import patch
 
@@ -20,6 +22,11 @@ from drt.config.models import (
 )
 from drt.destinations.base import MatchPolicyCapable
 from drt.destinations.intercom import IntercomDestination
+from tests.http_fault_injection import (
+    BlindCreateFaultHarness,
+    FaultMode,
+    install_mock_transport,
+)
 
 
 def _config(**overrides: Any) -> IntercomDestinationConfig:
@@ -82,6 +89,43 @@ def _conflict(contact_id: str = "contact-123") -> httpx.Response:
 _RECORD = {"email": "a@test.com", "name": "Alice", "plan": "pro"}
 
 
+def _fault_search_response(
+    request: httpx.Request, harness: BlindCreateFaultHarness
+) -> httpx.Response:
+    if request.method == "POST" and request.url.path == "/contacts/search":
+        body = json.loads(request.content)
+        raw_filters = body["query"].get("value", [body["query"]])
+        filters = raw_filters if isinstance(raw_filters, list) else [body["query"]]
+        matching_ids = [
+            str(contact["id"])
+            for contact in harness.remote_objects
+            if any(contact.get(item["field"]) == item["value"] for item in filters)
+        ]
+        return httpx.Response(
+            200,
+            json={"type": "list", "data": [{"id": value} for value in matching_ids]},
+            request=request,
+        )
+    if request.method == "PUT" and request.url.path.startswith("/contacts/"):
+        return httpx.Response(
+            200, json={"id": request.url.path.rsplit("/", 1)[-1]}, request=request
+        )
+    raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+
+def _fault_harness(mode: FaultMode) -> BlindCreateFaultHarness:
+    return BlindCreateFaultHarness(
+        "/contacts",
+        mode=mode,
+        fallback=_fault_search_response,
+        create_response=lambda request, object_id: httpx.Response(
+            200,
+            json={"id": str(object_id)},
+            request=request,
+        ),
+    )
+
+
 def test_intercom_declares_match_policy_capability() -> None:
     destination = IntercomDestination()
 
@@ -89,6 +133,11 @@ def test_intercom_declares_match_policy_capability() -> None:
     assert destination.supported_match_policies() == frozenset(
         {"upsert", "update_only", "create_only"}
     )
+
+
+def test_retry_creates_defaults_false_and_is_explicit_destination_policy() -> None:
+    assert _config().retry_creates is False
+    assert _config(retry_creates=True).retry_creates is True
 
 
 def test_upsert_creates_a_new_contact() -> None:
@@ -232,6 +281,185 @@ def test_create_only_skips_an_existing_contact_without_updating() -> None:
     assert result.skipped_no_match == 1
     post.assert_called_once()
     put.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+@pytest.mark.parametrize("match_policy", ["upsert", "create_only"])
+def test_create_commit_then_failure_reconciles_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch, mode: FaultMode, match_policy: str
+) -> None:
+    harness = _fault_harness(mode)
+    install_mock_transport(monkeypatch, harness)
+
+    result = IntercomDestination().load(
+        [_RECORD],
+        _config(),
+        _options(
+            match_policy,
+            retry=RetryConfig(max_attempts=2, initial_backoff=0.0),
+        ),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+    expected_requests = [("POST", "/contacts"), ("POST", "/contacts/search")]
+    if match_policy == "upsert":
+        expected_requests.append(("PUT", "/contacts/1"))
+    assert [(request.method, request.url.path) for request in harness.requests] == expected_requests
+
+
+def test_create_reconciliation_miss_fails_closed_with_one_remote_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _fault_harness("commit-then-drop")
+
+    def search_stays_stale(
+        request: httpx.Request, _harness: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        if request.url.path == "/contacts/search":
+            return httpx.Response(200, json={"data": []}, request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = search_stays_stale
+    install_mock_transport(monkeypatch, harness)
+
+    result = IntercomDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (0, 0, 1)
+    assert "delivery is unknown" in result.row_errors[0].error_message
+    assert "refused a second POST" in result.row_errors[0].error_message
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+
+
+def test_create_without_a_reconciliation_key_is_blind_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _fault_harness("commit-then-drop")
+    install_mock_transport(monkeypatch, harness)
+    config = _config(properties_template='{"role": "lead", "name": "{{ row.name }}"}')
+
+    result = IntercomDestination().load(
+        [_RECORD],
+        config,
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (0, 0, 1)
+    assert "no external_id or email reconciliation key" in result.row_errors[0].error_message
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+    assert [(request.method, request.url.path) for request in harness.requests] == [
+        ("POST", "/contacts")
+    ]
+
+
+def test_multiple_matches_during_reconciliation_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _fault_harness("commit-then-drop")
+
+    def duplicate_after_commit(
+        request: httpx.Request, state: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        if request.url.path != "/contacts/search":
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+        state.remote_objects.append({"id": 99, "email": "a@test.com"})
+        return _fault_search_response(request, state)
+
+    harness.fallback = duplicate_after_commit
+    install_mock_transport(monkeypatch, harness)
+
+    result = IntercomDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=3, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (0, 0, 1)
+    assert "matched multiple contacts" in result.row_errors[0].error_message
+    assert "['1', '99']" in result.row_errors[0].error_message
+    assert harness.create_attempts == 1
+
+
+def test_retry_creates_true_restores_blind_replay_with_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = _fault_harness("commit-then-drop")
+
+    def search_stays_stale(
+        request: httpx.Request, _harness: BlindCreateFaultHarness
+    ) -> httpx.Response:
+        if request.url.path == "/contacts/search":
+            return httpx.Response(200, json={"data": []}, request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    harness.fallback = search_stays_stale
+    install_mock_transport(monkeypatch, harness)
+    caplog.set_level(logging.WARNING, logger="drt.destinations.intercom")
+
+    result = IntercomDestination().load(
+        [_RECORD],
+        _config(retry_creates=True),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.skipped, result.failed) == (1, 0, 0)
+    assert harness.create_attempts == 2
+    assert len(harness.remote_objects) == 2
+    assert "duplicate contact risk" in caplog.text
+
+
+def test_429_on_create_is_retried_without_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+        return httpx.Response(200, json={"id": "contact-1"}, request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    result = IntercomDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", "/contacts"),
+        ("POST", "/contacts"),
+    ]
+
+
+def test_pre_send_connect_error_on_create_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ConnectError("not connected", request=request)
+        return httpx.Response(200, json={"id": "contact-1"}, request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    result = IntercomDestination().load(
+        [_RECORD],
+        _config(),
+        _options(retry=RetryConfig(max_attempts=2, initial_backoff=0.0)),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert len(requests) == 2
 
 
 def test_update_only_searches_by_rendered_identifiers_then_updates() -> None:

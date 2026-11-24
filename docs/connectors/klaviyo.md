@@ -12,6 +12,7 @@ destination:
   properties_template: |
     {"ltv_segment": "{{ row.ltv_segment }}", "plan": "{{ row.plan }}"}
   list_id_env: KLAVIYO_LIST_ID     # optional
+  retry_creates: false             # duplicate-risk escape hatch; keep false
 ```
 
 ## Configuration
@@ -31,12 +32,13 @@ destination:
 | `list_id` / `list_id_env` | string \| null | null | For `endpoint: profile`, add each upserted profile to this Klaviyo list. |
 | `backfill` | boolean | `false` | For `endpoint: event` only. When `true`, suppresses live flow/automation triggers for the event — use during a first full sync or a cursor-override replay of historical rows so existing flows don't re-send customer-facing messages for events that already happened. The event still counts toward metrics/segmentation. Rejected at config time if set with `endpoint: profile`. |
 | `revision` | string | `"2026-07-15"` | Klaviyo API revision (sent as the `revision` header). Must be `"2026-07-15"` or later when `backfill: true` (enforced at config validation) — that's the revision Klaviyo introduced the field at. |
+| `retry_creates` | boolean | `false` | After an ambiguous `create_only` profile or list-membership POST and an exact reconciliation miss, allow another blind POST. This can duplicate a profile/relationship; native profile upserts do not need it. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 | `rate_limit` | RateLimitConfig \| null | null | Per-destination override of `sync.rate_limit`. |
 
 ## Authentication
 
-Create a [private API key](https://www.klaviyo.com/settings/account/api-keys) with the profile/list or event write access needed by the selected endpoint:
+Create a [private API key](https://www.klaviyo.com/settings/account/api-keys) with the profile/list or event write access needed by the selected endpoint. Profile `update_only` / `create_only` reconciliation needs `profiles:read`; list-membership reconciliation needs `lists:read` and `profiles:read`, in addition to the write scopes:
 
 ```bash
 export KLAVIYO_API_KEY="pk_..."
@@ -44,13 +46,32 @@ export KLAVIYO_API_KEY="pk_..."
 
 ## How upsert works
 
-Each row is upserted **by email**, one record per request:
+Each profile row is identified **by email**, one record per request. The three
+`sync.match_policy` values use different API shapes:
 
-1. `POST /api/profiles/` to create the profile.
-2. On `409` (the email already exists), the existing profile id is read from the error's `meta.duplicate_profile_id`, and the profile is updated with `PATCH /api/profiles/{id}/`.
-3. If `list_id` is set, the profile is added via `POST /api/lists/{list_id}/relationships/profiles/`.
+- `upsert` (default) uses Klaviyo's documented server-side [Create or Update Profile](https://developers.klaviyo.com/en/v2026-07-15/reference/create_or_update_profile) endpoint, `POST /api/profile-import`. The same non-empty email and payload are reused across attempts, so a retry updates the same logical profile instead of creating another one.
+- `create_only` uses `POST /api/profiles/`; `409` is a policy skip. An ambiguous response is reconciled with the documented exact-email [Get Profiles filter](https://developers.klaviyo.com/en/v2026-07-15/reference/get_profiles): one ID is accepted, multiple IDs are refused, and a miss fails delivery-unknown by default.
+- `update_only` performs that exact lookup first; one ID receives `PATCH /api/profiles/{id}/`, no match is a policy skip, and multiple matches are refused.
+
+If `list_id` is set, the profile is added via `POST /api/lists/{list_id}/relationships/profiles/`. Because Klaviyo does not document replay idempotency for that POST, an ambiguous response is reconciled through [Get Profile IDs for List](https://developers.klaviyo.com/en/v2026-07-15/reference/get_profile_ids_for_list) using the same exact email. One expected profile ID is accepted; multiple, mismatched, or missing IDs fail closed.
 
 Per-record failures land in `result.row_errors` with the HTTP status (`on_error: skip` continues / `fail` stops).
+
+## Retry safety and operator recovery
+
+| Operation | Classification | Replay behavior |
+|---|---|---|
+| `POST /api/profile-import` (`upsert`) | Native keyed upsert by non-empty email | 429, proven pre-send connection failures, transport errors, and configured 5xx responses retry normally with the same payload. Klaviyo documents 200 for update and 201 for create. |
+| `POST /api/profiles/` (`create_only`) | Reconciliable create | 429 and proven pre-send connection failures retry. A read/write/response transport error or configured 5xx triggers exact-email lookup, never an immediate second create. |
+| Profile search and `PATCH /api/profiles/{id}/` | Idempotent read / ID-addressed update | Normal retry policy. |
+| List-membership POST | Reconciliable relationship create; vendor replay idempotency unverified | An ambiguous response triggers exact list-membership lookup; a miss fails closed. |
+| `POST /api/events/` | Native keyed event | The required non-empty `unique_id_field` is reused with the same profile and metric. Klaviyo documents that tuple as its idempotency key, so ambiguous attempts retry normally and produce one logical event. |
+
+When a RowError says delivery is unknown, assume the first POST may have worked. Check the exact email (and the configured list, if applicable), allow time for the result to become visible, remove/merge any duplicates, and only then use `drt retry` or manually replay the row. Klaviyo [documents delayed GET Profiles visibility for asynchronous profile-affecting calls](https://developers.klaviyo.com/en/v2024-10-15/docs/collect_email_and_sms_consent_via_api); absence immediately after an ambiguous write is therefore not proof that the write failed. The warehouse delivery ledger cannot resolve a response lost inside one `load()` call.
+
+`destination.retry_creates: true` restores the legacy blind retry after a reconciliation miss and emits a duplicate-risk warning. It does not change native profile-import retries, safe searches, or ID-addressed updates.
+
+This retry behavior is verified only against the shared in-memory HTTP fault-injection harness. No live Klaviyo account was available for verification.
 
 ## Event tracking
 

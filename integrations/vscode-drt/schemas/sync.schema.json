@@ -2043,11 +2043,6 @@
         },
         "object_type": {
           "default": "contacts",
-          "enum": [
-            "contacts",
-            "deals",
-            "companies"
-          ],
           "title": "Object Type",
           "type": "string"
         },
@@ -2070,6 +2065,11 @@
         },
         "auth": {
           "$ref": "#/$defs/BearerAuth"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [
@@ -2136,6 +2136,11 @@
         "properties_template": {
           "title": "Properties Template",
           "type": "string"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [
@@ -2405,6 +2410,11 @@
         "backfill": {
           "default": false,
           "title": "Backfill",
+          "type": "boolean"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
           "type": "boolean"
         },
         "retry": {
@@ -3686,6 +3696,11 @@
           ],
           "title": "Match Field",
           "type": "string"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [

@@ -234,6 +234,11 @@ See the [scheduling decision guide](docs/guides/scheduling.md) before choosing
 between warehouse-native scheduling, Dagster sensors, `drt serve`, or a deploy
 scaffold.
 
+To send one model to several destinations, use independently named syncs with
+a shared tag. The [fan-out guide](docs/guides/fan-out.md) covers per-leg state,
+watermarks, retries, partial failures, concurrency, and when ordering belongs
+in an orchestrator.
+
 ### Visualize your syncs
 
 See the [generated docs site guide](docs/guides/docs-site.md) for the HTML,

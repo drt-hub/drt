@@ -279,7 +279,7 @@ destination:                # required: see Destination Configs below
 sync:                       # optional: all fields have defaults
   mode: full                # "full" (default) | "incremental" | "upsert" | "replace" | "mirror". replace/mirror: Postgres, MySQL, ClickHouse, Snowflake, Databricks, BigQuery
   replace_strategy: truncate # "truncate" (default) | "swap"; only valid with mode: replace
-  match_policy: upsert      # optional (#757): "upsert" (default) | "update_only" (only touch rows that already exist — no-match rows are SKIPPED, counted in SyncResult.skipped with a skipped_no_match breakdown; `drt run` prints "N skipped (M no match)" and --output json adds rows_skipped / rows_skipped_no_match) | "create_only" (only insert rows that don't exist — existing rows untouched). Applies to the upsert write path (mode: full/upsert/incremental); rejected for replace/mirror; fails fast on destinations that don't implement it. Postgres + MySQL + HubSpot + Intercom; other SaaS destinations follow per-PR
+  match_policy: upsert      # optional (#757): "upsert" (default) | "update_only" (only touch rows that already exist — no-match rows are SKIPPED, counted in SyncResult.skipped with a skipped_no_match breakdown; `drt run` prints "N skipped (M no match)" and --output json adds rows_skipped / rows_skipped_no_match) | "create_only" (only insert rows that don't exist — existing rows untouched). Applies to the upsert write path (mode: full/upsert/incremental); rejected for replace/mirror; fails fast on destinations that don't implement it. Postgres + MySQL + HubSpot + Intercom + Klaviyo profiles + Pipedrive; other SaaS destinations follow per-PR
   write_policy: overwrite  # optional (#1238): "overwrite" (default) | "fill_empty"; fill only NULL/blank destination values, new rows in full; rejected for replace
   write_policy_overrides:  # optional: exact destination column/property name -> policy
     lifecycle_stage: overwrite
@@ -995,7 +995,7 @@ destination:
 ```yaml
 destination:
   type: hubspot
-  object_type: contacts           # "contacts" | "deals" | "companies", default: "contacts"
+  object_type: contacts           # contacts | companies | deals | custom object name/ID
   id_property: email              # default: "email" — upsert deduplication key
   properties_template: |          # optional Jinja2 template → JSON object of HubSpot properties
     {
@@ -1007,6 +1007,7 @@ destination:
   auth:
     type: bearer
     token_env: HUBSPOT_TOKEN      # Private App token with CRM write scope
+  retry_creates: false            # default; true allows duplicate-risk blind replay
 ```
 
 HubSpot supports `sync.write_policy: fill_empty` for `mode: full`, `upsert`, and
@@ -1033,6 +1034,55 @@ write beyond `id_property` is skipped without incrementing `skipped_no_match`;
 the aggregated `SyncResult.kept_values` counts kept properties and `drt run`
 prints them. This leg is mock-verified only, not verified against a live HubSpot
 account. HubSpot has no `drt plan` / `--dry-run --diff` support today (#472).
+
+After a lost create response or retryable 5xx, drt searches the same standard or
+custom object type with an exact `EQ` filter on the rendered `id_property`. One
+result is accepted and receives an ID-addressed update for `upsert`; multiple IDs
+are refused, and no result fails delivery-unknown because HubSpot documents search
+index lag after creates. A missing/empty `id_property` is a blind create and also
+fails closed. HTTP 429 and proven pre-send connection failures remain retryable,
+as do searches, batch reads, and addressed updates. `retry_creates: true` permits
+a blind replay after a miss and emits a duplicate-object-risk warning. See the
+[HubSpot connector docs](../connectors/hubspot.md) for recovery steps and the
+mock-only verification boundary.
+
+### `type: intercom`
+
+```yaml
+destination:
+  type: intercom
+  properties_template: |
+    {
+      "role": "user",
+      "external_id": "{{ row.customer_id }}",
+      "email": "{{ row.email }}",
+      "name": "{{ row.name }}"
+    }
+  auth:
+    type: bearer
+    token_env: INTERCOM_TOKEN
+  retry_creates: false                  # default; true allows duplicate-risk blind replay
+  retry:                                # optional: overrides sync.retry as a whole
+    max_attempts: 3
+    initial_backoff: 1.0
+  rate_limit:                           # optional: overrides sync.rate_limit as a whole
+    requests_per_second: 10
+sync:
+  mode: upsert
+  match_policy: upsert                  # upsert | update_only | create_only
+```
+
+`upsert` creates a contact and follows Intercom's duplicate `409` ID with an
+addressed update; `create_only` treats a duplicate conflict as a policy skip;
+`update_only` uses a rendered Intercom `id` directly or searches with exact `=`
+filters on rendered `external_id` and/or `email`. Multiple search matches fail
+closed. After a lost create response or retryable 5xx, drt performs the same exact
+search: one contact is accepted (and updated for `upsert`), multiple IDs are a
+RowError, and no match fails delivery-unknown because Intercom says a new contact
+can take minutes to appear in search. HTTP 429 and proven pre-send connection
+failures remain retryable. `retry_creates: true` permits a blind replay after a
+miss and warns about duplicate-contact risk. See the
+[Intercom connector docs](../connectors/intercom.md).
 
 ### `type: zendesk`
 
@@ -1338,6 +1388,7 @@ destination:
   base_url: https://api.pipedrive.com/api/v2   # optional, https only: this is the default
   object: person                         # only person is supported for now
   match_field: email                     # email | name | phone: column for the exact search
+  retry_creates: false                   # default; true allows duplicate-risk blind create replay
   retry:                                 # optional: overrides sync.retry as a whole
     max_attempts: 3
     initial_backoff: 1.0
@@ -1356,7 +1407,11 @@ nothing written. `name`, `owner_id`, `org_id`, `visible_to` and `label_ids` pass
 through, `email`/`phone` become `emails`/`phones` lists (sent only when a person is created), and every other column goes to
 `custom_fields`, so `field_mappings` must rename it to Pipedrive's 40-character key (an
 unknown key is rejected by Pipedrive and becomes a per-row error). The token is sent in
-the `x-api-token` header. Each row costs about 25 API tokens (search 20 + write 5). See
+the `x-api-token` header. If a create response is lost or returns 5xx, drt re-searches by
+the exact `match_field`: one result is success, multiple results are a RowError, and no
+result fails delivery-unknown because the search index may lag. `retry_creates: true`
+allows a blind replay after a miss and can create a duplicate; 429 and pre-send connection
+failures remain retryable without it. Each row costs about 25 API tokens (search 20 + write 5). See
 [Pipedrive connector docs](../connectors/pipedrive.md).
 
 ### `type: sqs`
@@ -1456,7 +1511,7 @@ destination:
     client_secret_env: GOOGLE_ADS_CLIENT_SECRET
 ```
 
-### `type: klaviyo` — safe historical events
+### `type: klaviyo` — replay-safe profiles and safe historical events
 
 ```yaml
 destination:
@@ -1470,6 +1525,7 @@ destination:
   value_field: amount                   # optional
   backfill: true                        # event only: record history without firing live flows
   revision: "2026-07-15"                # default and minimum when backfill=true
+  retry_creates: false                   # duplicate-risk profile/list escape hatch
 ```
 
 Use `backfill: true` for a first full event load or historical
@@ -1477,6 +1533,21 @@ Use `backfill: true` for a first full event load or historical
 without re-triggering customer-facing automations. It is rejected for profile
 mode and with a revision older than `2026-07-15`; turn it back off for live
 incremental events.
+
+For `endpoint: profile`, default `upsert` uses Klaviyo's native email-keyed
+`POST /api/profile-import` create-or-update endpoint, so retries reuse the same
+logical identity. `create_only` uses `POST /api/profiles/` and reconciles an
+ambiguous response with an exact email filter; `update_only` uses the same lookup
+and an ID-addressed PATCH. One match is accepted, multiple matches are refused,
+and a miss fails delivery-unknown because read visibility may lag. List-membership
+POSTs use the same fail-closed reconciliation rule. `retry_creates: true` allows
+a blind replay after a miss and emits a duplicate-risk warning. 429 and proven
+pre-send connection failures remain retryable; searches and ID-addressed updates
+keep normal retries. These paths are mock-verified only; no live Klaviyo account
+was available. Non-default match policies are rejected for `endpoint: event`.
+Event retries are keyed by the required stable `unique_id_field` together with
+the profile and metric, matching Klaviyo's documented deduplication tuple;
+`backfill` remains part of the unchanged retried payload.
 
 ### `type: meta_conversions`
 

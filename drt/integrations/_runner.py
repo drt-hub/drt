@@ -74,6 +74,20 @@ def run_drt_sync(
     Raises:
         ValueError: If sync_name is not found.
     """
+    from drt.config.credentials import secrets_project_dir
+
+    pdir = Path(project_dir).resolve()
+    with secrets_project_dir(pdir):
+        return _run_drt_sync_scoped(sync_name, pdir, dry_run, profile, state_manager)
+
+
+def _run_drt_sync_scoped(
+    sync_name: str,
+    pdir: Path,
+    dry_run: bool,
+    profile: str | None,
+    state_manager: StateStore | None,
+) -> dict[str, Any]:
     from drt.cli.main import _get_destination, _get_source, _resolve_profile_name
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
@@ -81,7 +95,6 @@ def run_drt_sync(
     from drt.engine.sync import run_sync
     from drt.state.factory import build_state_bundle
 
-    pdir = Path(project_dir)
     project = load_project(pdir)
     resolved_profile = _resolve_profile_name(profile, project.profile)
     prof = load_profile(resolved_profile)
