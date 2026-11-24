@@ -882,9 +882,13 @@ def _flush_uncheckpointed_window(
             pass
         if original_error is not None:
             try:
-                add_note = getattr(original_error, "add_note", None)
-                if callable(add_note):
-                    add_note(message)
+                # BaseException.add_note() only exists on Python 3.11+; it just
+                # appends to __notes__, which is a plain attribute everywhere.
+                notes = getattr(original_error, "__notes__", None)
+                if isinstance(notes, list):
+                    notes.append(message)
+                else:
+                    setattr(original_error, "__notes__", [message])
             except Exception:  # noqa: BLE001 — failure metadata is best-effort
                 pass
 

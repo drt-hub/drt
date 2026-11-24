@@ -97,10 +97,10 @@ def test_local_state_save_ignores_unsupported_directory_open(tmp_path: Path) -> 
 
     real_open = _atomic.os.open
 
-    def fail_directory_open(path: object, flags: int, mode: int = 0o777) -> int:
+    def fail_directory_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
         if Path(path) == tmp_path / ".drt" and flags == _atomic.os.O_RDONLY:
             raise PermissionError("directory open is unsupported")
-        return real_open(path, flags, mode)
+        return real_open(path, flags, *args, **kwargs)
 
     with patch("drt.state._atomic.os.open", side_effect=fail_directory_open):
         StateManager(tmp_path).save_sync(SyncState("s", "now", 1, "success"))
