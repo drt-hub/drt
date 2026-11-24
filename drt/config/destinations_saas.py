@@ -270,6 +270,8 @@ class GitHubActionsDestinationConfig(DescribableConfig):
     # Example: '{"environment": "{{ row.env }}", "version": "{{ row.version }}"}'
     inputs_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    # workflow_dispatch has no documented replay key; a replay can start a second run (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: `workflow_dispatch` has no idempotency
@@ -733,6 +735,8 @@ class LinearDestinationConfig(BaseModel):
     label_ids: list[str] = []
     assignee_id: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    # issueCreate has no verified replay key; a replay can create a second issue (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: Linear's GraphQL API documents no
@@ -793,6 +797,8 @@ class JiraDestinationConfig(BaseModel):
     summary_template: str
     description_template: str
     issue_id_field: str = "issue_id"  # row key that indicates update mode
+    # POST /rest/api/3/issue has no documented replay key (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: Jira Cloud's create-issue endpoint has no
@@ -851,6 +857,8 @@ class NotionDestinationConfig(DescribableConfig):
     # Example: see https://developers.notion.com/reference/post-page for template format
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    # Page creation has no documented replay key (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Accepted but a no-op: Notion always creates a new page (no

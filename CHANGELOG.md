@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **⚠️ Behaviour change — Notion, Linear, Jira and GitHub Actions no longer auto-resend a delivery-unknown create** ([ADR 0023](docs/adr/0023-non-idempotent-create-retries.md) item 1, follow-up to the messaging change in #1364): a page, issue or workflow-run create whose response was lost (transport error after the request was sent, or a 5xx) is now returned as a delivery-unknown `RowError` after one request instead of being replayed, because none of these APIs documents an idempotency key and a replay can create a second page, issue or run. 429 and connection failures proven to happen before the request was sent are still retried; Jira updates (one fixed issue id) keep normal retries. New `destination.retry_creates` (default `false`) restores the old blind replay and logs a duplicate-risk warning. Also removes a stray `scripts/check_drift.sh-E` backup file that #1353 committed by mistake.
 - **Not yet usable — REST API backfill upper-bound configuration:** REST source profiles accept optional `incremental.end_param` alongside `start_param`, the source-side capability needed to send ADR 0021 half-open window bounds. `drt run` still refuses `sync.backfill` until the sequential checkpoint slice lands.
 
 ### Changed

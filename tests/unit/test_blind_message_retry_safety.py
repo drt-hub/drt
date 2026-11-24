@@ -19,6 +19,10 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.discord import DiscordDestination
+from drt.destinations.github_actions import GitHubActionsDestination
+from drt.destinations.jira import JiraDestination
+from drt.destinations.linear import LinearDestination
+from drt.destinations.notion import NotionDestination
 from drt.destinations.rest_api import RestApiDestination
 from drt.destinations.sendgrid import SendGridDestination
 from drt.destinations.slack import SlackDestination
@@ -30,7 +34,18 @@ from tests.http_fault_injection import (
     install_mock_transport,
 )
 
-_DESTINATIONS = ["rest_api", "sendgrid", "twilio", "slack", "discord", "teams"]
+_DESTINATIONS = [
+    "rest_api",
+    "sendgrid",
+    "twilio",
+    "slack",
+    "discord",
+    "teams",
+    "notion",
+    "linear",
+    "jira",
+    "github_actions",
+]
 
 
 def _options(on_error: str = "skip") -> SyncOptions:
@@ -142,6 +157,66 @@ def _case(
             "/teams",
             lambda request: json.loads(request.content),
         )
+    if name == "notion":
+        return (
+            NotionDestination(),
+            {
+                "type": "notion",
+                "database_id": "db-1",
+                "auth": {"type": "bearer", "token": "test-token"},
+                "retry_creates": retry_creates,
+            },
+            {"name": "Ada"},
+            "/v1/pages",
+            lambda request: json.loads(request.content),
+        )
+    if name == "linear":
+        return (
+            LinearDestination(),
+            {
+                "type": "linear",
+                "team_id": "team-1",
+                "title_template": "Issue for {{ row.name }}",
+                "description_template": "Body for {{ row.name }}",
+                "auth": {"type": "bearer", "token": "test-token"},
+                "retry_creates": retry_creates,
+            },
+            {"name": "Ada"},
+            "/graphql",
+            lambda request: json.loads(request.content),
+        )
+    if name == "jira":
+        return (
+            JiraDestination(),
+            {
+                "type": "jira",
+                "base_url_env": "FAULT_JIRA_BASE_URL",
+                "email_env": "FAULT_JIRA_EMAIL",
+                "token_env": "FAULT_JIRA_TOKEN",
+                "project_key": "OPS",
+                "summary_template": "Issue for {{ row.name }}",
+                "description_template": "Body for {{ row.name }}",
+                "retry_creates": retry_creates,
+            },
+            {"name": "Ada"},
+            "/rest/api/3/issue",
+            lambda request: json.loads(request.content),
+        )
+    if name == "github_actions":
+        return (
+            GitHubActionsDestination(),
+            {
+                "type": "github_actions",
+                "owner": "acme",
+                "repo": "app",
+                "workflow_id": "deploy.yml",
+                "auth": {"type": "bearer", "token": "test-token"},
+                "retry_creates": retry_creates,
+            },
+            {"name": "Ada"},
+            "/repos/acme/app/actions/workflows/deploy.yml/dispatches",
+            lambda request: json.loads(request.content),
+        )
     raise AssertionError(f"unknown test destination: {name}")
 
 
@@ -158,7 +233,16 @@ def _load(name: str, retry_creates: bool, on_error: str = "skip") -> tuple[Any, 
 
 
 def _success_response(request: httpx.Request, object_id: int) -> httpx.Response:
-    return httpx.Response(201, json={"sid": f"SM{object_id}"}, request=request)
+    # One body that every destination in this matrix accepts as a success.
+    body = {"sid": f"SM{object_id}", "data": {"issueCreate": {"success": True}}}
+    return httpx.Response(201, json=body, request=request)
+
+
+@pytest.fixture(autouse=True)
+def _jira_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAULT_JIRA_BASE_URL", "https://fault.test")
+    monkeypatch.setenv("FAULT_JIRA_EMAIL", "ops@example.com")
+    monkeypatch.setenv("FAULT_JIRA_TOKEN", "token")
 
 
 @pytest.mark.parametrize("name", _DESTINATIONS)
