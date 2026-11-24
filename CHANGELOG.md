@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Retry-safety index for every destination** ([ADR 0023](docs/adr/0023-non-idempotent-create-retries.md)): `docs/guides/retry-safety.md` now lists all registered destination types with their write kind, what drt retries and whether the write has been classified yet; a unit test fails when a new connector is missing from it. Documentation only — no retry behaviour changes.
 - **Not yet usable — REST API backfill upper-bound configuration:** REST source profiles accept optional `incremental.end_param` alongside `start_param`, the source-side capability needed to send ADR 0021 half-open window bounds. `drt run` still refuses `sync.backfill` until the sequential checkpoint slice lands.
 
 ### Changed
