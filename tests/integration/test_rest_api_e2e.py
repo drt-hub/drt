@@ -181,9 +181,11 @@ def test_on_error_skip_continues(httpserver, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_retry_on_500_succeeds_on_third(httpserver, tmp_path):
-    httpserver.expect_ordered_request("/webhook").respond_with_data("err", status=500)
-    httpserver.expect_ordered_request("/webhook").respond_with_data("err", status=500)
+def test_retry_on_429_succeeds_on_third(httpserver, tmp_path):
+    # 429 is rejected before the write is processed, so it stays retryable. A 5xx on a
+    # blind create is delivery-unknown and is not replayed by default (ADR 0023).
+    httpserver.expect_ordered_request("/webhook").respond_with_data("err", status=429)
+    httpserver.expect_ordered_request("/webhook").respond_with_data("err", status=429)
     httpserver.expect_ordered_request("/webhook").respond_with_data("OK", status=200)
 
     source = FakeSource([{"id": 1}])
