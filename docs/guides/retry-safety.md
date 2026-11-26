@@ -89,7 +89,7 @@ duplicate the object or message; the planned ADR step is noted.
 | `staged_upload` | Stage + trigger + poll | Only the optional status **poll** (a read) is retried; staging and trigger are not | Documented (ADR 0023 item 4) |
 | `teams` | Webhook message | Blind (see above) | Classified |
 | `twilio` | SMS / message | Blind (see above) | Classified |
-| `zendesk` | User / organization create-or-update (not tickets) | One HTTP attempt loop around each request | Keyed by Zendesk's create-or-update contract when every row carries an identity (`id`, `external_id` or, for users, `email`); rows without one can create a duplicate on replay and are not yet separated from the keyed case (ADR 0023 item 2) |
+| `zendesk` | User / organization create-or-update (not tickets) | Keyed when every row carries an identity (`id`, `external_id`, or for users `email`); a row without one is blind, and one such user row makes its 100-row batch blind | Classified |
 
 ## Opting back into blind replay
 
