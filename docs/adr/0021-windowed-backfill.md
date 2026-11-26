@@ -645,3 +645,301 @@ normative; the implementation PRs follow them.
    incremental after the first catch-up?** Recommended: persistent, with an
    exclusive-boundary marker and an explicit transition command. A silent change
    to legacy `cursor > watermark` can skip a row exactly equal to the saved high.
+
+## Amendment 2026-11-18 (slice 3 review)
+
+The maintainer delegated and approved the following adversarial-review
+decisions for slice 3. They supersede earlier text where the staged rollout is
+narrower than the final ADR design.
+
+1. **Execution is caller-opt-in and fail-closed.** `run_sync()` defaults
+   `allow_backfill_execution` to false. Only `drt run` and MCP
+   `drt_run_sync` opt in. Library calls, `drt build`, `drt serve`,
+   Airflow/Prefect, Dagster resources/assets/sensor-triggered runs, `drt test`,
+   plan/apply, retry, and exact replay refuse before extraction.
+2. **Dry-run is refused in slice 3.** CLI `--dry-run`, MCP `dry_run`, and
+   `build --dry-run` never query windows. Window preview/diff support remains
+   slice 4 work.
+3. **Source range violations are fatal to the window.** Out-of-range,
+   missing, and null cursors leave the window uncheckpointed regardless of
+   `on_error`; `on_error: skip` applies only to destination row failures.
+4. **One observer acknowledges checkpoints.** A composite designates exactly
+   one validated synchronous checkpoint observer. Its return value is
+   authoritative. Other and registered observers receive window events only;
+   they never receive checkpoint calls, avoiding cross-thread checkpoint
+   interleaving through shared extras.
+5. **Resume reads and writes are coupled.** The checkpoint capability reads
+   the resume cursor and boundary from the same StateStore/watermark pair it
+   writes. Supplying `StatePersistingObserver(store, None)` is sufficient even
+   when `state_manager=None`; a capability unable to read its own store is
+   refused.
+6. **Warehouse legacy fallback is narrow.** BigQuery falls back only for its
+   400 `invalidQuery` undefined-name error, Snowflake only for ProgrammingError
+   904/SQLSTATE 42000 invalid identifier, and Databricks only for SQLSTATE
+   42703/`UNRESOLVED_COLUMN`, all specifically naming `cursor_boundary`.
+   Authentication, permission, network, and transient failures propagate.
+7. **Outcome cardinality is a checkpoint invariant.** A window fails if a
+   load result does not report exactly one success/failed/skipped outcome per
+   submitted row, or staged finalization does not account for every staged
+   row. Under-reporting rows are never marked delivered in the idempotency
+   ledger.
+8. **DLQ persistence precedes checkpointing.** The DLQ buffer is flushed at
+   every window boundary. An append failure is fatal and the checkpoint is
+   not written; the unconditional end-of-run flush remains best-effort cleanup.
+9. **Staged partial success preserves skip semantics.** When finalization
+   reports pinpointed failures, `on_error: skip` records/DLQs them and may
+   checkpoint a fully consumed window; `on_error: fail` leaves it resumable.
+10. **Destination success means durable target acceptance.** For backfill,
+    `SyncResult.success` cannot mean merely queued locally. The additive
+    `PendingFlushCapable.flush_pending()` hook lets async destinations wait for
+    acknowledgement before every checkpoint; failure aborts the window.
+    `reset_write_state` remains best-effort cleanup, never acknowledgement.
+11. **Interrupted unfinished work is partial.** Cooperative cancellation with
+    remaining windows records `partial`, is selected by `drt run --failed`,
+    and triggers failure alerts without moving the safe checkpoint.
+12. **The cursor and exclusive marker are one checkpoint.** `drt state reset
+    --runs` clears run metadata but retains `last_cursor_value` and
+    `cursor_boundary` together. `--watermark` clears both. Hand-editing state
+    files is unsupported; use the command.
+13. **Local rewrites are atomic and corruption fails closed.** Local
+    `state.json` and `watermarks.json` writes use a same-directory temporary
+    file, file fsync, `os.replace`, and directory fsync. Missing files remain
+    normal first-run state. Corrupt JSON cannot be interpreted as an empty
+    checkpoint by a backfill.
+14. **Same-sync concurrency is unsupported.** Never-regress remains a
+    read/compare/write guard, not a distributed CAS. Operators and schedulers
+    must provide single-flight execution for a backfill sync; `drt serve`
+    already coalesces same-sync triggers. Do not run an older drt version
+    against state written by backfill; older behavior is backend-dependent and
+    may discard or reinterpret the additive marker. A local best-effort lease
+    is deferred rather than pretending to solve remote/concurrent execution.
+15. **Lag versus ledger retention is visible.** A timestamp
+    `watermark.lag` greater than the enabled ledger's seven-day retention emits
+    a run-start warning because pruned overlap keys may be delivered again.
+16. **Documentation names the rollout boundary.** Connector, MCP, LLM,
+    changelog, guide, and skill text must state the supported entry points,
+    recovery steps, and unsupported dry-run/diff/plan/limit/build/serve/
+    orchestrator combinations.
+17. **Tests are entry-point and failure-injection based.** Coverage inventories
+    every production `run_sync` call and exercises each invariant above,
+    including the executable SQLite three-window resume path.
+
+Slice 4 still owns `run_results.json` `windows[]`, window OTel spans, alert
+wording, aggregate history backfill summaries, and CLI
+`--backfill-start`/`--backfill-end`. This amendment does not pull them forward.
+
+## Amendment 2026-11-19 (slice 3 round 3)
+
+The maintainer delegated the following round-3 decisions after two further
+adversarial reviews. They refine and supersede the slice-3 amendment where
+necessary.
+
+1. **Pending acknowledgement precedes delivery bookkeeping.** For a
+   `PendingFlushCapable` destination, successful batch keys and compliance
+   audit entries remain in memory for the current window. The engine calls
+   `flush_pending()` first, and writes the idempotency ledger and compliance
+   delivery log only after that acknowledgement succeeds. A failed flush
+   therefore leaves no false delivered key; retry re-sends the row. A
+   destination without this capability retains the established per-batch
+   ledger/audit behavior.
+2. **Destination support is an explicit, conservative allowlist.** The frozen
+   `Destination` Protocol is unchanged. An additive
+   `WindowedBackfillCapable.backfill_unsupported_reason(config)` declaration
+   admits a destination configuration; absence means unsupported for both
+   built-ins and plugins. `drt validate` and the engine before extraction both
+   refuse with the destination type, reason, and support list. The v1 proven
+   set is PostgreSQL and MySQL with a non-empty `upsert_key`, plus Snowflake,
+   Databricks, and BigQuery in keyed `merge` mode. PostgreSQL/MySQL writes are
+   synchronous keyed upserts; the three warehouse MERGE paths are synchronous
+   and keyed. Their append/insert variants are not admitted.
+3. **Every other built-in is excluded until proven.** ClickHouse remains an
+   insert path: its `upsert_key` is informational and server-side insert
+   deduplication depends on table settings drt neither verifies nor configures.
+   Salesforce Bulk is excluded because its current failure correlation always
+   uses `batch_index=0`. File, JSON/JSONL/CSV, Parquet, Google Sheets, object
+   storage, and staged-upload destinations are excluded because overwrite,
+   first-write, append, or staged-promotion behavior is unsafe to replay as a
+   window transaction. Elasticsearch and all remaining API/message
+   destinations are conservatively excluded because keyed synchronous replay
+   has not been proven for every operation; blind POST/create and notification
+   delivery can duplicate. The complete built-in matrix is maintained in
+   `docs/guides/windowed-backfill.md`; a registry inventory test makes a new
+   destination default to unsupported.
+4. **MCP matches CLI safety composition.** `drt_run_sync` installs a
+   `DlqObserver` when `sync.dlq.enabled` so `on_error: skip` cannot checkpoint
+   past an unpersisted failed row. MCP returns structured `{"error": ...}`
+   refusals for `dry_run`, `limit`, `cursor_value`, and `full_refresh` on a
+   backfill before credentials, connectors, or state are instantiated.
+5. **The downgrade marker is read through the owning capability.** When the
+   engine has no direct `state_manager` but the designated checkpoint observer
+   owns state, a non-backfill run reads `cursor_boundary` through
+   `read_window_checkpoint()`. An `exclusive` marker still refuses legacy `>`
+   execution before extraction.
+6. **Backfill DLQ identity is deterministic and append is idempotent.** A
+   backfill dead letter id hashes the sync name, canonical window low boundary,
+   and stable row identity. Local, object-store, and warehouse DLQ appends
+   replace/upsert an existing id rather than append a duplicate. A checkpoint
+   failure followed by a window retry therefore leaves one retryable entry.
+   Non-backfill dead letters keep their legacy random UUID identity.
+7. **A committed atomic replacement never reports failure afterward.** Local
+   atomic JSON writes still fsync the file, replace it, and attempt the POSIX
+   directory fsync. Directory open/fsync/close errors after `os.replace` are
+   tolerated because Windows and some filesystems do not support that operation
+   and the replacement has already committed.
+8. **`state reset --runs` preserves only exclusive checkpoints.** The command
+   retains `(last_cursor_value, cursor_boundary)` only when the boundary is
+   exactly `exclusive`. A legacy state whose boundary is absent follows the
+   pre-backfill behavior: its run entry and fallback watermark are removed.
+9. **Only the DLQ can block a boundary flush.** Registered and other composite
+   observers receive window lifecycle events but are never called through
+   `flush_window`; a same-named method cannot veto checkpoint progress. The
+   designated `DlqObserver` alone performs the required strict pre-checkpoint
+   flush.
+10. **Warehouse legacy-column fallback remains error-specific.** PostgreSQL
+    falls back only for `psycopg2.errors.UndefinedColumn` (SQLSTATE 42703) whose
+    diagnostic names `cursor_boundary`. BigQuery, Snowflake, and Databricks
+    retain the slice-3 review's equivalent code/classification and marker-name
+    checks. An undefined different column, permission error, auth failure, or
+    transient failure propagates.
+11. **`--cursor-value` is not the windowed-backfill interface.** README, CLI,
+    LLM context, and generated skills call it a legacy/ad-hoc one-bound recovery
+    override and state that a sync declaring `sync.backfill` refuses it.
+
+## Amendment 2026-11-21 (slice 3 round 6)
+
+**A strict backfill DLQ flush never evicts.** Before mutating any local,
+object-store, or warehouse DLQ, drt compares the existing depth plus all
+current-window failures with a finite `dlq.max_records`. An overflow fails the
+window before its checkpoint and leaves the queue unchanged; the operator must
+raise the cap or drain the queue with `drt retry`. The ordinary non-backfill
+append contract remains FIFO-capped.
+
+## Amendment 2026-11-21 (slice 3 round 7)
+
+**Every destination-facing upsert-key component must be present and non-NULL.**
+The shared backfill engine validates this after payload transforms and before a
+window batch reaches any `WindowedBackfillCapable` destination. A violation
+names the sync, key column, and half-open window, aborts the write, and leaves
+the window uncheckpointed; this is required because SQL uniqueness and `MERGE`
+equality generally treat NULL keys as distinct, making replay duplicate rows.
+
+## Amendment 2026-11-22 (slice 3 round 8)
+
+**Destination-facing upsert keys must also be unique within each window.** The
+shared engine incrementally tracks keys across all streamed batches in the
+current window and rejects the first repeat before its batch is written. The
+error names the sync, key columns, half-open window, and the repeat's one-based
+destination-row ordinal, but never includes raw key values. The window remains
+uncheckpointed, so any earlier keyed batches are safe to replay.
+
+Tracking retains only a 16-byte BLAKE2b digest per row, plus Python set/object
+overhead; records and raw keys are not buffered. The canonical digest input is
+type-tagged for the admitted exact integer and string domains, and composite
+components retain their order. A digest collision fails closed as a duplicate.
+The set resets after every window.
+Operators whose window cardinality makes this memory cost too high must dedupe
+the model on `destination.upsert_key` or shrink `sync.backfill.window`.
+
+## Amendment 2026-11-22 (slice 3 round 9)
+
+**The engine key digest is only a within-window guard under a
+destination-exact equality contract.** It deliberately does not emulate SQL
+coercion, collation, or custom operator classes. Destination-facing key values
+must already use the target key's type, and the target equality relation must
+not equate two values that the type-tagged digest distinguishes.
+
+| Destination | Engine key values | Key-equality stance |
+|---|---|---|
+| PostgreSQL | Exact Python `int` (never `bool`) or `str` only. | Default deterministic, type-native equality is admitted. `citext`, nondeterministic ICU collations, and custom equality/operator classes are outside the v1 contract and must not be used for a backfill key. |
+| MySQL | Exact Python `int` only. | Integer keys only in v1 (`TINYINT` through `BIGINT`, signed or unsigned). Every string and other domain is refused. PAD SPACE and NO PAD collation behavior, fixed-width padding, and MySQL coercion remain outside the contract. Use an integer surrogate key if the model does not already have an integer key. The existing full-column PRIMARY/UNIQUE and NOT NULL proof still applies. |
+| Snowflake | Exact Python `int` (never `bool`) or `str` only. | Only uncollated, target-typed key columns are in contract. Snowflake collated columns or collated MERGE expressions are outside v1. |
+| BigQuery | Exact Python `int` (never `bool`) or `str` only. | Only the default binary string equality and target-typed scalar keys are in contract. A key with `COLLATE`, including `und:ci`, is outside v1. |
+| Databricks | Exact Python `int` (never `bool`) or `str` only. | Only uncollated/default `UTF8_BINARY`, target-typed keys are in contract. `UTF8_LCASE` and other non-binary collations are outside v1. |
+
+The shared engine enforces this value domain after payload transforms and before
+each batch write. It rejects `float` (including NaN, infinity, and signed zero),
+`Decimal`, `bool`, date/time, UUID, bytes, subclasses, and every other type.
+Datetime precision/timezone normalization, UUID textual form/case, and binary
+padding are not proved exact across all five destinations, so they are refused
+rather than representation-canonicalized. The error identifies the sync, key
+column, window, and type but never the value, and directs the operator to cast
+the key to an integer or string in model SQL or use an integer surrogate key.
+
+MySQL has a runtime schema preflight because string collation and padding rules,
+binary padding, and value coercion violate this contract. The other four stances are explicit v1
+schema contracts; adding metadata preflights for their opt-in/custom collation
+features is additive future hardening, not permission for those features now.
+
+**Strict DLQ capacity applies after deterministic-ID merge.** A boundary flush
+reads current IDs and checks capacity inside the backend's locked,
+transactional, or fresh-state write attempt. Incoming IDs already present are
+replacements and add zero depth. Only genuinely new current-window IDs count
+toward `dlq.max_records`; overflow still fails before mutation, never evicts,
+and leaves the checkpoint unchanged. This supersedes round 6's raw
+“existing depth plus all failures” wording.
+
+## Amendment 2026-11-22 (slice 3 round 10)
+
+**Every non-checkpointing window exit uses the same strict DLQ flush.** Row
+failure, interruption, extraction or validation exceptions, and contract
+violations all attempt a non-evicting flush before leaving the window. A flush
+failure is recorded alongside the original window failure rather than replacing
+it, and no checkpoint is written. Backfill cleanup is explicitly marked so
+`DlqObserver.on_sync_ended()` can never fall back to the ordinary FIFO-capped
+append; a full queue therefore remains byte-for-byte unchanged until the
+operator raises `dlq.max_records` or drains it with `drt retry`.
+
+## Amendment 2026-11-23 (slice 3 round 12)
+
+**Backfill key values use a narrow engine-enforced domain.** Float and decimal
+representations are not canonicalized: SQL equality collapses values such as
+`0.0`/`-0.0` and differently scaled equal decimals that the former digest kept
+distinct. All five admitted destinations now share the exact `int` (excluding
+`bool`) and `str` engine domain recorded in the key-equality inventory above;
+MySQL remains integer-only. Date/time, UUID, and bytes are also refused because
+their precision, normalization, textual form, or padding is not trivially exact
+across every destination. A violation fails before its batch write and leaves
+the window uncheckpointed.
+
+## Amendment 2026-11-23 (slice 3 round 13)
+
+**Backfill keys cannot contain run-varying or unproved derived columns.** Before
+extraction, the shared engine compares the destination-facing upsert key with
+the targets of `metadata_columns.synced_at`, `metadata_columns.run_id`, and any
+future `metadata_columns.sync_run_id`. An overlap is refused because a retry
+injects a new value and would turn the same logical row into a new destination
+key. Computed-field outputs are also refused as key components: templates can
+read only the source row, but drt cannot statically prove that an arbitrary
+template remains stable across extraction retries. Computed field names are
+resolved through the one-pass `field_mappings` rename before comparison.
+
+**Backfill DLQ IDs use stable identity, not the delivered payload.** For keyed
+rows the hash input is only the sync name, canonical window low boundary, and
+validated, destination-facing, type-tagged upsert key. A keyless capability
+uses the destination-shaped record captured before engine metadata injection.
+The DLQ continues to persist the final delivered payload, but changing `run_id`
+or `synced_at` on retry now replaces the prior ID across local, object-store,
+and warehouse strict-append implementations instead of consuming capacity.
+
+This changes deterministic IDs produced by earlier commits on this unreleased
+slice only. Mainline accepts backfill configuration but keeps execution
+disabled, so no released queue can contain these IDs and no compatibility shim
+is required.
+
+## Amendment 2026-11-23 (slice 3 round 14)
+
+**Backfill DLQ identity excludes the run ceiling.** An open-ended backfill
+snapshots its ceiling per run, so retrying an uncheckpointed final partial
+window can keep the same canonical low boundary while receiving a later high
+boundary. The deterministic ID therefore hashes the sync name, the canonical
+low boundary under the exclusive-checkpoint contract, and either the validated
+type-tagged destination upsert key or the pre-metadata record fallback. It does
+not hash the high boundary.
+
+Persisting a pending ceiling is unnecessary: windows execute sequentially,
+destination keys are unique within a window, and a later completed window has a
+different durable low boundary. Thus low plus row identity distinguishes a key
+that legitimately reappears after its cursor moves into another window while
+remaining stable across a retry whose open-ended ceiling changes. Fixed-range
+retry behavior is unchanged. As with round 13, this replaces only deterministic
+IDs from unreleased slice-3 commits and requires no migration.

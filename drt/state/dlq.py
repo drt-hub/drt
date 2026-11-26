@@ -21,14 +21,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import threading
 import uuid
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
+from drt.state._atomic import _fsync_parent_directory
 from drt.state._filelock import advisory_lock
 
 
@@ -78,6 +81,36 @@ class DeadLetter:
     # data — a reminder to route JSONL reads through the decoders, not this
     # constructor default.
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+
+def backfill_dead_letter_id(
+    sync_name: str,
+    canonical_low: str | int,
+    stable_identity: Mapping[str, Any],
+) -> str:
+    """Return the stable identity of one failed row in one backfill window.
+
+    A window may be delivered and DLQ-flushed before its checkpoint write
+    fails.  Retrying that uncheckpointed window must update the existing dead
+    letter, not append a second retryable copy of the same row. The identity is
+    deliberately separate from the persisted post-transform record: injected
+    run metadata changes on retry and must not create a new queue entry. The
+    canonical low bound is retry-stable; an open-ended run's high bound is not.
+    """
+    payload = json.dumps(
+        {
+            "sync_name": sync_name,
+            "window_low": {
+                "value": canonical_low,
+                "checkpoint_boundary": "exclusive",
+            },
+            "identity": stable_identity,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _decode_dead_letter_line_with_origin(raw_line: str) -> tuple[DeadLetter, bool]:
@@ -224,6 +257,70 @@ class DlqBackend(Protocol):
         ...
 
 
+class DlqCapacityExceeded(RuntimeError):
+    """A strict window append would evict an unreplayed dead letter."""
+
+
+class _StrictDlqBackend(Protocol):
+    def _append_strict(
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int: ...
+
+
+def prepare_strict_dlq_append(
+    sync_name: str,
+    existing_ids: Collection[str],
+    existing_depth: int,
+    entries: list[DeadLetter],
+    *,
+    max_records: int,
+    incoming_ids: Collection[str] | None = None,
+) -> list[DeadLetter]:
+    """Deduplicate one strict append and reject only prospective new IDs.
+
+    The caller must invoke this after its fresh read and inside the same
+    lock/transaction/retry attempt as the write. Replacing a deterministic
+    backfill dead-letter ID consumes no additional capacity.
+    """
+    deduped = {entry.id: entry for entry in entries}
+    candidate_ids = set(deduped) if incoming_ids is None else set(incoming_ids)
+    additions = candidate_ids.difference(existing_ids)
+    prospective_depth = existing_depth + len(additions)
+    if max_records > 0 and prospective_depth > max_records:
+        raise DlqCapacityExceeded(
+            f"DLQ capacity for '{sync_name}' would exceed dlq.max_records "
+            f"({existing_depth} existing + {len(additions)} new current-window IDs "
+            f"> {max_records}); raise dlq.max_records or drain the queue via "
+            f"`drt retry {sync_name}`"
+        )
+    return list(deduped.values())
+
+
+def append_strict_non_evicting(
+    store: DlqBackend,
+    sync_name: str,
+    entries: list[DeadLetter],
+    *,
+    max_records: int,
+    current_window_ids: Collection[str] | None = None,
+) -> int:
+    """Durably ID-merge one window, failing instead of evicting old entries."""
+    strict_append = getattr(store, "_append_strict", None)
+    if not callable(strict_append):
+        raise RuntimeError(f"{type(store).__name__} does not support durable DLQ append")
+    return cast(_StrictDlqBackend, store)._append_strict(
+        sync_name,
+        entries,
+        max_records=max_records,
+        incoming_ids=current_window_ids,
+    )
+
+
 class LocalDlqStore:
     """Append / read / replace dead-letter entries under ``.drt/dlq/``.
 
@@ -256,6 +353,41 @@ class LocalDlqStore:
 
     # -- writes -------------------------------------------------------------
 
+    def _merge_lines(self, path: Path, entries: list[DeadLetter], max_records: int) -> list[str]:
+        # Persist unique ids (#1147) before the FIFO cap can evict an
+        # earlier twin; otherwise the survivor is renumbered on the next
+        # read and a concurrent retry's confirmed id hits it.
+        lines = materialize_dead_letter_lines(self._read_raw(path))
+        pending = {entry.id: entry for entry in entries}
+        merged: list[str] = []
+        for line in lines:
+            try:
+                existing_id = json.loads(line).get("id")
+            except (json.JSONDecodeError, AttributeError):
+                existing_id = None
+            replacement = pending.pop(existing_id, None)
+            merged.append(json.dumps(asdict(replacement)) if replacement is not None else line)
+        merged.extend(json.dumps(asdict(entry)) for entry in pending.values())
+        if max_records > 0 and len(merged) > max_records:
+            return merged[-max_records:]
+        return merged
+
+    @staticmethod
+    def _write_lines_strict(path: Path, lines: list[str]) -> None:
+        """Durably replace one queue using a same-directory temporary file."""
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write("\n".join(lines) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            _fsync_parent_directory(path)
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
     def append(
         self,
         sync_name: str,
@@ -275,14 +407,44 @@ class LocalDlqStore:
         with advisory_lock(path):
             with self._lock:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                # Persist unique ids (#1147) before the FIFO cap can evict an
-                # earlier twin; otherwise the survivor is renumbered on the
-                # next read and a concurrent retry's confirmed id hits it.
-                lines = materialize_dead_letter_lines(self._read_raw(path))
-                lines.extend(json.dumps(asdict(e)) for e in entries)
-                if max_records > 0 and len(lines) > max_records:
-                    lines = lines[-max_records:]
+                lines = self._merge_lines(path, entries, max_records)
                 path.write_text("\n".join(lines) + "\n")
+                return len(lines)
+
+    def _append_strict(
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int:
+        """Durably append or raise before a backfill window checkpoint."""
+        if not entries:
+            return self.depth(sync_name)
+        path = self._path(sync_name)
+        with advisory_lock(path):
+            with self._lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                existing_lines = materialize_dead_letter_lines(self._read_raw(path))
+                existing_ids: set[str] = set()
+                for line in existing_lines:
+                    try:
+                        existing_id = json.loads(line).get("id")
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+                    if isinstance(existing_id, str):
+                        existing_ids.add(existing_id)
+                strict_entries = prepare_strict_dlq_append(
+                    sync_name,
+                    existing_ids,
+                    len(existing_lines),
+                    entries,
+                    max_records=max_records,
+                    incoming_ids=incoming_ids,
+                )
+                lines = self._merge_lines(path, strict_entries, 0)
+                self._write_lines_strict(path, lines)
                 return len(lines)
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:

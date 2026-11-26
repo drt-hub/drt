@@ -78,7 +78,7 @@ def _prepare(
                     appended_rows.append((column, "text", "YES", None, "NO"))
     if isinstance(destination, MySQLDestination) and rows:
         key_rows = [
-            ("PRIMARY", column, position, None)
+            ("PRIMARY", column, position, None, "NO")
             for position, column in enumerate(config.upsert_key, start=1)
         ]
         cursor.fetchall.side_effect = [rows, key_rows]
@@ -95,7 +95,7 @@ def _prepare(
                 described.append((column, "text", "NO", None, "NO"))
         if isinstance(destination, MySQLDestination):
             key_rows = [
-                ("PRIMARY", column, position, None)
+                ("PRIMARY", column, position, None, "NO")
                 for position, column in enumerate(config.upsert_key, start=1)
             ]
             cursor.fetchall.side_effect = [[], described, key_rows]
@@ -825,7 +825,7 @@ def test_mysql_prefix_unique_index_is_not_a_valid_upsert_key() -> None:
     connection, cursor = _connection([])
     cursor.fetchall.side_effect = [
         [("email", "varchar(255)", "NO", None, "")],
-        [("uq_email", "email", 1, 10)],
+        [("uq_email", "email", 1, 10, "NO")],
     ]
     destination = MySQLDestination()
     with (
@@ -839,6 +839,51 @@ def test_mysql_prefix_unique_index_is_not_a_valid_upsert_key() -> None:
             dry_run=False,
         )
     assert "sub_part" in cursor.execute.call_args_list[1].args[0]
+
+
+@pytest.mark.parametrize(
+    ("upsert_key", "columns", "index_rows", "records"),
+    [
+        (
+            ["email"],
+            [("email", "varchar(255)", "YES", None, "")],
+            [("uq_email", "email", 1, None, "YES")],
+            [{"email": "a@example.test"}],
+        ),
+        (
+            ["tenant_id", "email"],
+            [
+                ("tenant_id", "bigint", "NO", None, ""),
+                ("email", "varchar(255)", "YES", None, ""),
+            ],
+            [
+                ("uq_tenant_email", "tenant_id", 1, None, "NO"),
+                ("uq_tenant_email", "email", 2, None, "YES"),
+            ],
+            [{"tenant_id": 1, "email": "a@example.test"}],
+        ),
+    ],
+    ids=["single", "composite"],
+)
+def test_mysql_nullable_unique_upsert_key_is_not_replay_safe(
+    upsert_key: list[str],
+    columns: list[tuple[Any, ...]],
+    index_rows: list[tuple[Any, ...]],
+    records: list[dict[str, Any]],
+) -> None:
+    connection, cursor = _connection([])
+    cursor.fetchall.side_effect = [columns, index_rows]
+    destination = MySQLDestination()
+    with (
+        patch.object(destination, "_dialect_connect", return_value=connection),
+        pytest.raises(ValueError, match="nullable UNIQUE keys"),
+    ):
+        destination.prepare_table(
+            records,
+            _mysql_config(manage_table=False, upsert_key=upsert_key),
+            SyncOptions(),
+            dry_run=False,
+        )
 
 
 def test_mysql_rejects_case_insensitive_source_column_collision_before_connect() -> None:
@@ -861,7 +906,7 @@ def test_mysql_duplicate_column_race_reintrospects_and_continues() -> None:
     columns = [("id", "bigint", "NO", None, "")]
     cursor.fetchall.side_effect = [
         columns,
-        [("PRIMARY", "id", 1, None)],
+        [("PRIMARY", "id", 1, None, "NO")],
         columns + [("email", "text", "YES", None, "")],
     ]
     cursor.execute.side_effect = [
@@ -898,7 +943,7 @@ def test_concurrent_add_column_revalidates_the_winning_type(destination_type: st
         config = _mysql_config(manage_table=False, on_schema_change="append_new_columns")
         cursor.fetchall.side_effect = [
             columns,
-            [("PRIMARY", "id", 1, None)],
+            [("PRIMARY", "id", 1, None, "NO")],
             winning_columns,
         ]
         cursor.execute.side_effect = [

@@ -127,3 +127,7 @@ Guide the user through initializing a new drt project.
 - `drt docs generate` (v0.7.11+) renders a static HTML catalog of your project — every sync, its model, destination, and a lineage DAG — to `target/docs/`. Labels are docs-safe by default (endpoints/emails/phones stripped, #696); add `--format mermaid` or `--format json` for other outputs. Since v1.3.1 each sync page also shows recent run history, `drt plan` coverage and whether its column contract is hand-written or dbt-derived; large projects get an owner/maturity/tag filter.
 - For non-US BigQuery datasets, set `location` in `profiles.yml` (e.g. `"EU"`, `"asia-northeast1"`).
 - Want to try drt without installing locally? Open the repo in GitHub Codespaces — the devcontainer ships drt + a seeded DuckDB warehouse + the `duckdb_to_rest` template pre-scaffolded.
+
+## Windowed backfill rollout
+
+`sync.backfill: {window, start, end?}` executes only through `drt run` and MCP `drt_run_sync` in ADR 0021 slice 3. Dry-run/diff, `--limit`, `--cursor-value`, `--full-refresh`, build, serve, library calls, Airflow/Prefect/Dagster, test, plan/apply, exact replay, and retry are unsupported and must be reported as refusals, not workarounds. Use `drt state reset`, never hand-edit checkpoint files; same-sync concurrent runs and downgrading against backfill-written state are unsupported.

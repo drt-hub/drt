@@ -36,7 +36,7 @@ from drt.state._history_columns import (
     encode_optional,
     resolve_optional_columns,
 )
-from drt.state.dlq import DeadLetter
+from drt.state.dlq import DeadLetter, prepare_strict_dlq_append
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
 
@@ -60,6 +60,7 @@ _RUNS_SCHEMA = (
     ("status", "STRING", "REQUIRED"),
     ("error", "STRING", "NULLABLE"),
     ("last_cursor_value", "STRING", "NULLABLE"),
+    ("cursor_boundary", "STRING", "NULLABLE"),
 )
 _HISTORY_SCHEMA = (
     ("sync_name", "STRING", "REQUIRED"),
@@ -159,6 +160,21 @@ def _ensure_table_exists(
             raise
 
 
+def _is_undefined_cursor_boundary(exc: Exception) -> bool:
+    """BigQuery invalidQuery/400 specifically for the additive marker column."""
+    if getattr(exc, "code", None) != 400:
+        return False
+    errors = getattr(exc, "errors", None)
+    if not isinstance(errors, list) or not any(
+        isinstance(item, dict) and item.get("reason") == "invalidQuery" for item in errors
+    ):
+        return False
+    message = str(exc).lower()
+    return "cursor_boundary" in message and (
+        "unrecognized name" in message or "name cursor_boundary not found" in message
+    )
+
+
 class BigQueryWarehouseStateStore:
     """``StateStore`` backed by a ``_drt_runs`` row per sync (#1107)."""
 
@@ -172,15 +188,28 @@ class BigQueryWarehouseStateStore:
         if not _table_exists(self._profile, _RUNS_TABLE):
             return None
         client = _connect(self._profile)
-        rows = list(
-            _query(
-                client,
-                "SELECT last_run_at, records_synced, status, error, last_cursor_value "
-                f"FROM {_qualified(self._profile, _RUNS_TABLE)} "
-                "WHERE sync_name = @sync_name LIMIT 1",
-                [_scalar("sync_name", "STRING", sync_name)],
+        try:
+            rows = list(
+                _query(
+                    client,
+                    "SELECT last_run_at, records_synced, status, error, last_cursor_value, "
+                    f"cursor_boundary FROM {_qualified(self._profile, _RUNS_TABLE)} "
+                    "WHERE sync_name = @sync_name LIMIT 1",
+                    [_scalar("sync_name", "STRING", sync_name)],
+                )
             )
-        )
+        except Exception as exc:
+            if not _is_undefined_cursor_boundary(exc):
+                raise
+            rows = list(
+                _query(
+                    client,
+                    "SELECT last_run_at, records_synced, status, error, last_cursor_value "
+                    f"FROM {_qualified(self._profile, _RUNS_TABLE)} "
+                    "WHERE sync_name = @sync_name LIMIT 1",
+                    [_scalar("sync_name", "STRING", sync_name)],
+                )
+            )
         if not rows:
             return None
         return _row_to_sync_state(sync_name, rows[0])
@@ -189,17 +218,32 @@ class BigQueryWarehouseStateStore:
         if not _table_exists(self._profile, _RUNS_TABLE):
             return {}
         client = _connect(self._profile)
-        rows = _query(
-            client,
-            "SELECT sync_name, last_run_at, records_synced, status, error, "
-            f"last_cursor_value FROM {_qualified(self._profile, _RUNS_TABLE)}",
-        )
+        try:
+            rows = _query(
+                client,
+                "SELECT sync_name, last_run_at, records_synced, status, error, "
+                f"last_cursor_value, cursor_boundary FROM "
+                f"{_qualified(self._profile, _RUNS_TABLE)}",
+            )
+        except Exception as exc:
+            if not _is_undefined_cursor_boundary(exc):
+                raise
+            rows = _query(
+                client,
+                "SELECT sync_name, last_run_at, records_synced, status, error, "
+                f"last_cursor_value FROM {_qualified(self._profile, _RUNS_TABLE)}",
+            )
         return {row[0]: _row_to_sync_state(row[0], row[1:]) for row in rows}
 
     def save_sync(self, state: SyncState) -> None:
         client = _connect(self._profile)
         self._ensure_table(client)
         table = _qualified(self._profile, _RUNS_TABLE)
+        if state.cursor_boundary is not None:
+            _query(
+                client,
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS cursor_boundary STRING",
+            )
         probe = list(
             _query(
                 client,
@@ -215,20 +259,29 @@ class BigQueryWarehouseStateStore:
             _scalar("error", "STRING", state.error),
             _scalar("last_cursor_value", "STRING", state.last_cursor_value),
         ]
+        if state.cursor_boundary is not None:
+            parameters.append(_scalar("cursor_boundary", "STRING", state.cursor_boundary))
+        boundary_update = (
+            ", cursor_boundary = @cursor_boundary" if state.cursor_boundary is not None else ""
+        )
+        boundary_column = ", cursor_boundary" if state.cursor_boundary is not None else ""
+        boundary_value = ", @cursor_boundary" if state.cursor_boundary is not None else ""
         if probe:
             _query(
                 client,
                 f"UPDATE {table} SET last_run_at = @last_run_at, "
                 "records_synced = @records_synced, status = @status, error = @error, "
-                "last_cursor_value = @last_cursor_value WHERE sync_name = @sync_name",
+                f"last_cursor_value = @last_cursor_value{boundary_update} "
+                "WHERE sync_name = @sync_name",
                 parameters,
             )
         else:
             _query(
                 client,
                 f"INSERT INTO {table} (sync_name, last_run_at, records_synced, status, "
-                "error, last_cursor_value) VALUES (@sync_name, @last_run_at, "
-                "@records_synced, @status, @error, @last_cursor_value)",
+                f"error, last_cursor_value{boundary_column}) VALUES "
+                "(@sync_name, @last_run_at, @records_synced, @status, @error, "
+                f"@last_cursor_value{boundary_value})",
                 parameters,
             )
 
@@ -255,7 +308,7 @@ class BigQueryWarehouseStateStore:
 
 
 def _row_to_sync_state(sync_name: str, row: Sequence[Any]) -> SyncState:
-    last_run_at, records_synced, status, error, last_cursor_value = row
+    last_run_at, records_synced, status, error, last_cursor_value, *optional = row
     return SyncState(
         sync_name=sync_name,
         last_run_at=last_run_at,
@@ -263,6 +316,7 @@ def _row_to_sync_state(sync_name: str, row: Sequence[Any]) -> SyncState:
         status=status,
         error=error,
         last_cursor_value=last_cursor_value,
+        cursor_boundary=optional[0] if optional else None,
     )
 
 
@@ -624,6 +678,35 @@ class BigQueryWarehouseDlqBackend:
                 ],
             )
         return self.depth(sync_name)
+
+    def _append_strict(
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int:
+        """Check a fresh ID snapshot and upsert without capacity eviction."""
+        client = _connect(self._profile)
+        self._ensure_table(client)
+        table = _qualified(self._profile, _DLQ_TABLE)
+        rows = _query(
+            client,
+            f"SELECT id FROM {table} WHERE sync_name = @sync_name",
+            [_scalar("sync_name", "STRING", sync_name)],
+        )
+        existing_ids = [str(row[0]) for row in rows]
+        strict_entries = prepare_strict_dlq_append(
+            sync_name,
+            set(existing_ids),
+            len(existing_ids),
+            entries,
+            max_records=max_records,
+            incoming_ids=incoming_ids,
+        )
+        _upsert_dlq_entries(client, table, sync_name, strict_entries)
+        return len(set(existing_ids).union(entry.id for entry in strict_entries))
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:
         client = _connect(self._profile)

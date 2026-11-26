@@ -175,6 +175,17 @@ def _build_merge_sql(
 class SnowflakeDestination(BaseSqlDestination):
     """Write records into Snowflake tables."""
 
+    @classmethod
+    def backfill_unsupported_reason(cls, config: DestinationConfig) -> str | None:
+        """Only keyed MERGE is replay-safe; INSERT is append-only."""
+        if not isinstance(config, SnowflakeDestinationConfig):
+            return "the destination config is not a Snowflake config"
+        if config.mode != "merge":
+            return "destination.mode must be 'merge'; 'insert' is append-only"
+        if not config.upsert_key:
+            return "destination.upsert_key must contain at least one column"
+        return None
+
     identifiers_case_insensitive = True
 
     def __init__(self) -> None:

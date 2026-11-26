@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from drt.state.manager import StateManager, SyncState
 from tests.conftest import public_methods
@@ -58,6 +59,53 @@ def test_creates_drt_dir_on_demand(tmp_path: Path) -> None:
 
     mgr.save_sync(SyncState("s", "2024-01-01T00:00:00+00:00", 0, "success"))
     assert (tmp_path / ".drt" / "state.json").exists()
+
+
+def test_local_state_save_replaces_an_fsynced_temp_file(tmp_path: Path) -> None:
+    from drt.state import _atomic
+
+    with (
+        patch("drt.state._atomic.os.fsync", wraps=_atomic.os.fsync) as fsync,
+        patch("drt.state._atomic.os.replace", wraps=_atomic.os.replace) as replace,
+    ):
+        StateManager(tmp_path).save_sync(SyncState("s", "now", 1, "success"))
+    assert replace.call_count == 1
+    assert fsync.call_count >= 1
+
+
+def test_local_state_save_ignores_unsupported_directory_fsync(tmp_path: Path) -> None:
+    from drt.state import _atomic
+
+    real_fsync = _atomic.os.fsync
+    calls = 0
+
+    def fail_directory_fsync(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError("directory fsync is unsupported")
+        real_fsync(fd)
+
+    with patch("drt.state._atomic.os.fsync", side_effect=fail_directory_fsync):
+        StateManager(tmp_path).save_sync(SyncState("s", "now", 1, "success"))
+
+    assert StateManager(tmp_path).get_last_sync("s") is not None
+
+
+def test_local_state_save_ignores_unsupported_directory_open(tmp_path: Path) -> None:
+    from drt.state import _atomic
+
+    real_open = _atomic.os.open
+
+    def fail_directory_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if Path(path) == tmp_path / ".drt" and flags == _atomic.os.O_RDONLY:
+            raise PermissionError("directory open is unsupported")
+        return real_open(path, flags, *args, **kwargs)
+
+    with patch("drt.state._atomic.os.open", side_effect=fail_directory_open):
+        StateManager(tmp_path).save_sync(SyncState("s", "now", 1, "success"))
+
+    assert StateManager(tmp_path).get_last_sync("s") is not None
 
 
 class TestReset:

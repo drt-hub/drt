@@ -90,20 +90,25 @@ def state_reset(
 
     result: dict[str, Any] = {"sync_name": sync_name, "reset": levels}
 
-    if watermark:
+    if watermark or runs:
         from drt.cli._helpers import get_watermark_storage
-
-        for s in ctx.load_syncs():
-            if s.name != sync_name:
-                continue
-            storage = get_watermark_storage(s, ctx.project_dir)
-            if storage is not None:
-                storage.delete(sync_name)
-
-    if runs:
         from drt.state.factory import build_state_bundle
+        from drt.state.reset import reset_watermark_and_runs
 
-        build_state_bundle(ctx.load_project_for_state(), ctx.project_dir).state.reset(sync_name)
+        storages = []
+        if watermark:
+            for sync in ctx.load_syncs():
+                if sync.name == sync_name:
+                    storage = get_watermark_storage(sync, ctx.project_dir)
+                    if storage is not None:
+                        storages.append(storage)
+        reset_watermark_and_runs(
+            build_state_bundle(ctx.load_project_for_state(), ctx.project_dir).state,
+            sync_name,
+            watermark_storages=storages,
+            watermark=watermark,
+            runs=runs,
+        )
 
     if tracked_mirror:
         from drt.cli._helpers import get_destination

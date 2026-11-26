@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import chain, islice
 from pathlib import Path
 from typing import Any, Literal
@@ -22,21 +22,35 @@ from drt.config.duration import parse_duration
 from drt.config.models import LookupConfig, SyncConfig
 from drt.config.profiles import ProfileConfigLike
 from drt.config.query_tags import build_query_tags, new_run_id, render_comment_header
-from drt.config.sync_options import ensure_backfill_executable
 from drt.destinations.base import (
     Destination,
     ManagedDestinationTableCapable,
     MatchPolicyCapable,
     ModeCapable,
+    PendingFlushCapable,
     StagedDestination,
     SyncResult,
+    ensure_windowed_backfill_destination,
 )
 from drt.destinations.lookup import (
     apply_lookups,
     build_lookup_map,
     detect_ambiguous_lookup_ordering,
 )
-from drt.engine.backfill import stringify_cursor_value as _stringify_cursor_value
+from drt.engine.backfill import (
+    BackfillBound,
+    BackfillWindow,
+    apply_lag_then_clamp,
+    canonical_window_upsert_key,
+    canonicalize_bound,
+    plan_windows,
+    validate_window_row,
+    validate_window_upsert_keys,
+)
+from drt.engine.backfill import (
+    stringify_cursor_value as _stringify_cursor_value,
+)
+from drt.engine.backfill_extraction import snapshot_numeric_ceiling
 from drt.engine.computed_fields import apply_computed_fields
 from drt.engine.contract import (
     check_contract,
@@ -46,19 +60,30 @@ from drt.engine.contract import (
 )
 from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
+from drt.engine.key_safety import backfill_key_safety_error
 from drt.engine.masking import apply_mask
 from drt.engine.metadata_columns import apply_metadata_columns
-from drt.engine.observer import NullObserver, SyncObserver
-from drt.engine.resolver import resolve_model_ref
+from drt.engine.observer import (
+    NullObserver,
+    SyncObserver,
+    WindowCheckpointObserver,
+    is_window_checkpoint_capable,
+)
+from drt.engine.resolver import (
+    is_sql_source_profile,
+    resolve_model_ref,
+    resolve_windowed_model_ref,
+)
 from drt.observability import build_status, get_tracer
 from drt.sources.base import (
     IncrementalSource,
     SnapshotDiffSource,
     Source,
     SourceColumnMetadata,
+    is_window_capable,
 )
 from drt.state.audit_trail import AuditEntry, ComplianceAuditTrail, json_safe_audit_value
-from drt.state.dlq import DeadLetter
+from drt.state.dlq import DeadLetter, backfill_dead_letter_id
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.idempotency import (
     IdempotencyLedger,
@@ -206,6 +231,52 @@ def _build_audit_entries(
     return entries
 
 
+def _dead_letter_for_record(
+    *,
+    sync_name: str,
+    record: dict[str, Any],
+    error_message: str,
+    http_status: int | None,
+    timestamp: str,
+    sync_run_id: str | None,
+    window_bounds: BackfillWindow | None,
+    validated_upsert_key: list[str] | None = None,
+    pre_metadata_record: dict[str, Any] | None = None,
+) -> DeadLetter:
+    """Build a stable backfill entry while preserving legacy random ids."""
+    if window_bounds is None:
+        return DeadLetter(
+            record=record,
+            error_message=error_message,
+            http_status=http_status,
+            timestamp=timestamp,
+            sync_run_id=sync_run_id,
+        )
+    stable_identity: dict[str, Any]
+    if validated_upsert_key:
+        stable_identity = {
+            "destination_upsert_key": canonical_window_upsert_key(record, validated_upsert_key)
+        }
+    else:
+        stable_identity = {
+            "pre_metadata_record": pre_metadata_record
+            if pre_metadata_record is not None
+            else record
+        }
+    return DeadLetter(
+        record=record,
+        error_message=error_message,
+        http_status=http_status,
+        timestamp=timestamp,
+        sync_run_id=sync_run_id,
+        id=backfill_dead_letter_id(
+            sync_name,
+            window_bounds[0],
+            stable_identity,
+        ),
+    )
+
+
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
     """Yield successive batches of `size` from an iterator."""
     chunk: list[Any] = []
@@ -339,6 +410,9 @@ def run_sync(
     plan_id: str | None = None,
     approved_by: str | None = None,
     exact: bool | None = None,
+    full_refresh: bool = False,
+    *,
+    allow_backfill_execution: bool = False,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -409,14 +483,78 @@ def run_sync(
             ``force_guards`` so a larger late change still refuses.
         exact: ``True`` only for an exact-replay apply; copied to history as
             additive lineage metadata. Ordinary runs leave it unset.
+        allow_backfill_execution: Explicit caller opt-in for slice-3 windowed
+            execution. Only ``drt run`` and MCP ``drt_run_sync`` set this;
+            every library/orchestrator/preview caller fails closed by default.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
         ``sync_run_id`` stamped on it.
     """
-    ensure_backfill_executable(sync.sync)
     if observer is None:
         observer = NullObserver()
+    backfill = sync.sync.backfill
+    if backfill is not None:
+        if not allow_backfill_execution:
+            raise ValueError(
+                "sync.backfill execution is disabled for this entry point in ADR 0021 "
+                "slice 3; use `drt run` or MCP `drt_run_sync`."
+            )
+        if dry_run:
+            raise ValueError(
+                "Dry-run execution does not support sync.backfill in ADR 0021 slice 3; "
+                "window previews arrive in slice 4."
+            )
+        if extract_limit is not None:
+            raise ValueError(
+                "--limit is not allowed with sync.backfill because a sampled window "
+                "cannot be checkpointed as complete."
+            )
+        if cursor_value_override is not None:
+            raise ValueError(
+                "--cursor-value is not allowed with sync.backfill; CLI range overrides "
+                "arrive in ADR 0021 slice 4."
+            )
+        if full_refresh:
+            raise ValueError("--full-refresh is not allowed with sync.backfill.")
+        if exact:
+            raise ValueError("Exact replay does not support sync.backfill yet (ADR 0021 slice 6).")
+        if compute_diff or sync.sync._planning:
+            raise ValueError(
+                "drt plan/apply does not support sync.backfill yet (ADR 0021 slices 5-6)."
+            )
+        key_safety_error = backfill_key_safety_error(sync)
+        if key_safety_error is not None:
+            raise ValueError(key_safety_error)
+        if not is_window_checkpoint_capable(observer):
+            raise RuntimeError(
+                "sync.backfill requires one designated checkpoint-capable observer; "
+                "compose StatePersistingObserver with CompositeObserver before extraction."
+            )
+        ensure_windowed_backfill_destination(destination, sync.destination)
+        validate_backfill_target = getattr(destination, "validate_backfill_target", None)
+        if callable(validate_backfill_target):
+            validate_backfill_target(sync.destination)
+    else:
+        previous_boundary: str | None = None
+        if state_manager is not None:
+            previous_state = state_manager.get_last_sync(sync.name)
+            previous_boundary = (
+                previous_state.cursor_boundary if previous_state is not None else None
+            )
+        elif is_window_checkpoint_capable(observer):
+            # Some callers deliberately give the engine no direct StateStore and
+            # route both reads and writes through StatePersistingObserver.  The
+            # downgrade guard must consult that same capability or removing the
+            # backfill block would silently reinterpret an exclusive checkpoint.
+            assert isinstance(observer, WindowCheckpointObserver)
+            _, previous_boundary = observer.read_window_checkpoint(sync.name)
+        if previous_boundary == "exclusive":
+            raise ValueError(
+                "This sync has an exclusive window checkpoint but sync.backfill was removed. "
+                "Refusing to reinterpret it with legacy cursor '>' semantics. Restore the "
+                "sync.backfill block, or run `drt state reset <sync>` and deliberately restart."
+            )
     sync_run_id = new_correlation_id()
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
@@ -447,6 +585,23 @@ def run_sync(
     tracer = get_tracer()
 
     observer.on_sync_started(sync.name, started_at)
+    if backfill is not None:
+        begin_backfill = getattr(observer, "begin_backfill", None)
+        if callable(begin_backfill):
+            begin_backfill(sync.name)
+
+    if (
+        backfill is not None
+        and idempotency_ledger is not None
+        and sync.sync.watermark is not None
+        and isinstance(sync.sync.watermark.lag, str)
+        and parse_duration(sync.sync.watermark.lag, field_name="watermark.lag") > timedelta(days=7)
+    ):
+        observer.on_warning(
+            sync.name,
+            "sync.backfill watermark.lag exceeds the 7-day idempotency-ledger "
+            "retention window; overlap rows may be delivered again after ledger pruning.",
+        )
 
     try:
         # Top-level span for the whole sync. ``get_tracer()`` returns a no-op
@@ -471,7 +626,8 @@ def run_sync(
             if run_id is not None:
                 run_span.set_attribute("run.id", run_id)
             try:
-                result = _run_sync_body(
+                body = _run_backfill_body if backfill is not None else _run_sync_body
+                result = body(
                     sync=sync,
                     source=source,
                     destination=destination,
@@ -521,7 +677,9 @@ def run_sync(
                     raised._drt_guards = forced_guards_outcome  # type: ignore[attr-defined]
                 except Exception:  # noqa: BLE001 — metadata must not mask failure
                     pass
-        if not dry_run and (raised is not None or total_result.failed > 0):
+        if not dry_run and (
+            raised is not None or total_result.failed > 0 or total_result.interrupted
+        ):
             try:
                 from drt.alerts import build_context, dispatch_alerts
 
@@ -545,6 +703,8 @@ def run_sync(
             try:
                 if raised is not None:
                     status = "failed"
+                elif total_result.interrupted:
+                    status = "partial"
                 elif total_result.failed == 0:
                     status = "success"
                 elif total_result.success > 0:
@@ -659,7 +819,81 @@ def run_sync(
                 observer.on_warning(sync.name, f"on_sync_ended outer failure: {exc}")
 
 
-def _run_sync_body(
+def _coerce_checkpoint(value: str, start: BackfillBound) -> BackfillBound:
+    """Parse a persisted string using the configured backfill arithmetic family."""
+    if isinstance(start, int):
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"Stored sync.backfill checkpoint {value!r} is not an integer."
+            ) from exc
+        return canonicalize_bound(parsed, field_name="sync.backfill checkpoint")
+    return canonicalize_bound(value, field_name="sync.backfill checkpoint")
+
+
+def _accumulate_result(total: SyncResult, window: SyncResult) -> None:
+    total.rows_extracted += window.rows_extracted
+    total.success += window.success
+    total.failed += window.failed
+    total.skipped += window.skipped
+    total.skipped_no_match += window.skipped_no_match
+    total.skipped_duplicate += window.skipped_duplicate
+    total.kept_values += window.kept_values
+    total.errors.extend(window.errors)
+    total.row_errors.extend(window.row_errors)
+    total.ddl.extend(window.ddl)
+    total.interrupted = total.interrupted or window.interrupted
+
+
+def _window_event(observer: SyncObserver, name: str, *args: object) -> None:
+    """Emit an optional fire-and-forget window event without capability fan-out."""
+    method = getattr(observer, name, None)
+    if not callable(method):
+        return
+    try:
+        method(*args)
+    except Exception as exc:  # noqa: BLE001 - fire-and-forget event contract
+        observer.on_warning("windowed-backfill", f"Observer {name} raised: {exc}")
+
+
+def _flush_uncheckpointed_window(
+    observer: SyncObserver,
+    sync_name: str,
+    result: SyncResult,
+    *,
+    original_error: BaseException | None,
+) -> None:
+    """Strictly flush failed-window DLQ data without replacing its failure."""
+    boundary_flusher = getattr(observer, "flush_window", None)
+    if not callable(boundary_flusher):
+        return
+    try:
+        boundary_flusher(sync_name)
+    except BaseException as exc:
+        message = (
+            f"Uncheckpointed backfill window DLQ flush failed for '{sync_name}'; "
+            f"the checkpoint was not written: {exc}"
+        )
+        result.errors.append(message)
+        try:
+            observer.on_warning(sync_name, message)
+        except BaseException:
+            pass
+        if original_error is not None:
+            try:
+                # BaseException.add_note() only exists on Python 3.11+; it just
+                # appends to __notes__, which is a plain attribute everywhere.
+                notes = getattr(original_error, "__notes__", None)
+                if isinstance(notes, list):
+                    notes.append(message)
+                else:
+                    setattr(original_error, "__notes__", [message])
+            except Exception:  # noqa: BLE001 — failure metadata is best-effort
+                pass
+
+
+def _run_backfill_body(
     *,
     sync: SyncConfig,
     source: Source,
@@ -686,6 +920,243 @@ def _run_sync_body(
     audit_fields: list[str] | None = None,
     exact: bool = False,
 ) -> SyncResult:
+    """Plan and execute ADR 0021 windows sequentially around the existing body."""
+    del cursor_value_override, compute_diff, extract_limit, exact
+    config = sync.sync.backfill
+    assert config is not None
+    cursor_field = sync.sync.cursor_field
+    assert cursor_field is not None
+
+    checkpoint_reader = getattr(observer, "read_window_checkpoint", None)
+    if not callable(checkpoint_reader):
+        raise RuntimeError(
+            "sync.backfill requires its designated checkpoint observer to read resume state."
+        )
+    stored, _stored_boundary = checkpoint_reader(sync.name)
+
+    configured_start = canonicalize_bound(config.start, field_name="sync.backfill.start")
+    durable_checkpoint = (
+        _coerce_checkpoint(stored, configured_start) if stored is not None else None
+    )
+    effective_start = durable_checkpoint if durable_checkpoint is not None else configured_start
+    watermark_lag: str | None = None
+    if (
+        durable_checkpoint is not None
+        and sync.sync.watermark is not None
+        and sync.sync.watermark.lag is not None
+    ):
+        effective_start = apply_lag_then_clamp(
+            configured_start, durable_checkpoint, sync.sync.watermark.lag
+        )
+        watermark_lag = str(sync.sync.watermark.lag)
+
+    if not is_sql_source_profile(profile) and not is_window_capable(source):
+        raise NotImplementedError(
+            f"sync.backfill is not supported by {type(source).__name__}; non-SQL sources "
+            "must implement synchronous extract_window(query, profile, low, high)."
+        )
+
+    if config.end is not None:
+        ceiling: BackfillBound | None = canonicalize_bound(
+            config.end, field_name="sync.backfill.end"
+        )
+    elif isinstance(config.window, int):
+        resolved_model = resolve_model_ref(
+            sync.model,
+            project_dir,
+            profile,
+            cursor_field,
+            vars=vars,
+            dbt_relation_name=sync._dbt_relation_name,
+            dbt_manifest_resolved=sync._dbt_contract_resolved,
+            sync_name=sync.name,
+            windowed_backfill=True,
+        )
+        ceiling = snapshot_numeric_ceiling(
+            source, resolved_model, profile, cursor_field, query_tags=None
+        )
+    else:
+        ceiling = canonicalize_bound(started_at, field_name="sync.backfill run ceiling")
+
+    windows = (
+        list(plan_windows(effective_start, ceiling, config.window)) if ceiling is not None else []
+    )
+    final_checkpoint = stored
+    summary: dict[str, Any] = {
+        "requested_start": configured_start,
+        "effective_start": effective_start,
+        "ceiling": ceiling,
+        "window": config.window,
+        "windows_planned": len(windows),
+        "windows_completed": 0,
+        "failed_window": None,
+        "final_checkpoint": final_checkpoint,
+    }
+    total_result.backfill = summary
+    total_result.watermark_source = "storage" if stored is not None else "config"
+    total_result.cursor_value_used = _stringify_cursor_value(effective_start)
+    total_result.watermark_lag = watermark_lag
+
+    for index, bounds in enumerate(windows):
+        low, high = bounds
+        if stop_event is not None and stop_event.is_set():
+            total_result.interrupted = True
+            observer.on_interrupted(sync.name, 0)
+            summary["failed_window"] = index
+            _flush_uncheckpointed_window(observer, sync.name, total_result, original_error=None)
+            break
+
+        window_started_at = time.perf_counter()
+        _window_event(observer, "window_started", sync.name, index, low, high)
+        window_result = SyncResult(
+            run_id=total_result.run_id,
+            sync_run_id=total_result.sync_run_id,
+            dry_run=dry_run,
+        )
+        try:
+            _run_sync_body(
+                sync=sync,
+                source=source,
+                destination=destination,
+                profile=profile,
+                project_dir=project_dir,
+                dry_run=dry_run,
+                state_manager=state_manager,
+                watermark_storage=watermark_storage,
+                cursor_value_override=None,
+                stop_event=stop_event,
+                compute_diff=False,
+                diff_limit=diff_limit,
+                started_at=started_at,
+                t0=window_started_at,
+                total_result=window_result,
+                observer=observer,
+                tracer=tracer,
+                vars=vars,
+                query_tagging=query_tagging,
+                idempotency_ledger=idempotency_ledger,
+                audit_trail=audit_trail,
+                audit_fields=audit_fields,
+                window_bounds=bounds,
+                notify_completion=False,
+            )
+        except BaseException as exc:
+            _accumulate_result(total_result, window_result)
+            detail = {
+                "index": index,
+                "low": low,
+                "high": high,
+                "rows_extracted": window_result.rows_extracted,
+                "status": "failed",
+                "checkpoint": "not_written",
+                "duration_seconds": round(time.perf_counter() - window_started_at, 3),
+            }
+            total_result.windows.append(detail)
+            summary["failed_window"] = index
+            _window_event(observer, "window_failed", sync.name, index, low, high, exc)
+            _flush_uncheckpointed_window(observer, sync.name, total_result, original_error=exc)
+            raise
+
+        _accumulate_result(total_result, window_result)
+        window_succeeded = window_result._stream_consumed and not window_result.interrupted
+        if sync.sync.on_error == "fail" and window_result.failed:
+            window_succeeded = False
+
+        detail = {
+            "index": index,
+            "low": low,
+            "high": high,
+            "rows_extracted": window_result.rows_extracted,
+            "rows_synced": window_result.success,
+            "rows_failed": window_result.failed,
+            "rows_skipped": window_result.skipped,
+            "status": "success" if window_succeeded else "failed",
+            "checkpoint": "not_written",
+            "duration_seconds": round(time.perf_counter() - window_started_at, 3),
+        }
+        total_result.windows.append(detail)
+        if not window_succeeded:
+            summary["failed_window"] = index
+            _window_event(observer, "window_failed", sync.name, index, low, high, None)
+            _flush_uncheckpointed_window(observer, sync.name, total_result, original_error=None)
+            break
+
+        try:
+            boundary_flusher = getattr(observer, "flush_window", None)
+            if callable(boundary_flusher):
+                boundary_flusher(sync.name)
+            if isinstance(destination, PendingFlushCapable):
+                with _stage_ctx("destination"):
+                    destination.flush_pending()
+                delivered_at = datetime.now(timezone.utc).isoformat()
+                if idempotency_ledger is not None and window_result._deferred_ledger_keys:
+                    with _stage_ctx("state"):
+                        idempotency_ledger.mark_delivered(
+                            sync.name,
+                            window_result._deferred_ledger_keys,
+                            delivered_at,
+                        )
+                if audit_trail is not None and window_result._deferred_audit_entries:
+                    with _stage_ctx("state"):
+                        audit_trail.log_delivered(
+                            sync.name,
+                            total_result.run_id,
+                            total_result.sync_run_id,
+                            sync.destination.type,
+                            window_result._deferred_audit_entries,
+                            delivered_at,
+                        )
+            checkpoint_writer = getattr(observer, "checkpoint_window", None)
+            if not callable(checkpoint_writer):
+                raise RuntimeError("The designated checkpoint observer is unavailable.")
+            final_checkpoint = checkpoint_writer(
+                sync.name, started_at, total_result, cursor_field, high
+            )
+        except BaseException as exc:
+            detail["status"] = "failed"
+            detail["checkpoint"] = "failed"
+            summary["failed_window"] = index
+            _window_event(observer, "window_failed", sync.name, index, low, high, exc)
+            raise
+        detail["checkpoint"] = "written"
+        summary["final_checkpoint"] = final_checkpoint
+        summary["windows_completed"] = int(summary["windows_completed"]) + 1
+        _window_event(observer, "window_completed", sync.name, index, low, high, window_result)
+
+    total_result.duration_seconds = round(time.perf_counter() - t0, 3)
+    observer.on_sync_completed(sync.name, total_result, started_at, final_checkpoint, cursor_field)
+    return total_result
+
+
+def _run_sync_body(
+    *,
+    sync: SyncConfig,
+    source: Source,
+    destination: Destination | StagedDestination,
+    profile: ProfileConfigLike,
+    project_dir: Path,
+    dry_run: bool,
+    state_manager: StateStore | None,
+    watermark_storage: WatermarkStorage | None,
+    cursor_value_override: str | None,
+    stop_event: threading.Event | None,
+    compute_diff: bool,
+    diff_limit: int,
+    started_at: str,
+    t0: float,
+    total_result: SyncResult,
+    observer: SyncObserver,
+    tracer: Any,
+    extract_limit: int | None = None,
+    vars: dict[str, Any] | None = None,
+    query_tagging: QueryTaggingConfig | None = None,
+    idempotency_ledger: IdempotencyLedger | None = None,
+    audit_trail: ComplianceAuditTrail | None = None,
+    audit_fields: list[str] | None = None,
+    exact: bool = False,
+    window_bounds: BackfillWindow | None = None,
+    notify_completion: bool = True,
+) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
     """
@@ -711,7 +1182,10 @@ def _run_sync_body(
     last_cursor_value: str | None = None
     watermark_source: str | None = None  # "cli_override" | "storage" | "default_value"
 
-    if cursor_field:
+    if cursor_field and window_bounds is not None:
+        last_cursor_value = _stringify_cursor_value(window_bounds[0])
+        watermark_source = "storage"
+    elif cursor_field:
         # 1. CLI override (highest priority — backfill / recovery)
         if cursor_value_override is not None:
             last_cursor_value = cursor_value_override
@@ -782,6 +1256,7 @@ def _run_sync_body(
     if (
         last_cursor_value is not None
         and watermark_source == "storage"
+        and window_bounds is None
         and wm_cfg is not None
         and wm_cfg.lag is not None
     ):
@@ -790,16 +1265,33 @@ def _run_sync_body(
             watermark_lag_applied = str(wm_cfg.lag)
             observer.on_watermark_resolved(sync.name, "storage_lag", effective_cursor_value)
 
-    query = resolve_model_ref(
-        sync.model,
-        project_dir,
-        profile,
-        cursor_field,
-        effective_cursor_value,
-        vars=vars,
-        dbt_relation_name=sync._dbt_relation_name,
-        dbt_manifest_resolved=sync._dbt_contract_resolved,
-    )
+    if window_bounds is not None and is_sql_source_profile(profile):
+        assert cursor_field is not None
+        query = resolve_windowed_model_ref(
+            sync.model,
+            project_dir,
+            profile,
+            cursor_field,
+            window_bounds[0],
+            window_bounds[1],
+            sync_name=sync.name,
+            vars=vars,
+            dbt_relation_name=sync._dbt_relation_name,
+            dbt_manifest_resolved=sync._dbt_contract_resolved,
+        )
+    else:
+        query = resolve_model_ref(
+            sync.model,
+            project_dir,
+            profile,
+            cursor_field,
+            effective_cursor_value,
+            vars=vars,
+            dbt_relation_name=sync._dbt_relation_name,
+            dbt_manifest_resolved=sync._dbt_contract_resolved,
+            sync_name=sync.name if window_bounds is not None else None,
+            windowed_backfill=window_bounds is not None,
+        )
 
     # Query tagging (#768): cost attribution needs *some* way to tell one
     # sync's queries apart from another's in the warehouse's own query
@@ -927,6 +1419,17 @@ def _run_sync_body(
             diff_records if not contract_failed else iter(()),
             "source",
         )
+    elif window_bounds is not None and not is_sql_source_profile(profile):
+        if not is_window_capable(source):
+            raise NotImplementedError(
+                f"sync.backfill is not supported by {type(source).__name__}; non-SQL "
+                "sources must implement synchronous extract_window(query, profile, low, high)."
+            )
+        low, high = window_bounds
+        records_iter = _wrap_stage_ctx(
+            source.extract_window(query, profile, low, high, query_tags=query_tags),
+            "source",
+        )
     else:
         records_iter = _staged_source_iter(
             source,
@@ -943,6 +1446,8 @@ def _run_sync_body(
     new_cursor_value: str | None = last_cursor_value
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
+    staged_records: list[dict[str, Any]] = []
+    staged_pre_metadata_records: list[dict[str, Any] | None] = []
     batches_processed = 0
     # 0-based index of each batch handed to ``destination.load()`` — used as
     # the ``batch_index`` attribute on the per-batch ``drt.sync.load`` span.
@@ -1009,18 +1514,66 @@ def _run_sync_body(
     # clean completion, on_error=fail break, stop_event, or a raised
     # source/destination error.
     extract_span = tracer.start_span("drt.sync.extract")
+    stream_consumed = True
+    window_key_digests: set[bytes] = set()
+    window_key_row_ordinal = 0
+    window_upsert_key = (
+        getattr(sync.destination, "upsert_key", None) if window_bounds is not None else None
+    )
     try:
         for record_batch in batch(records_iter, sync.sync.batch_size):
+            pre_metadata_records: dict[int, dict[str, Any]] = {}
             # Cooperative shutdown — break before processing this batch.
             # Existing batches are already finalized; partial state save below
             # stays consistent because the loop body never starts on this batch.
             if stop_event is not None and stop_event.is_set():
+                stream_consumed = False
                 total_result.interrupted = True
                 sync.sync._interrupted = True
                 observer.on_interrupted(sync.name, batches_processed)
                 break
 
             total_result.rows_extracted += len(record_batch)
+
+            if window_bounds is not None:
+                assert cursor_field is not None
+                valid_records: list[dict[str, Any]] = []
+                range_errors = []
+                for index, row in enumerate(record_batch):
+                    row_error = validate_window_row(
+                        row,
+                        cursor_field,
+                        window_bounds[0],
+                        window_bounds[1],
+                        batch_index=index,
+                    )
+                    if row_error is None:
+                        valid_records.append(row)
+                    else:
+                        range_errors.append(row_error)
+                if range_errors:
+                    total_result.failed += len(range_errors)
+                    total_result.row_errors.extend(range_errors)
+                    observer.on_records_failed(
+                        sync.name,
+                        [
+                            _dead_letter_for_record(
+                                sync_name=sync.name,
+                                record=record_batch[error.batch_index],
+                                error_message=error.error_message,
+                                http_status=error.http_status,
+                                timestamp=error.timestamp,
+                                sync_run_id=total_result.sync_run_id,
+                                window_bounds=window_bounds,
+                            )
+                            for error in range_errors
+                        ],
+                    )
+                    record_batch = valid_records
+                    # Source-contract violations can never be advanced past.
+                    # ``on_error: skip`` governs destination row failures only.
+                    stream_consumed = False
+                    break
 
             # Track max cursor value seen across all batches.
             # Stringify with tz-naive UTC normalization for tz-aware datetimes
@@ -1047,6 +1600,7 @@ def _run_sync_body(
                     record_batch, sync.columns, contract.on_extra_columns
                 )
                 if not contract_check.passed:
+                    stream_consumed = False
                     contract_failed = True
                     total_result.failed += 1
                     total_result.errors.append(contract_check.message())
@@ -1128,6 +1682,12 @@ def _run_sync_body(
             # destination-facing (chosen directly in metadata_columns
             # config) and values are engine bookkeeping, not source data
             # that a rename or masking rule should ever touch.
+            if window_bounds is not None:
+                # A keyless backfill-capable plugin may need the DLQ fallback
+                # identity. Preserve the destination-shaped row before
+                # engine-owned run metadata is injected; the persisted dead
+                # letter still carries the final payload for retry.
+                pre_metadata_records = {id(record): dict(record) for record in record_batch}
             record_batch = apply_metadata_columns(
                 record_batch,
                 sync.sync.metadata_columns,
@@ -1135,6 +1695,19 @@ def _run_sync_body(
                 run_id=total_result.run_id,
                 sync_name=sync.name,
             )
+
+            if window_bounds is not None:
+                if window_upsert_key:
+                    window_key_row_ordinal = validate_window_upsert_keys(
+                        record_batch,
+                        window_upsert_key,
+                        destination_type=sync.destination.type,
+                        sync_name=sync.name,
+                        low=window_bounds[0],
+                        high=window_bounds[1],
+                        seen_key_digests=window_key_digests,
+                        row_ordinal=window_key_row_ordinal,
+                    )
 
             # Managed destination tables (#760): the check runs on the first
             # destination-facing batch, after every transform and before plan
@@ -1224,6 +1797,10 @@ def _run_sync_body(
                 with _stage_ctx("destination"):
                     destination.stage(record_batch, sync.destination, sync.sync)
                 staged_count += len(record_batch)
+                staged_records.extend(record_batch)
+                staged_pre_metadata_records.extend(
+                    pre_metadata_records.get(id(record)) for record in record_batch
+                )
             else:
                 assert isinstance(destination, Destination)
                 # Per-batch load span (child of drt.sync.run). Only the
@@ -1239,6 +1816,11 @@ def _run_sync_body(
                     load_span.set_attribute("load.skipped", result.skipped)
                     load_span.set_attribute("load.skipped_no_match", result.skipped_no_match)
                     load_span.set_attribute("load.kept_values", result.kept_values)
+                if window_bounds is not None and result.total != len(record_batch):
+                    raise RuntimeError(
+                        f"Destination contract violation for sync '{sync.name}': load() "
+                        f"reported {result.total} outcomes for {len(record_batch)} records."
+                    )
                 load_batch_index += 1
                 total_result.success += result.success
                 total_result.failed += result.failed
@@ -1254,37 +1836,42 @@ def _run_sync_body(
                 # (drt.state.idempotency) is the same correlation
                 # `DeadLetter` construction below already relies on
                 # (result.row_errors[*].batch_index indexes into the
-                # record_batch just sent). Both writes happen here (not
-                # deferred to sync end) to keep the crash-loses-data window
-                # scoped to one batch, not the whole run — this fires on
-                # the common/success path, unlike DLQ's rare-path
-                # buffering.
+                # record_batch just sent). Ordinary destinations write both
+                # records here, keeping the crash-loses-data window scoped to
+                # one batch. A PendingFlushCapable backfill destination only
+                # queued these successes, so the window driver defers both
+                # mutations until flush_pending() acknowledges durable target
+                # acceptance.
                 needs_delivered_at = (
                     idempotency_ledger is not None
                     and any(k is not None for k in batch_idempotency_keys)
                 ) or _audit_enabled
                 if needs_delivered_at:
                     confirmed_indices = successful_indices(record_batch, result)
-                    delivered_at = datetime.now(timezone.utc).isoformat()
-
-                    if idempotency_ledger is not None:
-                        delivered_keys = [
-                            key
-                            for i, key in enumerate(batch_idempotency_keys)
-                            if key is not None and i in confirmed_indices
-                        ]
-                        if delivered_keys:
+                    delivered_keys = [
+                        key
+                        for i, key in enumerate(batch_idempotency_keys)
+                        if key is not None and i in confirmed_indices
+                    ]
+                    audit_entries = (
+                        _build_audit_entries(record_batch, confirmed_indices, audit_fields)
+                        if _audit_enabled and audit_fields is not None
+                        else []
+                    )
+                    defer_until_flush = window_bounds is not None and isinstance(
+                        destination, PendingFlushCapable
+                    )
+                    if defer_until_flush:
+                        total_result._deferred_ledger_keys.extend(delivered_keys)
+                        total_result._deferred_audit_entries.extend(audit_entries)
+                    else:
+                        delivered_at = datetime.now(timezone.utc).isoformat()
+                        if idempotency_ledger is not None and delivered_keys:
                             with _stage_ctx("state"):
                                 idempotency_ledger.mark_delivered(
                                     sync.name, delivered_keys, delivered_at
                                 )
-
-                    if _audit_enabled:
-                        assert audit_trail is not None and audit_fields is not None
-                        audit_entries = _build_audit_entries(
-                            record_batch, confirmed_indices, audit_fields
-                        )
-                        if audit_entries:
+                        if audit_trail is not None and audit_entries:
                             with _stage_ctx("state"):
                                 audit_trail.log_delivered(
                                     sync.name,
@@ -1302,12 +1889,18 @@ def _run_sync_body(
                 # only when the destination reported pinpointed per-record errors.
                 if result.row_errors:
                     dead_letters = [
-                        DeadLetter(
+                        _dead_letter_for_record(
+                            sync_name=sync.name,
                             record=record_batch[err.batch_index],
                             error_message=err.error_message,
                             http_status=err.http_status,
                             timestamp=err.timestamp,
                             sync_run_id=total_result.sync_run_id,
+                            window_bounds=window_bounds,
+                            validated_upsert_key=window_upsert_key,
+                            pre_metadata_record=pre_metadata_records.get(
+                                id(record_batch[err.batch_index])
+                            ),
                         )
                         for err in result.row_errors
                         if 0 <= err.batch_index < len(record_batch)
@@ -1316,6 +1909,7 @@ def _run_sync_body(
                         observer.on_records_failed(sync.name, dead_letters)
 
                 if sync.sync.on_error == "fail" and result.failed > 0:
+                    stream_consumed = False
                     # Roll the whole run's cursor progress back to where it
                     # started (#1074). A narrower, per-batch-local rollback
                     # was tried and rejected in review (Codex, #1083): drt
@@ -1347,6 +1941,7 @@ def _run_sync_body(
                     break
 
             if lookup_fatal:
+                stream_consumed = False
                 # The (possibly empty) prefix apply_lookups() salvaged was
                 # already loaded normally above like any other batch —
                 # those rows really did succeed. But this batch also hit a
@@ -1358,6 +1953,7 @@ def _run_sync_body(
 
             batches_processed += 1
     finally:
+        total_result._stream_consumed = stream_consumed
         extract_span.set_attribute("extract.rows_extracted", total_result.rows_extracted)
         extract_span.end()
 
@@ -1374,16 +1970,41 @@ def _run_sync_body(
     # Finalize staged destinations (upload file, trigger job, poll).
     # finalize() is authoritative for staged success/failed counts —
     # stage() only buffers, so records aren't "successful" until finalize.
-    if is_staged and not dry_run and staged_count > 0:
+    if is_staged and not dry_run and (staged_count > 0 or window_bounds is not None):
         assert isinstance(destination, StagedDestination)
         with _stage_ctx("destination"):
             finalize_result = destination.finalize(sync.destination, sync.sync)
+        if window_bounds is not None and finalize_result.total != staged_count:
+            raise RuntimeError(
+                f"Destination contract violation for sync '{sync.name}': staged finalize() "
+                f"reported {finalize_result.total} outcomes for {staged_count} staged records."
+            )
         total_result.success += finalize_result.success
         total_result.failed += finalize_result.failed
         total_result.errors.extend(finalize_result.errors)
         total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
 
+        if finalize_result.row_errors:
+            dead_letters = [
+                _dead_letter_for_record(
+                    sync_name=sync.name,
+                    record=staged_records[error.batch_index],
+                    error_message=error.error_message,
+                    http_status=error.http_status,
+                    timestamp=error.timestamp,
+                    sync_run_id=total_result.sync_run_id,
+                    window_bounds=window_bounds,
+                    validated_upsert_key=window_upsert_key,
+                    pre_metadata_record=staged_pre_metadata_records[error.batch_index],
+                )
+                for error in finalize_result.row_errors
+                if 0 <= error.batch_index < len(staged_records)
+            ]
+            if dead_letters:
+                observer.on_records_failed(sync.name, dead_letters)
+
         if sync.sync.on_error == "fail" and finalize_result.failed > 0:
+            total_result._stream_consumed = False
             # The staged path has no per-batch break (stage() has no
             # per-batch result to fail on) — extraction and staging ran to
             # completion for every batch, and new_cursor_value above
@@ -1412,6 +2033,8 @@ def _run_sync_body(
                 total_result.failed += finalize_result.failed
                 total_result.errors.extend(finalize_result.errors)
                 total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
+                if finalize_result.failed > 0:
+                    total_result._stream_consumed = False
 
     if sync.sync._forced_guard_trips:
         total_result.guards = {
@@ -1471,6 +2094,9 @@ def _run_sync_body(
     # data that was only previewed, never sent (#978) — new_cursor_value
     # above reflects rows *seen* during extraction regardless of dry_run,
     # since extraction itself is not skipped; only destination.load() is.
-    observer.on_sync_completed(sync.name, total_result, started_at, new_cursor_value, cursor_field)
+    if notify_completion:
+        observer.on_sync_completed(
+            sync.name, total_result, started_at, new_cursor_value, cursor_field
+        )
 
     return total_result

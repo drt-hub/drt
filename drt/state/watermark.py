@@ -14,6 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from drt.state._atomic import atomic_write_json
 from drt.state._filelock import advisory_lock
 
 # How many times a conditional watermark write may lose its race before giving
@@ -80,7 +81,7 @@ class LocalWatermarkStorage:
         self._file = self._state_dir / "watermarks.json"
         self._lock = threading.Lock()
 
-    def _load(self) -> dict[str, str]:
+    def _load(self, *, fail_on_corruption: bool = False) -> dict[str, str]:
         if not self._file.exists():
             return {}
         try:
@@ -88,12 +89,19 @@ class LocalWatermarkStorage:
                 data: dict[str, str] = json.load(f) or {}
                 return data
         except (json.JSONDecodeError, ValueError):
+            if fail_on_corruption:
+                raise ValueError(
+                    f"{self._file} is corrupt; refusing sync.backfill because its "
+                    "resume checkpoint cannot be trusted. Restore or reset it explicitly."
+                )
             return {}
 
     def _save_all(self, data: dict[str, str]) -> None:
-        self._state_dir.mkdir(exist_ok=True)
-        with self._file.open("w") as f:
-            json.dump(data, f, indent=2)
+        atomic_write_json(self._file, data)
+
+    def _get_for_backfill(self, sync_name: str) -> str | None:
+        with self._lock:
+            return self._load(fail_on_corruption=True).get(sync_name)
 
     def get(self, sync_name: str) -> str | None:
         with self._lock:

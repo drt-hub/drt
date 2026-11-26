@@ -184,7 +184,7 @@ def state_reset(
 
     project = Path(".")
     state_bundle = None
-    if runs:
+    if runs or watermark:
         from drt.config.base import ProjectConfig
         from drt.config.parser import load_project
         from drt.state.factory import build_state_bundle
@@ -196,31 +196,41 @@ def state_reset(
         )
         state_bundle = build_state_bundle(project_config, project)
 
-    if watermark:
-        cleared = False
-        # The configured backend, when the sync declares one.
+    reset_result = None
+    if state_bundle is not None:
         from drt.config.parser import load_syncs
+        from drt.state.reset import reset_watermark_and_runs
 
-        for s in load_syncs(project / "syncs"):
-            if s.name != sync_name:
-                continue
-            storage = get_watermark_storage(s, project)
-            if storage is not None:
-                storage.delete(sync_name)
-                cleared = True
+        storages = []
+        if watermark:
+            for sync in load_syncs(project / "syncs"):
+                if sync.name == sync_name:
+                    storage = get_watermark_storage(sync, project)
+                    if storage is not None:
+                        storages.append(storage)
+        reset_result = reset_watermark_and_runs(
+            state_bundle.state,
+            sync_name,
+            watermark_storages=storages,
+            watermark=watermark,
+            runs=runs,
+        )
+
+    if watermark:
+        assert reset_result is not None
         console.print(
             "[green]✓[/green] watermark cleared"
-            if cleared
-            else "[dim]  no watermark backend configured — "
-            "the fallback cursor is cleared by --runs.[/dim]"
+            if reset_result.watermark_cleared
+            else "[dim]  no stored watermark or boundary marker.[/dim]"
         )
 
     if runs:
-        assert state_bundle is not None
-        removed = state_bundle.state.reset(sync_name)
+        assert reset_result is not None
         console.print(
-            "[green]✓[/green] run state cleared"
-            if removed
+            "[green]✓[/green] run state cleared (watermark/boundary retained)"
+            if reset_result.runs_removed and reset_result.exclusive_checkpoint_preserved
+            else "[green]✓[/green] run state cleared"
+            if reset_result.runs_removed
             else f"[dim]  no run state recorded for '{sync_name}'.[/dim]"
         )
 
