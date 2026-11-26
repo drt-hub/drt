@@ -105,12 +105,15 @@ def successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -
     review on #1126 for the same reason #1100 caught it here first) — both
     need the same "which of these did the destination confirm" computation.
     """
-    if result.skipped > 0:
+    if result.skipped > 0 or result.total != len(record_batch):
         return set()
     failed_indices = {
         err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
     }
-    return {i for i in range(len(record_batch)) if i not in failed_indices}
+    successful = [i for i in range(len(record_batch)) if i not in failed_indices]
+    if len(successful) != result.success:
+        return set()
+    return set(successful)
 
 
 @runtime_checkable

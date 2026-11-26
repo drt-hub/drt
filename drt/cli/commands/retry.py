@@ -109,6 +109,11 @@ def _replay_dead_letters(
         - ``"ok"``       — records replayed; see ``succeeded`` / ``still_failing``
         - ``"failed"``   — a staged destination failed during ``finalize()``
     """
+    if sync.sync.backfill is not None and not dry_run and not clear:
+        raise ValueError(
+            "drt retry does not support sync.backfill yet; rerun the sync so it resumes "
+            "from its last completed window checkpoint (ADR 0021 slice 6 adds replay support)."
+        )
     from drt.config.base import ProjectConfig
     from drt.config.parser import load_project
     from drt.destinations.base import StagedDestination

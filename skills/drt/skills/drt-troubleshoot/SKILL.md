@@ -114,7 +114,8 @@ An explicit null remains a real null write (#1138).
 - **🔴 common failures:** 0 rows (the source query / `model` filters
   everything out, or `mode: incremental` already consumed the watermark —
   inspect it with `drt state show <name>`, which also covers remote
-  watermark backends; probe a value with `--cursor-value`, or start over
+  watermark backends; for a legacy/ad-hoc one-bound recovery probe use
+  `--cursor-value` (refused when `sync.backfill` is configured), or start over
   with `drt run --full-refresh` when the stored cursor is wrong rather than
   merely advanced, v0.8.4+); `{{ row.field }}`
   referencing a column the source doesn't return (use `tojson_safe` for
@@ -208,3 +209,7 @@ drt test --unit --select <name>              # offline unit_tests fixtures throu
 - `docs/connectors/` — per-connector auth, sync modes, and gotchas
 - `/drt-debug` — the companion skill for fixing a specific error once this
   checklist has localised it
+
+## Windowed backfill rollout
+
+`sync.backfill: {window, start, end?}` executes only through `drt run` and MCP `drt_run_sync` in ADR 0021 slice 3. Dry-run/diff, `--limit`, `--cursor-value`, `--full-refresh`, build, serve, library calls, Airflow/Prefect/Dagster, test, plan/apply, exact replay, and retry are unsupported and must be reported as refusals, not workarounds. Use `drt state reset`, never hand-edit checkpoint files; same-sync concurrent runs and downgrading against backfill-written state are unsupported.

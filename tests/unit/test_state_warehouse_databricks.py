@@ -91,6 +91,32 @@ class TestEnsureTableExists:
 
 
 class TestDatabricksWarehouseStateStore:
+    def test_transient_marker_read_error_does_not_fall_back(self) -> None:
+        class TransientError(Exception):
+            sqlstate = "08006"
+            error_code = "TEMPORARY_UNAVAILABLE"
+
+        conn = _mock_conn()
+        conn.cursor.return_value.execute.side_effect = TransientError("connection lost")
+        with (
+            patch("drt.state.warehouse_databricks._table_exists", return_value=True),
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            pytest.raises(TransientError, match="connection lost"),
+        ):
+            DatabricksWarehouseStateStore(_profile()).get_last_sync("s")
+        assert conn.cursor.return_value.execute.call_count == 1
+
+    def test_undefined_marker_error_is_the_only_legacy_fallback(self) -> None:
+        from drt.state.warehouse_databricks import _is_undefined_cursor_boundary
+
+        server_error = type("ServerOperationError", (Exception,), {})
+        assert _is_undefined_cursor_boundary(
+            server_error("[UNRESOLVED_COLUMN.WITH_SUGGESTION] cursor_boundary; SQLSTATE: 42703")
+        )
+        assert not _is_undefined_cursor_boundary(
+            server_error("[UNRESOLVED_COLUMN.WITH_SUGGESTION] some_other_column; SQLSTATE: 42703")
+        )
+
     def test_get_last_sync_returns_none_before_any_table_exists(self) -> None:
         with patch("drt.state.warehouse_databricks._table_exists", return_value=False):
             assert DatabricksWarehouseStateStore(_profile()).get_last_sync("s") is None
@@ -939,3 +965,200 @@ class TestDatabricksHistoryOptionalColumns:
 
         probes = [s for s, _ in conn.cursor.return_value.statements if "information_schema" in s]
         assert len(probes) == 1
+
+
+class _MissingBoundaryError(Exception):
+    """Databricks SQL unresolved-column error (SQLSTATE 42703) for cursor_boundary."""
+
+    sqlstate = "42703"
+
+    def __init__(self) -> None:
+        super().__init__("[UNRESOLVED_COLUMN] cannot resolve cursor_boundary")
+
+
+def _executed_sql(conn: MagicMock) -> list[str]:
+    return [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+
+
+def _letter(letter_id: str) -> DeadLetter:
+    return DeadLetter(
+        id=letter_id,
+        record={"id": letter_id},
+        error_message="boom",
+        http_status=500,
+        timestamp="2026-11-24T00:00:00+00:00",
+        attempts=1,
+        sync_run_id="run-1",
+    )
+
+
+class TestDatabricksBackfillMarkerAndStrictDlq:
+    """Exclusive-boundary marker and strict non-evicting DLQ append (ADR 0021)."""
+
+    def test_is_undefined_cursor_boundary_is_specific(self) -> None:
+        from drt.state.warehouse_databricks import _is_undefined_cursor_boundary
+
+        assert _is_undefined_cursor_boundary(_MissingBoundaryError())
+        assert not _is_undefined_cursor_boundary(ValueError("unresolved cursor_boundary"))
+
+        class _OtherColumn(_MissingBoundaryError):
+            def __init__(self) -> None:
+                Exception.__init__(self, "[UNRESOLVED_COLUMN] cannot resolve other")
+
+        assert not _is_undefined_cursor_boundary(_OtherColumn())
+
+    def test_get_last_sync_falls_back_to_the_legacy_select(self) -> None:
+        conn = _mock_conn(fetchone=("2026-11-24T00:00:00+00:00", 3, "success", None, "7"))
+        conn.cursor.return_value.execute.side_effect = [_MissingBoundaryError(), None]
+        with (
+            patch("drt.state.warehouse_databricks._table_exists", return_value=True),
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+        ):
+            state = DatabricksWarehouseStateStore(_profile()).get_last_sync("s")
+
+        first, second = _executed_sql(conn)
+        assert "cursor_boundary" in first and "cursor_boundary" not in second
+        assert state is not None and state.last_cursor_value == "7"
+        assert state.cursor_boundary is None
+
+    def test_get_last_sync_reraises_unrelated_errors(self) -> None:
+        conn = _mock_conn()
+        conn.cursor.return_value.execute.side_effect = RuntimeError("boom")
+        with (
+            patch("drt.state.warehouse_databricks._table_exists", return_value=True),
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            DatabricksWarehouseStateStore(_profile()).get_last_sync("s")
+
+    def test_get_all_falls_back_to_the_legacy_select(self) -> None:
+        conn = _mock_conn(fetchall=[("s", "2026-11-24T00:00:00+00:00", 3, "success", None, "7")])
+        conn.cursor.return_value.execute.side_effect = [_MissingBoundaryError(), None]
+        with (
+            patch("drt.state.warehouse_databricks._table_exists", return_value=True),
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+        ):
+            states = DatabricksWarehouseStateStore(_profile()).get_all()
+
+        assert "cursor_boundary" not in _executed_sql(conn)[1]
+        assert states["s"].last_cursor_value == "7"
+
+    def test_get_all_reraises_unrelated_errors(self) -> None:
+        conn = _mock_conn()
+        conn.cursor.return_value.execute.side_effect = RuntimeError("boom")
+        with (
+            patch("drt.state.warehouse_databricks._table_exists", return_value=True),
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            DatabricksWarehouseStateStore(_profile()).get_all()
+
+    def test_save_sync_adds_the_column_then_inserts_the_boundary(self) -> None:
+        conn = _mock_conn(fetchone=None)
+        store = DatabricksWarehouseStateStore(_profile())
+        state = SyncState("s", "t", 1, "success", last_cursor_value="10", cursor_boundary="excl")
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.save_sync(state)
+
+        sqls = _executed_sql(conn)
+        assert "ADD COLUMNS (cursor_boundary STRING)" in sqls[0]
+        insert = next(
+            call
+            for call in conn.cursor.return_value.execute.call_args_list
+            if str(call.args[0]).startswith("INSERT INTO")
+        )
+        assert "cursor_boundary" in insert.args[0]
+        assert insert.args[1][-2:] == ["10", "excl"]
+
+    def test_save_sync_updates_the_boundary_when_the_row_exists(self) -> None:
+        conn = _mock_conn(fetchone=(1,))
+        store = DatabricksWarehouseStateStore(_profile())
+        state = SyncState("s", "t", 1, "success", last_cursor_value="10", cursor_boundary="excl")
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.save_sync(state)
+
+        update = next(
+            call
+            for call in conn.cursor.return_value.execute.call_args_list
+            if str(call.args[0]).startswith("UPDATE")
+        )
+        assert "cursor_boundary = ?" in update.args[0]
+        assert update.args[1][-2:] == ["excl", "s"]
+
+    def test_save_sync_tolerates_an_already_added_column_only(self) -> None:
+        conn = _mock_conn(fetchone=None)
+        cur = conn.cursor.return_value
+        real = cur.execute
+
+        def execute(sql: str, *args: object) -> None:
+            if "ADD COLUMNS" in sql:
+                raise RuntimeError("FIELD_ALREADY_EXISTS: column cursor_boundary")
+            return real(sql, *args)
+
+        cur.execute = execute
+        store = DatabricksWarehouseStateStore(_profile())
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.save_sync(SyncState("s", "t", 1, "success", cursor_boundary="excl"))
+
+        def refuse(sql: str, *args: object) -> None:
+            if "ADD COLUMNS" in sql:
+                raise RuntimeError("permission denied")
+
+        cur.execute = refuse
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch.object(store, "_ensure_table"),
+            pytest.raises(RuntimeError, match="permission denied"),
+        ):
+            store.save_sync(SyncState("s", "t", 1, "success", cursor_boundary="excl"))
+
+    def test_strict_append_merges_without_deleting(self) -> None:
+        conn = _mock_conn(fetchall=[("old",)])
+        backend = DatabricksWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch.object(backend, "_ensure_table"),
+        ):
+            depth = backend._append_strict("s", [_letter("a"), _letter("a")], max_records=3)
+
+        sqls = _executed_sql(conn)
+        assert "SELECT id FROM" in sqls[0]
+        assert sqls[1].startswith("MERGE INTO")
+        assert not any("DELETE" in sql for sql in sqls)
+        assert depth == 2
+
+    def test_strict_append_over_capacity_fails_before_any_write(self) -> None:
+        from drt.state.dlq import DlqCapacityExceeded
+
+        conn = _mock_conn(fetchall=[("old",)])
+        backend = DatabricksWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch.object(backend, "_ensure_table"),
+            pytest.raises(DlqCapacityExceeded),
+        ):
+            backend._append_strict("s", [_letter("new")], max_records=1)
+
+        assert len(_executed_sql(conn)) == 1
+        conn.close.assert_called_once()
+
+    def test_strict_append_replacing_an_existing_id_consumes_no_capacity(self) -> None:
+        conn = _mock_conn(fetchall=[("same",)])
+        backend = DatabricksWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch.object(backend, "_ensure_table"),
+        ):
+            depth = backend._append_strict("s", [_letter("same")], max_records=1)
+
+        assert depth == 1
+        assert _executed_sql(conn)[1].startswith("MERGE INTO")

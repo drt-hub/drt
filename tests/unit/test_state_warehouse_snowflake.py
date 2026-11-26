@@ -103,6 +103,35 @@ class TestEnsureTableExists:
 
 
 class TestSnowflakeWarehouseStateStore:
+    def test_transient_marker_read_error_does_not_fall_back(self) -> None:
+        class TransientError(Exception):
+            errno = 390100
+            sqlstate = "08001"
+
+        conn = _mock_conn()
+        conn.cursor.return_value.execute.side_effect = TransientError("connection lost")
+        with (
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            pytest.raises(TransientError, match="connection lost"),
+        ):
+            SnowflakeWarehouseStateStore(_profile()).get_last_sync("s")
+        assert conn.cursor.return_value.execute.call_count == 1
+
+    def test_undefined_marker_error_is_the_only_legacy_fallback(self) -> None:
+        from drt.state.warehouse_snowflake import _is_undefined_cursor_boundary
+
+        class MissingColumn(Exception):
+            errno = 904
+            sqlstate = "42000"
+
+        assert _is_undefined_cursor_boundary(
+            MissingColumn("SQL compilation error: invalid identifier 'CURSOR_BOUNDARY'")
+        )
+        assert not _is_undefined_cursor_boundary(
+            MissingColumn("SQL compilation error: invalid identifier 'SOME_OTHER_COLUMN'")
+        )
+
     def test_get_last_sync_returns_none_before_any_table_exists(self) -> None:
         with patch("drt.state.warehouse_snowflake._table_exists", return_value=False):
             assert SnowflakeWarehouseStateStore(_profile()).get_last_sync("s") is None
@@ -866,3 +895,152 @@ class TestSnowflakeHistoryOptionalColumns:
 
         probes = [s for s, _ in conn.cursor.return_value.statements if "information_schema" in s]
         assert len(probes) == 1
+
+
+class _MissingBoundaryError(Exception):
+    """Snowflake ProgrammingError 000904 for the additive cursor_boundary column."""
+
+    errno = 904
+    sqlstate = "42000"
+
+    def __init__(self) -> None:
+        super().__init__("SQL compilation error: invalid identifier 'CURSOR_BOUNDARY'")
+
+
+def _executed_sql(conn: MagicMock) -> list[str]:
+    return [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+
+
+class TestSnowflakeBackfillMarkerAndStrictDlq:
+    """Exclusive-boundary marker and strict non-evicting DLQ append (ADR 0021)."""
+
+    def test_is_undefined_cursor_boundary_is_specific(self) -> None:
+        from drt.state.warehouse_snowflake import _is_undefined_cursor_boundary
+
+        assert _is_undefined_cursor_boundary(_MissingBoundaryError())
+        assert not _is_undefined_cursor_boundary(ValueError("invalid identifier cursor_boundary"))
+
+        class _OtherColumn(_MissingBoundaryError):
+            def __init__(self) -> None:
+                Exception.__init__(self, "invalid identifier 'OTHER'")
+
+        assert not _is_undefined_cursor_boundary(_OtherColumn())
+
+    def test_get_last_sync_falls_back_to_the_legacy_select(self) -> None:
+        conn = _mock_conn(fetchone=("2026-11-24T00:00:00+00:00", 3, "success", None, "7"))
+        conn.cursor.return_value.execute.side_effect = [_MissingBoundaryError(), None]
+        with (
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+        ):
+            state = SnowflakeWarehouseStateStore(_profile()).get_last_sync("s")
+
+        first, second = _executed_sql(conn)
+        assert "cursor_boundary" in first and "cursor_boundary" not in second
+        assert state is not None and state.last_cursor_value == "7"
+        assert state.cursor_boundary is None
+
+    def test_get_last_sync_reraises_unrelated_errors(self) -> None:
+        conn = _mock_conn()
+        conn.cursor.return_value.execute.side_effect = RuntimeError("boom")
+        with (
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            SnowflakeWarehouseStateStore(_profile()).get_last_sync("s")
+
+    def test_get_all_falls_back_to_the_legacy_select(self) -> None:
+        conn = _mock_conn(fetchall=[("s", "2026-11-24T00:00:00+00:00", 3, "success", None, "7")])
+        conn.cursor.return_value.execute.side_effect = [_MissingBoundaryError(), None]
+        with (
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+        ):
+            states = SnowflakeWarehouseStateStore(_profile()).get_all()
+
+        assert "cursor_boundary" not in _executed_sql(conn)[1]
+        assert states["s"].last_cursor_value == "7"
+
+    def test_get_all_reraises_unrelated_errors(self) -> None:
+        conn = _mock_conn()
+        conn.cursor.return_value.execute.side_effect = RuntimeError("boom")
+        with (
+            patch("drt.state.warehouse_snowflake._table_exists", return_value=True),
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            SnowflakeWarehouseStateStore(_profile()).get_all()
+
+    def test_save_sync_adds_the_column_then_merges_the_boundary(self) -> None:
+        conn = _mock_conn()
+        store = SnowflakeWarehouseStateStore(_profile())
+        state = SyncState("s", "t", 1, "success", last_cursor_value="10", cursor_boundary="excl")
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.save_sync(state)
+
+        sqls = _executed_sql(conn)
+        assert "ADD COLUMN IF NOT EXISTS cursor_boundary" in sqls[0]
+        assert "cursor_boundary = s.cursor_boundary" in sqls[1]
+        assert conn.cursor.return_value.execute.call_args_list[1].args[1][-2:] == ("10", "excl")
+
+    def test_save_sync_without_a_boundary_never_alters_the_table(self) -> None:
+        conn = _mock_conn()
+        store = SnowflakeWarehouseStateStore(_profile())
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.save_sync(SyncState("s", "t", 1, "success"))
+
+        assert not any("cursor_boundary" in sql for sql in _executed_sql(conn))
+
+    def test_strict_append_merges_inside_one_transaction_without_deleting(self) -> None:
+        conn = _mock_conn(fetchall=[("old",)])
+        backend = SnowflakeWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch.object(backend, "_ensure_table"),
+        ):
+            depth = backend._append_strict(
+                "s", [_dead_letter(id="a"), _dead_letter(id="a")], max_records=3
+            )
+
+        sqls = _executed_sql(conn)
+        assert "SELECT id FROM" in sqls[0]
+        assert sqls[1].startswith("MERGE INTO")
+        assert not any("DELETE" in sql for sql in sqls)
+        conn.autocommit.assert_called_once_with(False)
+        conn.commit.assert_called_once()
+        assert depth == 2
+
+    def test_strict_append_over_capacity_rolls_back_and_writes_nothing(self) -> None:
+        from drt.state.dlq import DlqCapacityExceeded
+
+        conn = _mock_conn(fetchall=[("old",)])
+        backend = SnowflakeWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch.object(backend, "_ensure_table"),
+            pytest.raises(DlqCapacityExceeded),
+        ):
+            backend._append_strict("s", [_dead_letter(id="new")], max_records=1)
+
+        assert len(_executed_sql(conn)) == 1
+        conn.rollback.assert_called_once()
+        conn.commit.assert_not_called()
+
+    def test_strict_append_replacing_an_existing_id_consumes_no_capacity(self) -> None:
+        conn = _mock_conn(fetchall=[("same",)])
+        backend = SnowflakeWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch.object(backend, "_ensure_table"),
+        ):
+            depth = backend._append_strict("s", [_dead_letter(id="same")], max_records=1)
+
+        assert depth == 1
+        assert _executed_sql(conn)[1].startswith("MERGE INTO")

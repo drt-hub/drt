@@ -81,15 +81,6 @@ from drt.config.destinations_storage import (
 )
 from drt.config.duration import parse_duration
 
-# Temporary slice-1 safety gate. Config/schema support lands before bounded
-# extraction and durable checkpoints; accepting it for execution now would
-# silently run an ordinary unbounded incremental sync. ADR 0021 slice 3 removes
-# this constant and its checks when execution becomes safe.
-BACKFILL_EXECUTION_ENABLED = False
-BACKFILL_NOT_EXECUTABLE_ERROR = (
-    "sync.backfill is accepted by the schema but not executable yet (ADR 0021 slices 2-3)"
-)
-
 _DURATION_JSON_PATTERN = (
     r"^(?:\s*0*[1-9]\d*\s*[smhdw]\s*|\s*0*[1-9]\d*\s+"
     r"(?:[dD][aA][yY]|[hH][oO][uU][rR]|[mM][iI][nN][uU][tT][eE]|"
@@ -879,12 +870,6 @@ class SyncOptions(BaseModel):
                 "path (mode: full / upsert / incremental)."
             )
         return self
-
-
-def ensure_backfill_executable(options: SyncOptions) -> None:
-    """Fail closed until bounded extraction/checkpoint slices are implemented."""
-    if options.backfill is not None and not BACKFILL_EXECUTION_ENABLED:
-        raise ValueError(BACKFILL_NOT_EXECUTABLE_ERROR)
 
 
 class RowCountTest(BaseModel):

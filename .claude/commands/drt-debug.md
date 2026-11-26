@@ -58,14 +58,14 @@ Debug a failing drt sync.
 
 ### Incremental sync not filtering
 - **Cursor strategy cause**: `mode: incremental` has no saved cursor yet, so the first run syncs all rows.
-- **Cursor fix**: Check `drt status` after the first run — `last_cursor_value` should be set. To probe a backfill boundary, use `drt run --cursor-value '<value>' --select <name>`.
+- **Cursor fix**: Check `drt status` after the first run — `last_cursor_value` should be set. For legacy/ad-hoc one-bound recovery, use `drt run --cursor-value '<value>' --select <name>`. It is refused when the sync declares `sync.backfill`; let that sync resume its durable windows instead.
 - **Snapshot-diff strategy**: `incremental_strategy: diff` deliberately reads the full model into a warehouse snapshot, then emits only added/changed rows. It requires `mode: upsert|mirror`, a destination `upsert_key`, no `cursor_field`, and a Postgres/Snowflake/Databricks/BigQuery source profile with writable `managed_schema`. A first run has no prior baseline, so every row is added. Same-sync overlapping runs are unsupported. `--limit` does not promote the baseline.
 
 ### Poisoned or stuck watermark
 - **Cause**: a bad cursor value got persisted (a timezone bug, a bad backfill, a rebuilt source table), so the sync now filters out rows it should send — or sends nothing at all.
 - **Diagnose**: `drt state show <name>` — shows the stored watermark, last status and row count. Works for remote watermark backends (GCS / BigQuery) too, which `.drt/*.json` inspection does not.
 - **Fix**: `drt run --select <name> --full-refresh` re-reads everything and persists a fresh watermark (v0.8.4+). Prefer this over hand-editing `.drt/watermarks.json`, which does nothing when a remote backend is configured.
-- **Note**: `--cursor-value` is a *probe* — it overrides one run and leaves stored state untouched. `--full-refresh` is the reset.
+- **Note**: `--cursor-value` is a legacy/ad-hoc one-bound recovery *probe* — it overrides one run and leaves stored state untouched. It is refused for `sync.backfill`. `--full-refresh` is the reset for a legacy incremental sync.
 - **Not included**: `--full-refresh` does not reset tracked-mirror state. If mirror deletes look wrong, that is `drt state reset <name> --tracked-mirror` — read its warning first, since re-baselining makes rows written by other systems into deletion candidates.
 
 ### `on_error: fail` stopping early
@@ -134,3 +134,7 @@ drt ships anonymous opt-in telemetry (PostHog Cloud EU, off by default, v0.7.2+)
 - **`Column contract violation: ...`**: the model's output no longer matches the sync's `columns:` (missing, extra or retyped column). Fix the model or the declaration; with `contract.source: dbt` the manifest may be stale (`dbt build`), or the dbt model has no *enforced* contract.
 - **`on_schema_change` / managed-table errors**: with `on_schema_change: fail` a new source column is refused before any write; use `append_new_columns` to add it (nullable), or add the column yourself. A missing `CREATE`/`ALTER` privilege is named in the message. drt never drops or retypes a column.
 - **`drt status --check`**: exit 1 means a sync is stale (older than `alerts.on_stale.max_age`) or has never run; read the per-sync lines before re-running anything. An unreadable state or history store is reported, not hidden.
+
+## Windowed backfill rollout
+
+`sync.backfill: {window, start, end?}` executes only through `drt run` and MCP `drt_run_sync` in ADR 0021 slice 3. Dry-run/diff, `--limit`, `--cursor-value`, `--full-refresh`, build, serve, library calls, Airflow/Prefect/Dagster, test, plan/apply, exact replay, and retry are unsupported and must be reported as refusals, not workarounds. Use `drt state reset`, never hand-edit checkpoint files; same-sync concurrent runs and downgrading against backfill-written state are unsupported.

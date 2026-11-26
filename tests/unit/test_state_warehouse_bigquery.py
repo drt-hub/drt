@@ -224,6 +224,7 @@ class TestHelpersAndBootstrap:
             "status",
             "error",
             "last_cursor_value",
+            "cursor_boundary",
         ]
         client.query.assert_not_called()
 
@@ -264,6 +265,38 @@ class TestHelpersAndBootstrap:
 
 
 class TestBigQueryWarehouseStateStore:
+    def test_transient_marker_read_error_does_not_fall_back(self) -> None:
+        class TransientError(Exception):
+            code = 503
+            errors = [{"reason": "backendError"}]
+
+        client = MagicMock()
+        with (
+            patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch(
+                "drt.state.warehouse_bigquery._query",
+                side_effect=TransientError("temporary backend outage"),
+            ) as query,
+            pytest.raises(TransientError, match="temporary backend outage"),
+        ):
+            BigQueryWarehouseStateStore(_profile()).get_last_sync("s")
+        assert query.call_count == 1
+
+    def test_undefined_marker_error_is_the_only_legacy_fallback(self) -> None:
+        from drt.state.warehouse_bigquery import _is_undefined_cursor_boundary
+
+        class MissingColumn(Exception):
+            code = 400
+            errors = [{"reason": "invalidQuery"}]
+
+        assert _is_undefined_cursor_boundary(
+            MissingColumn("Unrecognized name: cursor_boundary at [1:2]")
+        )
+        assert not _is_undefined_cursor_boundary(
+            MissingColumn("Unrecognized name: some_other_column at [1:2]")
+        )
+
     def test_empty_reads_and_reset_before_table_exists(self) -> None:
         store = BigQueryWarehouseStateStore(_profile())
         with patch("drt.state.warehouse_bigquery._table_exists", return_value=False):
@@ -759,3 +792,149 @@ class TestBigQueryWarehouseDlqBackend:
             assert backend.reconcile("s") == []
         client.query.assert_not_called()
         read.assert_called_once_with("s")
+
+
+class _MissingBoundaryError(Exception):
+    """BigQuery's invalidQuery/400 for the additive cursor_boundary column."""
+
+    code = 400
+    errors = [{"reason": "invalidQuery"}]
+
+    def __init__(self) -> None:
+        super().__init__("Unrecognized name: cursor_boundary at [1:20]")
+
+
+class TestBigQueryBackfillMarkerAndStrictDlq:
+    """Exclusive-boundary marker and strict non-evicting DLQ append (ADR 0021)."""
+
+    def test_is_undefined_cursor_boundary_is_specific(self) -> None:
+        from drt.state.warehouse_bigquery import _is_undefined_cursor_boundary
+
+        assert _is_undefined_cursor_boundary(_MissingBoundaryError())
+        assert not _is_undefined_cursor_boundary(ValueError("Unrecognized name: cursor_boundary"))
+
+        class _Other(_MissingBoundaryError):
+            code = 500
+
+        assert not _is_undefined_cursor_boundary(_Other())
+
+        class _NoReason(_MissingBoundaryError):
+            errors = [{"reason": "notFound"}]
+
+        assert not _is_undefined_cursor_boundary(_NoReason())
+
+    def test_get_last_sync_falls_back_to_the_legacy_select(self) -> None:
+        row = ("2026-11-24T00:00:00+00:00", 3, "success", None, "7")
+        client = _client(_MissingBoundaryError(), [row])
+        with (
+            patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+        ):
+            state = BigQueryWarehouseStateStore(_profile()).get_last_sync("s")
+
+        first, second = _sqls(client)
+        assert "cursor_boundary" in first
+        assert "cursor_boundary" not in second
+        assert state is not None and state.last_cursor_value == "7"
+        assert state.cursor_boundary is None
+
+    def test_other_errors_are_not_swallowed_as_a_legacy_table(self) -> None:
+        client = _client(RuntimeError("quota exceeded"))
+        with (
+            patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            pytest.raises(RuntimeError, match="quota"),
+        ):
+            BigQueryWarehouseStateStore(_profile()).get_last_sync("s")
+
+    def test_get_all_falls_back_to_the_legacy_select(self) -> None:
+        row = ("s", "2026-11-24T00:00:00+00:00", 3, "success", None, "7")
+        client = _client(_MissingBoundaryError(), [row])
+        with (
+            patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+        ):
+            states = BigQueryWarehouseStateStore(_profile()).get_all()
+
+        assert "cursor_boundary" not in _sqls(client)[1]
+        assert states["s"].last_cursor_value == "7"
+
+    def test_get_all_reraises_unrelated_errors(self) -> None:
+        client = _client(RuntimeError("boom"))
+        with (
+            patch("drt.state.warehouse_bigquery._table_exists", return_value=True),
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            BigQueryWarehouseStateStore(_profile()).get_all()
+
+    def test_save_sync_adds_the_column_then_writes_the_boundary(self) -> None:
+        client = _client([], [], [])
+        store = BigQueryWarehouseStateStore(_profile())
+        state = SyncState("s", "t", 1, "success", last_cursor_value="10", cursor_boundary="excl")
+        with (
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.save_sync(state)
+
+        sqls = _sqls(client)
+        assert "ADD COLUMN IF NOT EXISTS cursor_boundary" in sqls[0]
+        assert "@cursor_boundary" in sqls[2]
+        values = {p.name: p.value for p in _params(client.query.call_args_list[2])}
+        assert values["cursor_boundary"] == "excl"
+        assert values["last_cursor_value"] == "10"
+
+    def test_save_sync_without_a_boundary_never_alters_the_table(self) -> None:
+        client = _client([], [])
+        store = BigQueryWarehouseStateStore(_profile())
+        with (
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch.object(store, "_ensure_table"),
+        ):
+            store.save_sync(SyncState("s", "t", 1, "success"))
+
+        assert not any("cursor_boundary" in sql for sql in _sqls(client))
+
+    def test_strict_append_merges_new_ids_without_deleting(self) -> None:
+        client = _client([("old",)], [])
+        backend = BigQueryWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch.object(backend, "_ensure_table"),
+        ):
+            depth = backend._append_strict(
+                "s", [_dead_letter(id="a"), _dead_letter(id="a")], max_records=3
+            )
+
+        sqls = _sqls(client)
+        assert "SELECT id FROM" in sqls[0]
+        assert sqls[1].startswith("MERGE")
+        assert not any("DELETE" in sql for sql in sqls)
+        assert depth == 2
+
+    def test_strict_append_over_capacity_fails_before_any_write(self) -> None:
+        from drt.state.dlq import DlqCapacityExceeded
+
+        client = _client([("old",)])
+        backend = BigQueryWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch.object(backend, "_ensure_table"),
+            pytest.raises(DlqCapacityExceeded),
+        ):
+            backend._append_strict("s", [_dead_letter(id="new")], max_records=1)
+
+        assert len(_sqls(client)) == 1
+
+    def test_strict_append_replacing_an_existing_id_consumes_no_capacity(self) -> None:
+        client = _client([("same",)], [])
+        backend = BigQueryWarehouseDlqBackend(_profile())
+        with (
+            patch("drt.state.warehouse_bigquery._connect", return_value=client),
+            patch.object(backend, "_ensure_table"),
+        ):
+            depth = backend._append_strict("s", [_dead_letter(id="same")], max_records=1)
+
+        assert depth == 1
+        assert _sqls(client)[1].startswith("MERGE")

@@ -71,5 +71,9 @@ Nothing was written. Read the reason and tell the human; do not retry blindly.
 - Direct MCP `drt_run_sync(force_guards=true)` requires a non-empty
   `approved_by` and records that name in the result.
 - Plans never contain row values; keys can be hashed with `redact_keys` (or `--redact-keys`).
-- Apply is not for backfills or one-off fixes you have not planned; use `drt run --dry-run --diff` for exploration.
+- Plan/apply and dry-run/diff do not support `sync.backfill` in ADR 0021 slice 3; do not query windows as an exploratory workaround.
 - Recommended client setup: allow `drt_plan` freely and put `drt_apply` behind an approval prompt.
+
+## Windowed backfill rollout
+
+`sync.backfill: {window, start, end?}` executes only through `drt run` and MCP `drt_run_sync` in ADR 0021 slice 3. Dry-run/diff, `--limit`, `--cursor-value`, `--full-refresh`, build, serve, library calls, Airflow/Prefect/Dagster, test, plan/apply, exact replay, and retry are unsupported and must be reported as refusals, not workarounds. Use `drt state reset`, never hand-edit checkpoint files; same-sync concurrent runs and downgrading against backfill-written state are unsupported.
