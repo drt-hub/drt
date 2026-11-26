@@ -6150,6 +6150,11 @@
           "default": null,
           "title": "Custom Fields Template"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {

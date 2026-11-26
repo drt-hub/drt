@@ -33,6 +33,7 @@ destination:
 | `object` | `user\|organization` | `user` | Zendesk object type to upsert |
 | `id_field` | string \| null | null | Source row field containing a Zendesk `id` |
 | `custom_fields_template` | string \| null | null | Jinja2 template that renders a JSON object of custom fields |
+| `retry_creates` | bool | `false` | `true` restores replay of a create-or-update that carries no identity; see [Retry safety](#retry-safety) |
 | `retry` | RetryConfig \| null | null | Destination-level retry override |
 
 ## Authentication
@@ -91,6 +92,24 @@ destination:
 ```
 
 For users, custom fields are attached as `user_fields`. For organizations, they are attached as `organization_fields`.
+
+## Retry safety
+
+Zendesk's create-or-update calls match an existing record, so a replay of an
+**identified** row updates the same record and keeps normal retries: a user needs
+`id`, `external_id` or `email`; an organization needs `id` or `external_id`
+(matching rules for users are described in Zendesk's
+[importing users guide](https://developer.zendesk.com/documentation/ticketing/using-the-zendesk-api/importing-users-with-the-zendesk-api/);
+the organization rule is taken conservatively and has not been verified against a
+live account). A row that carries none of these creates a new record on every
+attempt, so it is a **blind create**: after a dropped response or a retryable 5xx,
+drt returns a delivery-unknown `RowError` after one request. For users, one
+unidentified row makes its whole 100-row batch blind. HTTP 429 and proven pre-send
+connection failures stay retryable.
+
+`retry_creates: true` restores the legacy replay and logs a duplicate-risk
+warning. See [retry safety](../guides/retry-safety.md). Vendor contract rechecked
+2026-11-26.
 
 ## Rate limiting
 

@@ -1119,6 +1119,7 @@ destination:
       "health_score": "{{ row.health_score }}",
       "plan": "{{ row.plan }}"
     }
+  retry_creates: false                   # default; true can duplicate a user/organization that has no id/external_id/email
 ```
 
 > Users are upserted through `users/create_or_update_many` in 100-record batches. Organizations use `organizations/create_or_update` per row. Custom fields are sent as `user_fields` or `organization_fields`.
