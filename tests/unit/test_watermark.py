@@ -53,6 +53,13 @@ class TestLocalWatermarkStorage:
         assert storage.get("sync_a") == "value_a"
         assert storage.get("sync_b") == "value_b"
 
+    def test_save_uses_atomic_replace(self, tmp_path: Path) -> None:
+        from drt.state import _atomic
+
+        with patch("drt.state._atomic.os.replace", wraps=_atomic.os.replace) as replace:
+            LocalWatermarkStorage(tmp_path).save("sync", "value")
+        assert replace.call_count == 1
+
 
 class TestGCSWatermarkStorage:
     @patch("drt.state.watermark._gcs_client")

@@ -123,6 +123,9 @@ class _RunContext:
     # Cooperative shutdown flag — set by SIGTERM/SIGINT handler in run().
     # Each engine call checks this between batches and exits gracefully.
     stop_event: threading.Event | None = None
+    # Explicit signal to the engine so sync.backfill can refuse the temporary
+    # pre-slice-4 full-refresh combination before extraction.
+    full_refresh: bool = False
     # Diff preview (#413) — when both dry_run and compute_diff are True,
     # the engine populates result.diff for the renderer to display.
     compute_diff: bool = False
@@ -167,6 +170,9 @@ class _RunContext:
     # Where the project lives. ``drt run`` is always invoked from it; the MCP
     # server may not be, so ``drt apply`` passes it explicitly.
     project_dir: Path = Path(".")
+    # Fail-closed engine opt-in. Only the `drt run` command sets this true;
+    # build/apply and other `_run_one` reusers retain the false default.
+    allow_backfill_execution: bool = False
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -188,10 +194,8 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
         registered_extra_observers,
     )
 
-    observers: list[Any] = [
-        LoggingObserver(),
-        StatePersistingObserver(ctx.state_mgr, wm_storage),
-    ]
+    checkpoint_observer = StatePersistingObserver(ctx.state_mgr, wm_storage)
+    observers: list[Any] = [LoggingObserver(), checkpoint_observer]
     if not ctx.dry_run and not ctx.exact and sync.sync.dlq is not None and sync.sync.dlq.enabled:
         observers.append(DlqObserver(ctx.dlq_store, max_records=sync.sync.dlq.max_records))
     # Enterprise extension point (#299, ADR 0008) — an audit-log observer
@@ -199,7 +203,7 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
     # every sync_started/sync_completed this run fires, same as the
     # built-in observers above. Empty by default (no OSS behavior change).
     observers.extend(registered_extra_observers())
-    return CompositeObserver(observers)
+    return CompositeObserver(observers, checkpoint_observer=checkpoint_observer)
 
 
 def _run_one(
@@ -274,6 +278,8 @@ def _run_one(
                 plan_id=ctx.plan_id,
                 approved_by=ctx.approved_by,
                 exact=ctx.exact,
+                full_refresh=ctx.full_refresh,
+                allow_backfill_execution=ctx.allow_backfill_execution,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -336,7 +342,13 @@ def _run_one(
 
         elapsed = round(time.monotonic() - t0, 2)
         status_str = (
-            "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
+            "partial"
+            if getattr(result, "interrupted", False)
+            else "success"
+            if result.failed == 0
+            else "partial"
+            if result.success > 0
+            else "failed"
         )
         rows_synced = result.success
         entry = {
@@ -455,7 +467,11 @@ def _run_one(
                     "Degraded-condition evaluation failed for %r: %s", sync.name, exc
                 )
 
-        return_value = (sync.name, entry, result.failed > 0)
+        return_value = (
+            sync.name,
+            entry,
+            result.failed > 0 or getattr(result, "interrupted", False),
+        )
         return return_value
     finally:
         if not ctx.dry_run:
@@ -829,7 +845,10 @@ def run(
     cursor_value: str = typer.Option(
         None,
         "--cursor-value",
-        help="Override cursor/watermark value for incremental syncs (backfill/recovery).",
+        help=(
+            "Override the cursor/watermark for legacy/ad-hoc one-bound recovery "
+            "(refused for sync.backfill)."
+        ),
     ),
     full_refresh: bool = typer.Option(
         False,
@@ -1068,6 +1087,13 @@ def run(
                     f"(a sample would delete or replace real rows): {', '.join(guarded)}"
                 )
                 raise typer.Exit(1)
+            backfills = [s.name for s in syncs if s.sync.backfill is not None]
+            if backfills:
+                print_error(
+                    "--limit is not allowed with sync.backfill because a sampled window "
+                    f"cannot be checkpointed as complete: {', '.join(backfills)}"
+                )
+                raise typer.Exit(1)
             if not json_mode and not quiet:
                 console.print(
                     f"[yellow]--limit {limit}: sampled run — watermarks will not advance.[/yellow]"
@@ -1077,6 +1103,17 @@ def run(
             # One says "start from nothing", the other "start from here". Silently
             # picking a winner would make a backfill look like it worked.
             print_error("--full-refresh and --cursor-value are mutually exclusive.")
+            raise typer.Exit(1)
+
+        backfills = [s.name for s in syncs if s.sync.backfill is not None]
+        if full_refresh and backfills:
+            print_error("--full-refresh is not allowed with sync.backfill: " + ", ".join(backfills))
+            raise typer.Exit(1)
+        if cursor_value is not None and backfills:
+            print_error(
+                "--cursor-value is not allowed with sync.backfill; CLI backfill range flags "
+                "arrive in ADR 0021 slice 4: " + ", ".join(backfills)
+            )
             raise typer.Exit(1)
 
         if full_refresh:
@@ -1163,6 +1200,7 @@ def run(
             log_json=log_format is LogFormat.JSON,
             cursor_value=cursor_value,
             stop_event=stop_event,
+            full_refresh=full_refresh,
             compute_diff=diff,
             diff_limit=diff_limit,
             extract_limit=limit,
@@ -1174,6 +1212,7 @@ def run(
             audit_fields=project.state.audit_trail.fields,
             audit_retain_days=project.state.audit_trail.retain_days or 30,
             force_guards=force_guards,
+            allow_backfill_execution=True,
         )
 
         # Execute syncs — parallel if threads > 1, sequential otherwise

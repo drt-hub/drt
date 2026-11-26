@@ -38,6 +38,14 @@ from drt.destinations.sql_utils import backtick_quote_ident_part
 
 _MYSQL_DUPLICATE_ENTRY = 1062
 _MYSQL_DUPLICATE_COLUMN = 1060
+_BACKFILL_KEY_TYPES = {
+    "bigint",
+    "int",
+    "integer",
+    "mediumint",
+    "smallint",
+    "tinyint",
+}
 
 
 def _is_duplicate_entry(exc: Exception) -> bool:
@@ -93,6 +101,26 @@ class MySQLDestination(BaseSqlDestination):
     Implements ConnectionTestable via test_connection(). Per-sync state, schema
     resolution, and mirror bookkeeping come from ``BaseSqlDestination``.
     """
+
+    @classmethod
+    def backfill_unsupported_reason(cls, config: DestinationConfig) -> str | None:
+        """MySQL keyed upserts are replay-safe when the key is configured."""
+        if not isinstance(config, MySQLDestinationConfig):
+            return "the destination config is not a MySQL config"
+        if not config.upsert_key:
+            return "destination.upsert_key must contain at least one column"
+        return None
+
+    def validate_backfill_target(self, config: DestinationConfig) -> None:
+        """Require an enforced key with engine-exact equality before extraction."""
+        assert isinstance(config, MySQLDestinationConfig)
+        conn = self._connect(config)
+        try:
+            self._managed_validate_upsert_constraint(
+                conn.cursor(), config, config.upsert_key, require_exact_comparison=True
+            )
+        finally:
+            conn.close()
 
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
@@ -152,7 +180,12 @@ class MySQLDestination(BaseSqlDestination):
         return result
 
     def _managed_validate_upsert_constraint(
-        self, cur: Any, config: MySQLDestinationConfig, upsert_keys: list[str]
+        self,
+        cur: Any,
+        config: MySQLDestinationConfig,
+        upsert_keys: list[str],
+        *,
+        require_exact_comparison: bool = False,
     ) -> None:
         """Require an exact PRIMARY/UNIQUE key for MySQL's upsert semantics."""
         if not upsert_keys:
@@ -166,31 +199,68 @@ class MySQLDestination(BaseSqlDestination):
             schema_predicate = "DATABASE()"
             params = [table]
         cur.execute(
-            "SELECT index_name, column_name, seq_in_index, sub_part "
-            "FROM information_schema.statistics WHERE table_name = %s "
-            f"AND table_schema = {schema_predicate} AND non_unique = 0 "
-            "ORDER BY index_name, seq_in_index",
+            "SELECT s.index_name, s.column_name, s.seq_in_index, s.sub_part, c.is_nullable, "
+            "c.data_type "
+            "FROM information_schema.statistics AS s "
+            "JOIN information_schema.columns AS c "
+            "ON c.table_schema = s.table_schema AND c.table_name = s.table_name "
+            "AND c.column_name = s.column_name WHERE s.table_name = %s "
+            f"AND s.table_schema = {schema_predicate} AND s.non_unique = 0 "
+            "ORDER BY s.index_name, s.seq_in_index",
             params,
         )
-        indexes: dict[str, list[tuple[int, str, int | None]]] = {}
+        indexes: dict[str, list[tuple[int, str, int | None, bool, str]]] = {}
         for row in cur.fetchall():
             values = list(row.values()) if isinstance(row, dict) else list(row)
             sub_part = None if values[3] is None else int(values[3])
             indexes.setdefault(str(values[0]), []).append(
-                (int(values[2]), str(values[1]).lower(), sub_part)
+                (
+                    int(values[2]),
+                    str(values[1]).lower(),
+                    sub_part,
+                    str(values[4]).upper() == "YES",
+                    str(values[5]).lower() if len(values) > 5 else "",
+                )
             )
         expected = sorted(column.lower() for column in upsert_keys)
-        if any(
-            sorted(column for _, column, _ in columns) == expected
-            and all(sub_part is None for _, _, sub_part in columns)
-            for columns in indexes.values()
+        matching = [
+            (index_name, columns)
+            for index_name, columns in indexes.items()
+            if sorted(column for _, column, _, _, _ in columns) == expected
+            and all(sub_part is None for _, _, sub_part, _, _ in columns)
+            and (
+                index_name.upper() == "PRIMARY"
+                or all(not nullable for _, _, _, nullable, _ in columns)
+            )
+        ]
+        if matching and not require_exact_comparison:
+            return
+        if matching and any(
+            all(data_type in _BACKFILL_KEY_TYPES for _, _, _, _, data_type in columns)
+            for _, columns in matching
         ):
             return
+        if matching:
+            unsafe = sorted(
+                {
+                    column
+                    for _, columns in matching
+                    for _, column, _, _, data_type in columns
+                    if data_type not in _BACKFILL_KEY_TYPES
+                }
+            )
+            raise ValueError(
+                f"Destination table {config.table!r} cannot safely run a windowed "
+                f"backfill: destination.upsert_key columns {unsafe} are not integer "
+                "columns. Use an integer surrogate key for MySQL backfill in v1, or "
+                "choose another destination."
+            )
         raise ValueError(
             f"Destination table {config.table!r} must have a full-column PRIMARY or UNIQUE "
-            f"index exactly covering destination.upsert_key {upsert_keys} before MySQL can "
-            "upsert. Prefix indexes are not valid upsert keys. Add the index manually; drt "
-            "never changes constraints on an existing table."
+            f"index exactly covering destination.upsert_key {upsert_keys}, with every UNIQUE "
+            "key column declared NOT NULL, before MySQL can upsert. Prefix indexes and nullable "
+            "UNIQUE keys are not valid upsert keys. Add the index or NOT NULL constraints "
+            "manually; drt never changes constraints on an existing table."
         )
 
     @staticmethod

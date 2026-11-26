@@ -30,6 +30,7 @@ from typing import Any
 
 from drt.engine.diff import DiffResult
 from drt.engine.guards import GuardTrip, evaluate_guards
+from drt.engine.key_safety import destination_key_overlaps
 
 PLAN_SCHEMA_VERSION = 2
 
@@ -498,6 +499,11 @@ def unsupported_reason(sync: Any) -> str | None:
     the answer is "unavailable, with a reason" rather than a best effort.
     """
     options = sync.sync
+    if getattr(options, "backfill", None) is not None:
+        return (
+            "sync.backfill is not supported by drt plan/apply yet "
+            "(ADR 0021 slices 5-6 will seal and verify complete window ranges)"
+        )
     policy = getattr(options, "match_policy", "upsert")
     if policy != "upsert":
         return (
@@ -509,19 +515,14 @@ def unsupported_reason(sync: Any) -> str | None:
             "incremental_strategy: diff is not supported by drt plan yet "
             "(snapshot extraction writes scratch tables, so it is not read-only)"
         )
-    metadata = getattr(options, "metadata_columns", None)
-    if metadata is not None:
-        targets = {
-            getattr(metadata, name)
-            for name in ("synced_at", "run_id", "sync_name")
-            if getattr(metadata, name, None)
-        }
-        overlap = sorted(targets & set(getattr(sync.destination, "upsert_key", None) or []))
-        if overlap:
-            return (
-                f"upsert_key includes engine-written metadata column(s) {overlap}; "
-                "their values differ between a plan and a real run"
-            )
+    overlap = destination_key_overlaps(
+        options, getattr(sync.destination, "upsert_key", None)
+    ).run_varying_metadata
+    if overlap:
+        return (
+            f"upsert_key includes engine-written metadata column(s) {list(overlap)}; "
+            "their values differ between a plan and a real run"
+        )
     return None
 
 

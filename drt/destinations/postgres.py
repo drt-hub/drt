@@ -150,6 +150,15 @@ class PostgresDestination(BaseSqlDestination):
     resolution, and mirror bookkeeping come from ``BaseSqlDestination``.
     """
 
+    @classmethod
+    def backfill_unsupported_reason(cls, config: DestinationConfig) -> str | None:
+        """PostgreSQL ON CONFLICT writes are replay-safe with a real key."""
+        if not isinstance(config, PostgresDestinationConfig):
+            return "the destination config is not a PostgreSQL config"
+        if not config.upsert_key:
+            return "destination.upsert_key must contain at least one column"
+        return None
+
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
 

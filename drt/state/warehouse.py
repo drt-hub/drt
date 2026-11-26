@@ -85,7 +85,7 @@ from drt.state._history_columns import (
     resolve_optional_columns,
 )
 from drt.state.audit_trail import AuditEntry
-from drt.state.dlq import DeadLetter
+from drt.state.dlq import DeadLetter, prepare_strict_dlq_append
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
 
@@ -117,6 +117,15 @@ def _is_undefined_table(exc: Exception) -> bool:
     import psycopg2
 
     return isinstance(exc, psycopg2.errors.UndefinedTable)
+
+
+def _is_undefined_cursor_boundary(exc: Exception) -> bool:
+    """PostgreSQL 42703 specifically for the additive marker column."""
+    import psycopg2
+
+    return isinstance(exc, psycopg2.errors.UndefinedColumn) and (
+        "cursor_boundary" in str(exc).lower()
+    )
 
 
 # Batches DlqBackend.append()/.replace()/.reconcile()'s per-entry writes into
@@ -202,7 +211,8 @@ class PostgresWarehouseStateStore:
             "records_synced BIGINT NOT NULL, "
             "status TEXT NOT NULL, "
             "error TEXT, "
-            "last_cursor_value TEXT",
+            "last_cursor_value TEXT, "
+            "cursor_boundary TEXT",
         )
 
     def get_last_sync(self, sync_name: str) -> SyncState | None:
@@ -210,10 +220,20 @@ class PostgresWarehouseStateStore:
         try:
             cur = conn.cursor()
             try:
-                cur.execute(
-                    _pgsql_select_runs().format(_qualified(self._profile, _RUNS_TABLE)),
-                    (sync_name,),
-                )
+                try:
+                    cur.execute(
+                        _pgsql_select_runs().format(_qualified(self._profile, _RUNS_TABLE)),
+                        (sync_name,),
+                    )
+                except Exception as exc:
+                    if not _is_undefined_cursor_boundary(exc):
+                        raise
+                    conn.rollback()
+                    cur = conn.cursor()
+                    cur.execute(
+                        _pgsql_select_runs_legacy().format(_qualified(self._profile, _RUNS_TABLE)),
+                        (sync_name,),
+                    )
             except Exception as exc:
                 if _is_undefined_table(exc):
                     return None
@@ -230,7 +250,20 @@ class PostgresWarehouseStateStore:
         try:
             cur = conn.cursor()
             try:
-                cur.execute(_pgsql_select_all_runs().format(_qualified(self._profile, _RUNS_TABLE)))
+                try:
+                    cur.execute(
+                        _pgsql_select_all_runs().format(_qualified(self._profile, _RUNS_TABLE))
+                    )
+                except Exception as exc:
+                    if not _is_undefined_cursor_boundary(exc):
+                        raise
+                    conn.rollback()
+                    cur = conn.cursor()
+                    cur.execute(
+                        _pgsql_select_all_runs_legacy().format(
+                            _qualified(self._profile, _RUNS_TABLE)
+                        )
+                    )
             except Exception as exc:
                 if _is_undefined_table(exc):
                     return {}
@@ -246,25 +279,52 @@ class PostgresWarehouseStateStore:
         try:
             self._ensure_table(conn)
             cur = conn.cursor()
-            cur.execute(
-                _pgsql.SQL(
-                    "INSERT INTO {} (sync_name, last_run_at, records_synced, status, "
-                    "error, last_cursor_value) VALUES (%s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT (sync_name) DO UPDATE SET "
-                    "last_run_at = EXCLUDED.last_run_at, "
-                    "records_synced = EXCLUDED.records_synced, "
-                    "status = EXCLUDED.status, "
-                    "error = EXCLUDED.error, "
-                    "last_cursor_value = EXCLUDED.last_cursor_value"
-                ).format(_qualified(self._profile, _RUNS_TABLE)),
-                (
+            parameters: tuple[Any, ...]
+            if state.cursor_boundary is not None:
+                cur.execute(
+                    _pgsql.SQL(
+                        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS cursor_boundary TEXT"
+                    ).format(_qualified(self._profile, _RUNS_TABLE))
+                )
+                columns = "error, last_cursor_value, cursor_boundary"
+                values = "%s, %s, %s, %s, %s, %s, %s"
+                update = (
+                    "last_cursor_value = EXCLUDED.last_cursor_value, "
+                    "cursor_boundary = EXCLUDED.cursor_boundary"
+                )
+                parameters = (
                     state.sync_name,
                     state.last_run_at,
                     state.records_synced,
                     state.status,
                     state.error,
                     state.last_cursor_value,
-                ),
+                    state.cursor_boundary,
+                )
+            else:
+                columns = "error, last_cursor_value"
+                values = "%s, %s, %s, %s, %s, %s"
+                update = "last_cursor_value = EXCLUDED.last_cursor_value"
+                parameters = (
+                    state.sync_name,
+                    state.last_run_at,
+                    state.records_synced,
+                    state.status,
+                    state.error,
+                    state.last_cursor_value,
+                )
+            cur.execute(
+                _pgsql.SQL(
+                    "INSERT INTO {} (sync_name, last_run_at, records_synced, status, "
+                    f"{columns}) VALUES ({values}) "
+                    "ON CONFLICT (sync_name) DO UPDATE SET "
+                    "last_run_at = EXCLUDED.last_run_at, "
+                    "records_synced = EXCLUDED.records_synced, "
+                    "status = EXCLUDED.status, "
+                    "error = EXCLUDED.error, "
+                    f"{update}"
+                ).format(_qualified(self._profile, _RUNS_TABLE)),
+                parameters,
             )
             conn.commit()
         finally:
@@ -301,7 +361,7 @@ def _pgsql_select_runs() -> Any:
     from psycopg2 import sql as _pgsql
 
     return _pgsql.SQL(
-        "SELECT last_run_at, records_synced, status, error, last_cursor_value "
+        "SELECT last_run_at, records_synced, status, error, last_cursor_value, cursor_boundary "
         "FROM {} WHERE sync_name = %s"
     )
 
@@ -310,12 +370,30 @@ def _pgsql_select_all_runs() -> Any:
     from psycopg2 import sql as _pgsql
 
     return _pgsql.SQL(
+        "SELECT sync_name, last_run_at, records_synced, status, error, last_cursor_value, "
+        "cursor_boundary FROM {}"
+    )
+
+
+def _pgsql_select_runs_legacy() -> Any:
+    from psycopg2 import sql as _pgsql
+
+    return _pgsql.SQL(
+        "SELECT last_run_at, records_synced, status, error, last_cursor_value "
+        "FROM {} WHERE sync_name = %s"
+    )
+
+
+def _pgsql_select_all_runs_legacy() -> Any:
+    from psycopg2 import sql as _pgsql
+
+    return _pgsql.SQL(
         "SELECT sync_name, last_run_at, records_synced, status, error, last_cursor_value FROM {}"
     )
 
 
 def _row_to_sync_state(sync_name: str, row: tuple[Any, ...]) -> SyncState:
-    last_run_at, records_synced, status, error, last_cursor_value = row
+    last_run_at, records_synced, status, error, last_cursor_value, *optional = row
     return SyncState(
         sync_name=sync_name,
         last_run_at=last_run_at,
@@ -323,6 +401,7 @@ def _row_to_sync_state(sync_name: str, row: tuple[Any, ...]) -> SyncState:
         status=status,
         error=error,
         last_cursor_value=last_cursor_value,
+        cursor_boundary=optional[0] if optional else None,
     )
 
 
@@ -635,6 +714,72 @@ class PostgresWarehouseDlqBackend:
                 )
             conn.commit()
             return self.depth(sync_name)
+        finally:
+            conn.close()
+
+    def _append_strict(
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int:
+        """Capacity-check and upsert in one PostgreSQL transaction."""
+        from psycopg2 import sql as _pgsql
+
+        conn = _connect(self._profile)
+        try:
+            self._ensure_table(conn)
+            cur = conn.cursor()
+            cur.execute(
+                _pgsql.SQL("SELECT id FROM {} WHERE sync_name = %s FOR UPDATE").format(
+                    _qualified(self._profile, _DLQ_TABLE)
+                ),
+                (sync_name,),
+            )
+            rows = cur.fetchall()
+            existing_ids = [str(row[0]) for row in rows]
+            strict_entries = prepare_strict_dlq_append(
+                sync_name,
+                set(existing_ids),
+                len(existing_ids),
+                entries,
+                max_records=max_records,
+                incoming_ids=incoming_ids,
+            )
+            for chunk in _chunked(strict_entries, _rows_per_chunk(8)):
+                values_sql = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk))
+                params: list[Any] = []
+                for entry in chunk:
+                    params.extend(
+                        (
+                            entry.id,
+                            sync_name,
+                            json.dumps(entry.record),
+                            entry.error_message,
+                            entry.http_status,
+                            entry.timestamp,
+                            entry.attempts,
+                            entry.sync_run_id,
+                        )
+                    )
+                cur.execute(
+                    _pgsql.SQL(
+                        "INSERT INTO {} (id, sync_name, record, error_message, "
+                        "http_status, ts, attempts, sync_run_id) "
+                        f"VALUES {values_sql} ON CONFLICT (id) DO UPDATE SET "
+                        "record = EXCLUDED.record, error_message = EXCLUDED.error_message, "
+                        "http_status = EXCLUDED.http_status, ts = EXCLUDED.ts, "
+                        "attempts = EXCLUDED.attempts, sync_run_id = EXCLUDED.sync_run_id"
+                    ).format(_qualified(self._profile, _DLQ_TABLE)),
+                    params,
+                )
+            conn.commit()
+            return len(set(existing_ids).union(entry.id for entry in strict_entries))
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

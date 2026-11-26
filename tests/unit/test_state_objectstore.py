@@ -87,6 +87,19 @@ def test_remote_implementations_satisfy_store_protocols() -> None:
     assert isinstance(ObjectStoreDlqBackend(client), DlqBackend)
 
 
+def test_object_dlq_append_is_idempotent_per_entry_id() -> None:
+    store = ObjectStoreDlqBackend(MemoryObjectClient())
+    first = DeadLetter(record={"id": 1}, error_message="first", id="stable-id")
+    retried = DeadLetter(record={"id": 1}, error_message="retried", id="stable-id")
+
+    assert store.append("s", [first]) == 1
+    assert store.append("s", [retried]) == 1
+
+    entries = store.read("s")
+    assert len(entries) == 1
+    assert entries[0].error_message == "retried"
+
+
 def test_state_retries_conflicts_with_exponential_nonzero_backoff() -> None:
     client = MemoryObjectClient(failures=3)
     store = ObjectStoreStateStore(client)

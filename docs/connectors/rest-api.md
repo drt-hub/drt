@@ -226,7 +226,7 @@ api_users:
   result_path: data.items     # optional dot-path to the records array in the response
   incremental:                # optional — see below
     start_param: updated_since
-    end_param: updated_before # optional; required by sync.backfill (not executable yet)
+    end_param: updated_before # optional; required by executable sync.backfill windows
 ```
 
 | Field | Type | Default | Description |
@@ -237,7 +237,7 @@ api_users:
 | `pagination` | PaginationConfig \| null | null | `offset` (offset/limit params), `cursor` (token from the response), or `link_header` (RFC 5988 `Link: rel="next"`); `max_pages` caps all styles (default 100) |
 | `result_path` | string \| null | null | Dot-notation path to the records array (defaults: top-level list, `records`, or `data`) |
 | `incremental.start_param` | string \| null | null | Incremental extraction — see below |
-| `incremental.end_param` | string \| null | null | Exclusive upper-bound parameter for `sync.backfill` windows (configuration only; window execution is not usable yet) |
+| `incremental.end_param` | string \| null | null | Exclusive upper-bound parameter for executable `sync.backfill` windows |
 
 ## Incremental extraction
 
@@ -266,15 +266,17 @@ How the pieces compose:
 - The parameter is sent on every page for `offset` / `cursor` / no-pagination
   styles; for `link_header` only on the first request (the server's `next`
   links are authoritative full URLs).
-- `--cursor-value` works as usual for bounded backfills.
+- `--cursor-value` works for legacy one-bound recovery, but is refused when a
+  sync declares `sync.backfill`.
 - Without `incremental.start_param`, `mode: incremental` still tracks the
   watermark but re-extracts the full endpoint every run (drt logs a warning).
 - `sync.backfill` additionally requires `incremental.end_param`; drt sends the
-  half-open window as `start_param=low&end_param=high`. ADR 0021 window
-  execution remains gated until its checkpoint slice lands, so this field is
-  accepted now but is not yet usable through `drt run`. Windowed extraction
-  rejects `link_header` pagination because a followed link may omit the two
-  required bounds; use offset or cursor pagination instead.
+  half-open window as `start_param=low&end_param=high`. Slice 3 executes these
+  windows through `drt run` and MCP `drt_run_sync`; dry-run, build, serve,
+  orchestrator, plan/apply, exact replay, retry, limit, cursor override, and
+  full-refresh entry points are refused. Windowed extraction rejects
+  `link_header` pagination because a followed link may omit the two required
+  bounds; use offset or cursor pagination instead.
 - Pagination request keys must be distinct within their strategy:
   `offset_param` must differ from `limit_param`, and `cursor_param` must differ
   from `limit_param`. These comparisons, and the checks against incremental

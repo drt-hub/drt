@@ -148,6 +148,8 @@ def create_server(project_dir: Path | None = None) -> Any:
         Args:
             sync_name: Name of the sync to run (from drt_list_syncs).
             dry_run: If True, extracts data but does not write to destination.
+                Refused for a sync declaring ``sync.backfill`` in ADR 0021
+                slice 3; window preview/diff arrives in slice 4.
             compute_diff: When True (requires ``dry_run=True``), compute a
                 record-level diff (added / updated / deleted / unchanged)
                 against the destination. Queryable destinations get a true
@@ -158,9 +160,10 @@ def create_server(project_dir: Path | None = None) -> Any:
                 removed-key set without a destination delete scan.
                 Mirrors ``drt run --dry-run --diff`` (v0.7.1+).
             diff_limit: Cap on records per diff category (default 20).
-            cursor_value: Override the incremental watermark for a bounded
-                backfill (mirrors ``drt run --cursor-value``, v0.6.2). Ignored
-                for non-incremental syncs.
+            cursor_value: Override the legacy incremental watermark for
+                one-bound recovery (mirrors ``drt run --cursor-value``,
+                v0.6.2). Refused when ``sync.backfill`` is configured and
+                ignored for non-incremental syncs.
             profile_name: Override the profile resolved from drt_project.yml /
                 ``DRT_PROFILE`` (mirrors ``drt run --profile``).
             manifest_path: dbt manifest used by ``contract.source: dbt``;

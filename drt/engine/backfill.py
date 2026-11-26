@@ -7,6 +7,8 @@ in a later ADR slice.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
@@ -292,3 +294,105 @@ def validate_window_row(
             f"[{canonical_low!r}, {canonical_high!r}); refusing to load the row."
         )
     return None
+
+
+def validate_window_upsert_keys(
+    records: list[dict[str, Any]],
+    upsert_key: list[str],
+    *,
+    destination_type: str,
+    sync_name: str,
+    low: BackfillBound,
+    high: BackfillBound,
+    seen_key_digests: set[bytes],
+    row_ordinal: int,
+) -> int:
+    """Reject unsafe destination-facing keys before a backfill write.
+
+    SQL uniqueness and ``MERGE`` equality do not generally consider ``NULL``
+    equal to itself. Letting one through would therefore make an uncheckpointed
+    window unsafe to replay after its destination write committed. Duplicate
+    keys in one source window are also unsafe: warehouse ``MERGE`` statements
+    may insert every duplicate as unmatched, while row-wise destinations make
+    the winning value depend on source order.
+
+    ``seen_key_digests`` and ``row_ordinal`` belong to one window and are
+    carried across its streamed batches by the caller. Only 16-byte BLAKE2b
+    digests are retained; raw key values never enter the error or the set.
+    The type-tagged digest is sound only under ADR 0021's destination-exact
+    key-equality contract. The engine therefore admits only exact ``int`` and
+    ``str`` values; destination contracts must additionally refuse collations
+    that can equate two admitted strings this digest keeps distinct.
+    """
+    for record_index, record in enumerate(records):
+        for column in upsert_key:
+            if column not in record or record[column] is None:
+                raise ValueError(
+                    f"Windowed backfill sync {sync_name!r} cannot replay safely: "
+                    f"destination.upsert_key column {column!r} is null or missing "
+                    f"in record {record_index} for window [{low!r}, {high!r}); "
+                    "refusing the destination write and checkpoint."
+                )
+            value = record[column]
+            if destination_type == "mysql" and type(value) is not int:
+                raise ValueError(
+                    f"Windowed backfill sync {sync_name!r} cannot replay safely: "
+                    f"MySQL destination.upsert_key column {column!r} has unsupported "
+                    f"value type {type(value).__name__!r} in record {record_index} for "
+                    f"window [{low!r}, {high!r}); cast the key to an integer in the "
+                    "model SQL or use an integer surrogate key for MySQL backfill in "
+                    "v1; refusing the destination write and checkpoint."
+                )
+            if type(value) not in (int, str):
+                raise ValueError(
+                    f"Windowed backfill sync {sync_name!r} cannot replay safely: "
+                    f"destination.upsert_key column {column!r} has unsupported value "
+                    f"type {type(value).__name__!r} in record {record_index} for window "
+                    f"[{low!r}, {high!r}); cast the key to an integer or string in the "
+                    "model SQL, or use an integer surrogate key; refusing the "
+                    "destination write and checkpoint."
+                )
+        key = tuple(record[column] for column in upsert_key)
+        digest = _window_upsert_key_digest(key)
+        if digest in seen_key_digests:
+            duplicate_ordinal = row_ordinal + record_index + 1
+            raise ValueError(
+                f"Windowed backfill sync {sync_name!r} cannot replay safely: "
+                f"duplicate destination.upsert_key columns {upsert_key!r} first repeat "
+                f"at destination row ordinal {duplicate_ordinal} for window "
+                f"[{low!r}, {high!r}); key values are redacted. Deduplicate the model "
+                "or shrink sync.backfill.window, then retry; refusing the destination "
+                "write and checkpoint."
+            )
+        seen_key_digests.add(digest)
+    return row_ordinal + len(records)
+
+
+def _window_upsert_key_digest(key: tuple[Any, ...]) -> bytes:
+    """Return a fixed-size digest of a canonical, type-tagged key tuple."""
+    encoded = json.dumps(
+        [_type_tagged_key_value(value) for value in key],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.blake2b(encoded, digest_size=16).digest()
+
+
+def canonical_window_upsert_key(record: dict[str, Any], upsert_key: list[str]) -> list[list[Any]]:
+    """Encode one already-validated destination key for durable identity.
+
+    The column name and type tag make composite ordering and the exact
+    integer/string domain explicit. Callers must run
+    :func:`validate_window_upsert_keys` first so missing, null, or unsupported
+    values fail with its operator-facing diagnostics.
+    """
+    return [[column, *_type_tagged_key_value(record[column])] for column in upsert_key]
+
+
+def _type_tagged_key_value(value: Any) -> list[Any]:
+    """Encode the engine's exact, deliberately narrow backfill key domain."""
+    if type(value) is int:
+        return ["int", str(value)]
+    if type(value) is str:
+        return ["str", value]
+    raise TypeError("windowed backfill key values must be exact integers or strings")

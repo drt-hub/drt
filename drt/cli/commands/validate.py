@@ -97,6 +97,30 @@ def _find_ineffective_native_idempotency_keys(
     return findings
 
 
+def _reject_unsafe_backfill_destinations(syncs: list[SyncConfig]) -> dict[str, list[str]]:
+    """Return fail-closed destination errors for ``drt validate``.
+
+    Parsing remains connector-agnostic so tooling can inspect a staged slice-3
+    config, but validation and execution both enforce the destination safety
+    declaration.  Plugin destinations therefore default to unsupported until
+    they explicitly implement the additive capability.
+    """
+    from drt.config.models import BackfillConfig
+    from drt.connectors.registry import get_destination
+    from drt.destinations.base import ensure_windowed_backfill_destination
+
+    errors: dict[str, list[str]] = {}
+    for sync in syncs:
+        if not isinstance(sync.sync.backfill, BackfillConfig):
+            continue
+        try:
+            destination = get_destination(sync.destination)
+            ensure_windowed_backfill_destination(destination, sync.destination)
+        except (TypeError, ValueError) as exc:
+            errors[sync.name] = [str(exc)]
+    return errors
+
+
 def _fnmatch_token(name: str, token: str) -> bool:
     """Bare-name/glob select tokens only — method tokens (tag:, destination:)
     cannot match unparseable syncs, which exist solely as error-dict keys."""
@@ -172,6 +196,12 @@ def validate(
         if manifest_path is None
         else load_syncs_safe(Path("."), manifest_path=manifest_path)
     )
+    backfill_destination_errors = _reject_unsafe_backfill_destinations(result.syncs)
+    if backfill_destination_errors:
+        result.syncs = [
+            sync for sync in result.syncs if sync.name not in backfill_destination_errors
+        ]
+        result.errors.update(backfill_destination_errors)
     secret_findings = find_hardcoded_secrets(Path("."))
     idempotency_findings = _find_ineffective_native_idempotency_keys(result.syncs)
 

@@ -59,6 +59,29 @@ def _undefined_table_conn() -> MagicMock:
 
 
 class TestPostgresWarehouseStateStore:
+    def test_undefined_marker_error_is_the_only_legacy_fallback(self) -> None:
+        from drt.state.warehouse import _is_undefined_cursor_boundary
+
+        assert _is_undefined_cursor_boundary(
+            psycopg2.errors.UndefinedColumn('column "cursor_boundary" does not exist')
+        )
+        assert not _is_undefined_cursor_boundary(
+            psycopg2.errors.UndefinedColumn('column "some_other_column" does not exist')
+        )
+
+    def test_other_undefined_column_error_is_reraised(self) -> None:
+        conn = _mock_conn()
+        error = psycopg2.errors.UndefinedColumn('column "some_other_column" does not exist')
+        conn.cursor.return_value.execute.side_effect = error
+
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            pytest.raises(psycopg2.errors.UndefinedColumn, match="some_other_column"),
+        ):
+            PostgresWarehouseStateStore(_profile()).get_last_sync("s")
+
+        conn.rollback.assert_not_called()
+
     def test_get_last_sync_returns_none_before_any_table_exists(self) -> None:
         conn = _undefined_table_conn()
         with patch("drt.state.warehouse._connect", return_value=conn):

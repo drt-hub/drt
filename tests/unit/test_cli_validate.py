@@ -171,6 +171,29 @@ def test_cli_validate_invalid_sync_shows_errors(
     assert result.exit_code == 1
 
 
+def test_cli_validate_rejects_unsafe_windowed_backfill_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync = {
+        "name": "unsafe-backfill",
+        "model": "SELECT id FROM events",
+        "destination": {"type": "file", "path": "events.csv"},
+        "sync": {
+            "mode": "incremental",
+            "cursor_field": "id",
+            "backfill": {"window": 10, "start": 0},
+        },
+    }
+    _write_sync(tmp_path / "syncs", "unsafe-backfill", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate"])
+
+    assert result.exit_code == 1
+    assert "destination type 'file'" in result.output
+    assert "Supported destination types" in result.output
+
+
 def test_cli_validate_preserves_computed_field_brackets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -168,7 +168,7 @@ from drt.state._history_columns import (
     encode_optional,
     resolve_optional_columns,
 )
-from drt.state.dlq import DeadLetter
+from drt.state.dlq import DeadLetter, prepare_strict_dlq_append
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
 
@@ -239,6 +239,21 @@ def _json_or_parsed(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
 
 
+def _is_undefined_cursor_boundary(exc: Exception) -> bool:
+    """Databricks SQL unresolved-column error (SQLSTATE 42703)."""
+    error_code = str(getattr(exc, "error_code", ""))
+    message = str(exc).lower()
+    return (
+        getattr(exc, "sqlstate", None) == "42703"
+        or error_code.startswith("UNRESOLVED_COLUMN")
+        or (
+            type(exc).__name__ == "ServerOperationError"
+            and "unresolved_column" in message
+            and "sqlstate: 42703" in message
+        )
+    ) and "cursor_boundary" in message
+
+
 class DatabricksWarehouseStateStore:
     """``StateStore`` backed by a ``_drt_runs`` row per sync (#1108)."""
 
@@ -255,7 +270,8 @@ class DatabricksWarehouseStateStore:
             "records_synced BIGINT NOT NULL, "
             "status STRING NOT NULL, "
             "error STRING, "
-            "last_cursor_value STRING",
+            "last_cursor_value STRING, "
+            "cursor_boundary STRING",
         )
 
     def get_last_sync(self, sync_name: str) -> SyncState | None:
@@ -264,11 +280,22 @@ class DatabricksWarehouseStateStore:
         conn = _connect(self._profile)
         try:
             cur = conn.cursor()
-            cur.execute(
-                f"SELECT last_run_at, records_synced, status, error, last_cursor_value "
-                f"FROM {_qualified(self._profile, _RUNS_TABLE)} WHERE sync_name = ?",
-                [sync_name],
-            )
+            try:
+                cur.execute(
+                    "SELECT last_run_at, records_synced, status, error, last_cursor_value, "
+                    f"cursor_boundary FROM {_qualified(self._profile, _RUNS_TABLE)} "
+                    "WHERE sync_name = ?",
+                    [sync_name],
+                )
+            except Exception as exc:
+                if not _is_undefined_cursor_boundary(exc):
+                    raise
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT last_run_at, records_synced, status, error, last_cursor_value "
+                    f"FROM {_qualified(self._profile, _RUNS_TABLE)} WHERE sync_name = ?",
+                    [sync_name],
+                )
             row = cur.fetchone()
             if row is None:
                 return None
@@ -282,10 +309,20 @@ class DatabricksWarehouseStateStore:
         conn = _connect(self._profile)
         try:
             cur = conn.cursor()
-            cur.execute(
-                "SELECT sync_name, last_run_at, records_synced, status, error, "
-                f"last_cursor_value FROM {_qualified(self._profile, _RUNS_TABLE)}"
-            )
+            try:
+                cur.execute(
+                    "SELECT sync_name, last_run_at, records_synced, status, error, "
+                    f"last_cursor_value, cursor_boundary FROM "
+                    f"{_qualified(self._profile, _RUNS_TABLE)}"
+                )
+            except Exception as exc:
+                if not _is_undefined_cursor_boundary(exc):
+                    raise
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT sync_name, last_run_at, records_synced, status, error, "
+                    f"last_cursor_value FROM {_qualified(self._profile, _RUNS_TABLE)}"
+                )
             return {row[0]: _row_to_sync_state(row[0], row[1:]) for row in cur.fetchall()}
         finally:
             conn.close()
@@ -301,33 +338,54 @@ class DatabricksWarehouseStateStore:
             self._ensure_table(conn)
             t = _qualified(self._profile, _RUNS_TABLE)
             cur = conn.cursor()
+            if state.cursor_boundary is not None:
+                try:
+                    cur.execute(f"ALTER TABLE {t} ADD COLUMNS (cursor_boundary STRING)")
+                except Exception as exc:
+                    normalized = str(exc).lower().replace("_", " ")
+                    if "already exists" not in normalized:
+                        raise
             cur.execute(f"SELECT 1 FROM {t} WHERE sync_name = ?", [state.sync_name])
             exists = cur.fetchone() is not None
             if exists:
+                assignments = (
+                    "error = ?, last_cursor_value = ?, cursor_boundary = ?"
+                    if state.cursor_boundary is not None
+                    else "error = ?, last_cursor_value = ?"
+                )
+                params = [
+                    state.last_run_at,
+                    state.records_synced,
+                    state.status,
+                    state.error,
+                    state.last_cursor_value,
+                ]
+                if state.cursor_boundary is not None:
+                    params.append(state.cursor_boundary)
+                params.append(state.sync_name)
                 cur.execute(
                     f"UPDATE {t} SET last_run_at = ?, records_synced = ?, status = ?, "
-                    "error = ?, last_cursor_value = ? WHERE sync_name = ?",
-                    [
-                        state.last_run_at,
-                        state.records_synced,
-                        state.status,
-                        state.error,
-                        state.last_cursor_value,
-                        state.sync_name,
-                    ],
+                    f"{assignments} WHERE sync_name = ?",
+                    params,
                 )
             else:
+                boundary_column = ", cursor_boundary" if state.cursor_boundary is not None else ""
+                boundary_value = ", ?" if state.cursor_boundary is not None else ""
+                params = [
+                    state.sync_name,
+                    state.last_run_at,
+                    state.records_synced,
+                    state.status,
+                    state.error,
+                    state.last_cursor_value,
+                ]
+                if state.cursor_boundary is not None:
+                    params.append(state.cursor_boundary)
                 cur.execute(
                     f"INSERT INTO {t} (sync_name, last_run_at, records_synced, status, "
-                    "error, last_cursor_value) VALUES (?, ?, ?, ?, ?, ?)",
-                    [
-                        state.sync_name,
-                        state.last_run_at,
-                        state.records_synced,
-                        state.status,
-                        state.error,
-                        state.last_cursor_value,
-                    ],
+                    f"error, last_cursor_value{boundary_column}) "
+                    f"VALUES (?, ?, ?, ?, ?, ?{boundary_value})",
+                    params,
                 )
         finally:
             conn.close()
@@ -353,7 +411,7 @@ class DatabricksWarehouseStateStore:
 
 
 def _row_to_sync_state(sync_name: str, row: tuple[Any, ...]) -> SyncState:
-    last_run_at, records_synced, status, error, last_cursor_value = row
+    last_run_at, records_synced, status, error, last_cursor_value, *optional = row
     return SyncState(
         sync_name=sync_name,
         last_run_at=last_run_at,
@@ -361,6 +419,7 @@ def _row_to_sync_state(sync_name: str, row: tuple[Any, ...]) -> SyncState:
         status=status,
         error=error,
         last_cursor_value=last_cursor_value,
+        cursor_boundary=optional[0] if optional else None,
     )
 
 
@@ -719,6 +778,35 @@ class DatabricksWarehouseDlqBackend:
                     [sync_name, sync_name, max_records],
                 )
             return self.depth(sync_name)
+        finally:
+            conn.close()
+
+    def _append_strict(
+        self,
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int:
+        """Check a fresh ID snapshot and upsert without capacity eviction."""
+        conn = _connect(self._profile)
+        try:
+            self._ensure_table(conn)
+            t = _qualified(self._profile, _DLQ_TABLE)
+            cur = conn.cursor()
+            cur.execute(f"SELECT id FROM {t} WHERE sync_name = ?", [sync_name])
+            existing_ids = [str(row[0]) for row in cur.fetchall()]
+            strict_entries = prepare_strict_dlq_append(
+                sync_name,
+                set(existing_ids),
+                len(existing_ids),
+                entries,
+                max_records=max_records,
+                incoming_ids=incoming_ids,
+            )
+            _upsert_dlq_entries(cur, t, sync_name, strict_entries)
+            return len(set(existing_ids).union(entry.id for entry in strict_entries))
         finally:
             conn.close()
 
