@@ -2539,3 +2539,16 @@ def test_library_default_still_refuses_before_the_range_is_considered(tmp_path: 
             backfill_end=3,
         )
     assert source.windows == []
+
+
+def test_cli_end_at_or_below_the_checkpoint_is_a_noop_that_keeps_it(tmp_path: Path) -> None:
+    state = MemoryState()
+    _run_range(tmp_path, state, WindowSource([]))
+    assert state.value is not None and state.value.last_cursor_value == "9"
+
+    source = WindowSource([])
+    result = _run_range(tmp_path, state, source, backfill_end=3)
+
+    assert source.windows == []
+    assert result.backfill is not None and result.backfill["windows_planned"] == 0
+    assert state.value is not None and state.value.last_cursor_value == "9"
