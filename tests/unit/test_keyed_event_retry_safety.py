@@ -1,9 +1,12 @@
 """Replay safety of the keyed event destinations (ADR 0023 rollout item 3).
 
-Mixpanel ``/import``, Amplitude events and Meta Conversions send a batch in one request
-and every event carries an identity the vendor deduplicates on (``$insert_id``,
-``insert_id``, ``event_id``). After a lost response drt re-sends the *same* payload, so a
-replay must leave exactly one event per identity. Mixpanel profile ``$set`` is idempotent.
+Mixpanel ``/import`` and Amplitude events send a batch in one request and every event
+carries an identity the vendor deduplicates on (``$insert_id``, ``insert_id``). After a
+lost response drt re-sends the *same* payload, so a replay must leave exactly one event
+per identity. Mixpanel profile ``$set`` is idempotent.
+
+Meta Conversions is deliberately NOT covered: its documented ``event_id`` deduplication
+is between the browser Pixel and the server API, not between two server submissions.
 """
 
 from __future__ import annotations
@@ -17,7 +20,6 @@ import pytest
 
 from drt.config.models import RateLimitConfig, RetryConfig, SyncConfig, SyncOptions
 from drt.destinations.amplitude import AmplitudeDestination
-from drt.destinations.meta_conversions import MetaConversionsDestination
 from drt.destinations.mixpanel import MixpanelDestination
 from tests.http_fault_injection import BlindCreateFaultHarness, FaultMode, install_mock_transport
 
@@ -87,29 +89,10 @@ def _case(name: str) -> tuple[Any, dict[str, Any], dict[str, Any], str, Any, Any
             lambda payload: payload["events"][0]["insert_id"],
             ok,
         )
-    if name == "meta_conversions":
-        return (
-            MetaConversionsDestination(),
-            {
-                "type": "meta_conversions",
-                "pixel_id": "PIX",
-                "access_token": "tok",
-                "event_name": "Purchase",
-                "event_time_field": "ts",
-                "event_id_field": "eid",
-                "email_field": "email",
-                "action_source": "email",
-            },
-            {"ts": int(time.time()), "eid": "evt-1", "email": "ada@example.com"},
-            "/v25.0/PIX/events",
-            None,
-            lambda payload: payload["data"][0]["event_id"],
-            lambda request, _id: httpx.Response(200, json={"events_received": 1}, request=request),
-        )
     raise AssertionError(name)
 
 
-_CASES = ["mixpanel_import", "mixpanel_people", "amplitude_event", "meta_conversions"]
+_CASES = ["mixpanel_import", "mixpanel_people", "amplitude_event"]
 
 
 def _load(

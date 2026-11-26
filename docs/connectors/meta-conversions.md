@@ -91,16 +91,15 @@ does not guess which event failed.
 
 ## Retry safety
 
-Every event carries a required `event_id` (`event_id_field`), and Meta
-[deduplicates events with the same name and `event_id`](https://developers.facebook.com/docs/marketing-api/conversions-api/deduplicate-pixel-and-server-events).
-After a lost response, or a transient error Meta reports, drt re-sends the same batch,
-so the replay does not double-count. This is **keyed**: use a stable id per real event
-(for example an order id), never a per-run value. Meta keeps only the first of
-matching events **sent within 48 hours** of each other, so a replay that arrives much
-later (a DLQ retry days afterwards, for example) is treated as a new event. A batch is
-accepted only when Meta acknowledges every event.
-
-See [retry safety](../guides/retry-safety.md). Vendor contract rechecked 2026-11-26.
+This destination is **not classified** under [ADR 0023](../adr/0023-non-idempotent-create-retries.md)
+and keeps its previous retry behaviour (transient and 5xx responses are retried; a batch
+counts as delivered only when Meta acknowledges every event). Every event carries a required
+`event_id`, and Meta
+[deduplicates a browser Pixel event and a server event](https://developers.facebook.com/documentation/ads-commerce/conversions-api/deduplicate-pixel-and-server-events)
+that share the same `event_name` and `event_id` within 48 hours. That page does not promise
+that two *server* submissions are deduplicated, so a retry after a lost response is not
+proven safe here: use a stable `event_id` per real event and treat a delivery-unknown
+failure as possibly delivered. See [retry safety](../guides/retry-safety.md).
 
 ## Rate limiting
 

@@ -72,7 +72,7 @@ duplicate the object or message; the planned ADR step is noted.
 | `jira` | Issue create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second issue (ADR 0023 item 1) |
 | `klaviyo` | Profile / list / event | Keyed or reconciled (see above) | Classified |
 | `linear` | Issue create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second issue (ADR 0023 item 1) |
-| `meta_conversions` | Conversion event | Keyed by the required `event_id` (name + id, first of matching events within 48 hours kept); the same batch is re-sent | Classified (keyed) |
+| `meta_conversions` | Conversion event | One HTTP attempt loop around each batch; batch counted only when Meta acknowledges every event | Not yet classified: Meta documents `event_id` dedup between browser Pixel and server, not between two server submissions (ADR 0023 item 3) |
 | `mixpanel` | Event / profile | Events: keyed by `$insert_id` (set `time_field` to deduplicate across runs); profiles: `$set` is idempotent | Classified |
 | `mysql` | Warehouse write | Nothing: as for `bigquery` | Documented only |
 | `notion` | Page create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second page (ADR 0023 item 1) |

@@ -36,7 +36,7 @@ from drt.config.models import (
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import OperationSafety, resolve_retry, with_retry
+from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import record_preview, record_row_error
 
 _BASE_URL = "https://graph.facebook.com"
@@ -102,14 +102,14 @@ class MetaConversionsDestination:
                     return response
 
                 try:
-                    # KEYED: every event carries a required ``event_id``; Meta deduplicates
-                    # matching event name + event_id pairs, and the same payload is re-sent
-                    # on retry (ADR 0023).
+                    # Not classified under ADR 0023: Meta documents event_id + event_name
+                    # deduplication between the browser Pixel and the server API, not between
+                    # two server submissions, so a replay is not proven safe. Behaviour is
+                    # unchanged until that is confirmed.
                     response = with_retry(
                         _post,
                         retry_config,
                         retry_on=_is_meta_transient_error,
-                        operation=OperationSafety.KEYED,
                     )
                     response_data = response.json()
                     events_received = (
