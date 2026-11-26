@@ -974,3 +974,12 @@ dry-run previews stay open).
    execution.
 5. **Reporting.** A run started from a CLI start reports
    `watermark_source: "cli"` and the effective start in `result.backfill`.
+
+### Slice 4, part 2: run results
+
+`run_results.json` (and `--output json`) entries for a backfill sync carry `backfill`
+(the plan summary) and `windows[]` (one object per attempted window with bounds, row
+counts, outcome and checkpoint state). A run that raises reports no window detail,
+because the CLI receives the exception rather than the result; the durable checkpoint
+remains the source of truth for progress. Window OTel spans, aggregate history/alert
+wording and dry-run previews are still open.

@@ -210,6 +210,23 @@ drt run --select orders_to_crm --backfill-start 1000000 --backfill-end 2000000
 - They are mutually exclusive with `--cursor-value`, `--full-refresh` and `--limit`.
 - MCP `drt_run_sync` takes the same range as `backfill_start` / `backfill_end`.
 
+## What a run reports
+
+A backfill run adds two keys to its entry in `target/drt/run_results.json` (and to
+`--output json`'s `syncs[]`):
+
+- `backfill`: the plan summary — `requested_start`, `effective_start`, `ceiling`,
+  `window`, `windows_planned`, `windows_completed`, `failed_window` (index or
+  `null`) and `final_checkpoint`.
+- `windows`: one object per attempted window — `index`, `low`, `high` (half-open),
+  `rows_extracted`, `rows_synced`/`rows_failed`/`rows_skipped`, `status`
+  (`success`/`failed`), `checkpoint` (`written`, `not_written` or `failed`) and
+  `duration_seconds`.
+
+Both carry counts and bounds only, never row data or error text. If a window raises,
+the run is reported as a failed sync without these keys (the exception, not a result,
+reaches the CLI); use the checkpoint and `drt status` to see how far it got.
+
 ## Current limits
 
 - Backfill requires `mode: incremental`, cursor strategy, and a top-level
@@ -228,13 +245,12 @@ drt run --select orders_to_crm --backfill-start 1000000 --backfill-end 2000000
   `dry_run`, `drt build --dry-run`, `--diff`, and plan/apply do not query any
   window. Dry-run/diff arrives with slice 4.
 - Range overrides are available as `--backfill-start` / `--backfill-end` (see
-  above). Dry-run/diff previews, per-window `run_results.json` entries, window
-  OTel spans and aggregate alert/history wording remain later slices.
+  above). Dry-run/diff previews, window OTel spans and aggregate alert/history
+  wording remain later slices.
 - Windows are deliberately sequential. `--threads` can run different syncs in
   parallel but never parallelizes windows inside one sync.
 - Calendar windows, adaptive sizing, split-on-timeout, and distributed leases
   are not v1 features. Keep runner clocks synchronized and use lag for late
   arrivals.
-- `run_results.json` window arrays, window OTel spans, backfill-specific alert
-  text, history summaries, and `--backfill-start`/`--backfill-end` remain slice
-  4 work.
+- Window OTel spans, backfill-specific alert text and history summaries remain
+  slice 4 work.

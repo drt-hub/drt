@@ -389,6 +389,13 @@ def _run_one(
         result_ddl = list(getattr(result, "ddl", []))
         if result_ddl:
             entry["ddl"] = result_ddl
+        # ADR 0021 slice 4: a windowed backfill reports its plan summary and one entry per
+        # window (bounds, row counts, outcome, checkpoint state). Counts and bounds only,
+        # never row data or error text, so it is as safe to persist as the rest of the entry.
+        backfill_summary = getattr(result, "backfill", None)
+        if backfill_summary is not None:
+            entry["backfill"] = dict(backfill_summary)
+            entry["windows"] = [dict(window) for window in getattr(result, "windows", [])]
         if ctx.log_json:
             logging.info(
                 "sync_complete",
