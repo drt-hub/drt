@@ -2328,3 +2328,214 @@ def test_lag_beyond_ledger_retention_warns_at_start(
             idempotency_ledger=Ledger(),
         )
     assert "exceeds the 7-day idempotency-ledger retention" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ADR 0021 section 5: --backfill-start / --backfill-end range overrides
+# ---------------------------------------------------------------------------
+
+
+def _run_range(
+    tmp_path: Path,
+    state: MemoryState,
+    source: WindowSource,
+    *,
+    sync: SyncConfig | None = None,
+    destination: RecordingDestination | None = None,
+    **kwargs: Any,
+) -> SyncResult:
+    return run_sync(
+        sync or _sync(),
+        source,
+        destination or RecordingDestination(),
+        _profile(),
+        tmp_path,
+        state_manager=state,
+        observer=_observer(state),
+        **kwargs,
+    )
+
+
+def test_cli_end_replaces_the_configured_end(tmp_path: Path) -> None:
+    state = MemoryState()
+    source = WindowSource([{"cursor": value} for value in range(9)])
+
+    result = _run_range(tmp_path, state, source, backfill_end=6)
+
+    assert source.windows == [(0, 3), (3, 6)]
+    assert state.value is not None and state.value.last_cursor_value == "6"
+    assert result.backfill is not None and result.backfill["ceiling"] == 6
+
+
+def test_cli_end_may_extend_past_the_configured_end(tmp_path: Path) -> None:
+    state = MemoryState()
+    source = WindowSource([])
+
+    _run_range(tmp_path, state, source, backfill_end="12")
+
+    assert source.windows == [(0, 3), (3, 6), (6, 9), (9, 12)]
+
+
+def test_cli_end_replaces_the_automatic_numeric_ceiling_snapshot(tmp_path: Path) -> None:
+    class CountingSource(WindowSource):
+        max_queries = 0
+
+        def extract(
+            self, query: str, config: RestApiProfile, *, query_tags: dict[str, str] | None = None
+        ) -> Iterator[dict[str, Any]]:
+            if "MAX(" in query:
+                self.max_queries += 1
+            yield from ()
+
+    sync = _sync()
+    assert sync.sync.backfill is not None
+    sync.sync.backfill.end = None
+    state = MemoryState()
+    source = CountingSource([])
+
+    _run_range(tmp_path, state, source, sync=sync, backfill_end=6)
+
+    assert source.max_queries == 0
+    assert source.windows == [(0, 3), (3, 6)]
+
+
+def test_cli_start_below_the_checkpoint_replays_without_moving_it_back(tmp_path: Path) -> None:
+    state = MemoryState()
+    source = WindowSource([{"cursor": value} for value in range(9)])
+    first = _run_range(tmp_path, state, source)
+    assert first.backfill is not None and first.backfill["final_checkpoint"] == "9"
+
+    destination = RecordingDestination()
+    result = _run_range(
+        tmp_path,
+        state,
+        WindowSource([{"cursor": value} for value in range(9)]),
+        destination=destination,
+        backfill_start=3,
+        backfill_end=6,
+    )
+
+    assert [row["cursor"] for call in destination.calls for row in call] == [3, 4, 5]
+    assert state.value is not None and state.value.last_cursor_value == "9"
+    assert state.value.cursor_boundary == "exclusive"
+    assert result.watermark_source == "cli"
+    assert result.backfill is not None and result.backfill["effective_start"] == 3
+
+
+def test_cli_start_above_the_checkpoint_advances_it(tmp_path: Path) -> None:
+    state = MemoryState()
+    _run_range(tmp_path, state, WindowSource([]), backfill_end=3)
+    assert state.value is not None and state.value.last_cursor_value == "3"
+
+    source = WindowSource([])
+    _run_range(tmp_path, state, source, backfill_start=6, backfill_end=9)
+
+    assert source.windows == [(6, 9)]
+    assert state.value is not None and state.value.last_cursor_value == "9"
+
+
+def test_cli_start_beats_the_configured_start_without_a_checkpoint(tmp_path: Path) -> None:
+    source = WindowSource([])
+    result = _run_range(tmp_path, MemoryState(), source, backfill_start="3")
+
+    assert source.windows == [(3, 6), (6, 9)]
+    assert result.backfill is not None and result.backfill["requested_start"] == 0
+
+
+def test_empty_cli_range_below_the_start_plans_no_windows(tmp_path: Path) -> None:
+    source = WindowSource([])
+    result = _run_range(tmp_path, MemoryState(), source, backfill_start=9)
+
+    assert source.windows == []
+    assert result.backfill is not None and result.backfill["windows_planned"] == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"backfill_start": 6, "backfill_end": 6}, "must be before"),
+        ({"backfill_start": 9, "backfill_end": 3}, "must be before"),
+        ({"backfill_start": "yesterday"}, "must be an integer"),
+        ({"backfill_end": "2026-01-01T00:00:00Z"}, "must be an integer"),
+        ({"backfill_start": True}, "must not be a boolean"),
+    ],
+)
+def test_invalid_numeric_range_is_refused_before_extraction(
+    tmp_path: Path, kwargs: dict[str, Any], message: str
+) -> None:
+    source = WindowSource([])
+    with pytest.raises(ValueError, match=message):
+        _run_range(tmp_path, MemoryState(), source, **kwargs)
+    assert source.windows == [] and source.extract_calls == 0
+
+
+def test_timestamp_backfill_takes_canonicalized_instants_and_rejects_integers(
+    tmp_path: Path,
+) -> None:
+    sync = SyncConfig.model_validate(
+        {
+            "name": "events",
+            "model": "events",
+            "destination": {"type": "rest_api", "url": "https://example.test"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "cursor",
+                "batch_size": 100,
+                "on_error": "fail",
+                "backfill": {
+                    "window": "1d",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-10T00:00:00Z",
+                },
+            },
+        }
+    )
+    source = WindowSource([])
+    _run_range(
+        tmp_path,
+        MemoryState(),
+        source,
+        sync=sync,
+        backfill_start="2026-01-02T09:00:00+09:00",
+        backfill_end="2026-01-04T00:00:00Z",
+    )
+    # 2026-01-02 09:00 JST is 2026-01-02 00:00 UTC; instants are stored as naive UTC text.
+    assert source.windows == [
+        ("2026-01-02 00:00:00", "2026-01-03 00:00:00"),
+        ("2026-01-03 00:00:00", "2026-01-04 00:00:00"),
+    ]
+
+    refused = WindowSource([])
+    with pytest.raises(ValueError, match="must be an ISO-8601 timestamp"):
+        _run_range(tmp_path, MemoryState(), refused, sync=sync, backfill_start=5)
+    assert refused.windows == []
+
+
+def test_range_flags_require_a_sync_with_backfill(tmp_path: Path) -> None:
+    sync = SyncConfig.model_validate(
+        {
+            "name": "plain",
+            "model": "events",
+            "destination": {"type": "rest_api", "url": "https://example.test"},
+            "sync": {"mode": "incremental", "cursor_field": "cursor"},
+        }
+    )
+    with pytest.raises(ValueError, match="only valid for a sync with sync.backfill"):
+        _run_range(tmp_path, MemoryState(), WindowSource([]), sync=sync, backfill_start=1)
+    with pytest.raises(ValueError, match="only valid for a sync with sync.backfill"):
+        _run_range(tmp_path, MemoryState(), WindowSource([]), sync=sync, backfill_end=1)
+
+
+def test_library_default_still_refuses_before_the_range_is_considered(tmp_path: Path) -> None:
+    source = WindowSource([])
+    with pytest.raises(ValueError, match="disabled for this entry point"):
+        engine_run_sync(
+            _sync(),
+            source,
+            RecordingDestination(),
+            _profile(),
+            tmp_path,
+            backfill_start=0,
+            backfill_end=3,
+        )
+    assert source.windows == []

@@ -120,6 +120,10 @@ class _RunContext:
     quiet: bool
     log_json: bool
     cursor_value: str | None
+    # ADR 0021 section 5: range overrides for the one selected sync.backfill. Only
+    # ever set when run() validated exactly one selected backfill sync.
+    backfill_start: str | None = None
+    backfill_end: str | None = None
     # Cooperative shutdown flag — set by SIGTERM/SIGINT handler in run().
     # Each engine call checks this between batches and exits gracefully.
     stop_event: threading.Event | None = None
@@ -280,6 +284,8 @@ def _run_one(
                 exact=ctx.exact,
                 full_refresh=ctx.full_refresh,
                 allow_backfill_execution=ctx.allow_backfill_execution,
+                backfill_start=ctx.backfill_start if sync.sync.backfill is not None else None,
+                backfill_end=ctx.backfill_end if sync.sync.backfill is not None else None,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -703,6 +709,50 @@ def _write_run_results(
 # ---------------------------------------------------------------------------
 
 
+def _validate_backfill_range_flags(
+    syncs: list[SyncConfig],
+    backfill_start: str | None,
+    backfill_end: str | None,
+    *,
+    cursor_value: str | None,
+    full_refresh: bool,
+    limit: int | None,
+) -> None:
+    """Refuse every combination where a range override could mislead (ADR 0021 s5).
+
+    The flags carry one range, so they are accepted only when exactly one sync is
+    selected and that sync declares ``sync.backfill``; otherwise the same text would
+    be applied to unrelated syncs or silently ignored by them.
+    """
+    from drt.engine.backfill import canonicalize_bound, parse_cli_range
+
+    for flag, active in (
+        ("--cursor-value", cursor_value is not None),
+        ("--full-refresh", full_refresh),
+        ("--limit", limit is not None),
+    ):
+        if active:
+            print_error(f"--backfill-start/--backfill-end and {flag} are mutually exclusive.")
+            raise typer.Exit(1)
+    if len(syncs) != 1 or syncs[0].sync.backfill is None:
+        selected = ", ".join(s.name for s in syncs) or "none"
+        print_error(
+            "--backfill-start/--backfill-end need exactly one selected sync, and it must "
+            f"declare sync.backfill (selected: {selected})."
+        )
+        raise typer.Exit(1)
+    backfill = syncs[0].sync.backfill
+    try:
+        parse_cli_range(
+            canonicalize_bound(backfill.start, field_name="sync.backfill.start"),
+            backfill_start,
+            backfill_end,
+        )
+    except ValueError as exc:
+        print_error(str(exc))
+        raise typer.Exit(1) from exc
+
+
 def _reset_watermarks_for(
     syncs: list[SyncConfig],
     state_mgr: StateStore,
@@ -848,6 +898,26 @@ def run(
         help=(
             "Override the cursor/watermark for legacy/ad-hoc one-bound recovery "
             "(refused for sync.backfill)."
+        ),
+    ),
+    backfill_start: str = typer.Option(
+        None,
+        "--backfill-start",
+        help=(
+            "Start the windows of a sync.backfill here instead of at the stored "
+            "checkpoint or the configured start: an integer for a numeric backfill, "
+            "an ISO-8601 timestamp for a timestamp one. A start below the checkpoint "
+            "is a bounded replay and never moves the checkpoint back. Needs exactly "
+            "one selected sync, which must declare sync.backfill."
+        ),
+    ),
+    backfill_end: str = typer.Option(
+        None,
+        "--backfill-end",
+        help=(
+            "Exclusive upper bound for the windows of a sync.backfill, replacing the "
+            "configured or automatic ceiling. Same format and constraints as "
+            "--backfill-start."
         ),
     ),
     full_refresh: bool = typer.Option(
@@ -1111,10 +1181,20 @@ def run(
             raise typer.Exit(1)
         if cursor_value is not None and backfills:
             print_error(
-                "--cursor-value is not allowed with sync.backfill; CLI backfill range flags "
-                "arrive in ADR 0021 slice 4: " + ", ".join(backfills)
+                "--cursor-value is not allowed with sync.backfill; use --backfill-start and "
+                "--backfill-end to override the range: " + ", ".join(backfills)
             )
             raise typer.Exit(1)
+
+        if backfill_start is not None or backfill_end is not None:
+            _validate_backfill_range_flags(
+                syncs,
+                backfill_start,
+                backfill_end,
+                cursor_value=cursor_value,
+                full_refresh=full_refresh,
+                limit=limit,
+            )
 
         if full_refresh:
             _reset_watermarks_for(
@@ -1199,6 +1279,8 @@ def run(
             quiet=quiet,
             log_json=log_format is LogFormat.JSON,
             cursor_value=cursor_value,
+            backfill_start=backfill_start,
+            backfill_end=backfill_end,
             stop_event=stop_event,
             full_refresh=full_refresh,
             compute_diff=diff,

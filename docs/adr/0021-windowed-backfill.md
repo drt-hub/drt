@@ -943,3 +943,34 @@ that legitimately reappears after its cursor moves into another window while
 remaining stable across a retry whose open-ended ceiling changes. Fixed-range
 retry behavior is unchanged. As with round 13, this replaces only deterministic
 IDs from unreleased slice-3 commits and requires no migration.
+
+## Amendment 2026-11-26 (slice 4, part 1: CLI range overrides)
+
+The CLI/MCP range flags from section 5 are implemented ahead of the rest of
+slice 4 (window OTel spans, aggregate history/alerts, per-window run results and
+dry-run previews stay open).
+
+1. **Names and inputs.** `drt run --backfill-start/--backfill-end` and MCP
+   `drt_run_sync(backfill_start, backfill_end)`. Values are text; a numeric
+   backfill parses integers, a timestamp backfill canonicalizes ISO-8601 instants
+   to naive UTC. A value of the other kind is refused, as is a start that is not
+   strictly before the end.
+2. **Stricter than the ADR text on selection.** Section 5 says the flags are
+   accepted when exactly one selected sync has `sync.backfill`. The
+   implementation requires **exactly one selected sync in total**, and it must
+   declare `sync.backfill`. A second, non-backfill sync in the selection would
+   otherwise silently ignore the flags, which is the same hazard the rule exists
+   to prevent.
+3. **Precedence and safety are unchanged.** CLI start, then the durable checkpoint
+   (with lag), then configured start; lag does not apply to a CLI start. A start
+   below the checkpoint is a bounded replay and the checkpoint is never moved
+   backwards (pinned by tests that replay below a completed checkpoint). A CLI end
+   replaces the configured/automatic ceiling, including the numeric ceiling
+   snapshot query.
+4. **Mutual exclusions.** `--cursor-value`, `--full-refresh` and `--limit` are
+   refused together with either flag, in the CLI and in MCP, before any connector
+   or state store is created. The engine independently refuses the flags for a sync
+   without `sync.backfill` and for callers that did not opt in to backfill
+   execution.
+5. **Reporting.** A run started from a CLI start reports
+   `watermark_source: "cli"` and the effective start in `result.backfill`.

@@ -1290,6 +1290,100 @@ async def test_run_sync_refuses_backfill_incompatible_options_before_setup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"backfill_start": "3", "cursor_value": "10"}, "cursor_value"),
+        ({"backfill_end": "9", "full_refresh": True}, "full_refresh"),
+        ({"backfill_start": "3", "limit": 1}, "limit"),
+    ],
+)
+async def test_run_sync_range_override_exclusions_fail_before_setup(
+    project_dir: Path,
+    monkeypatch: Any,
+    arguments: dict[str, Any],
+    expected: str,
+) -> None:
+    """backfill_start/backfill_end are exclusive with the other overrides (ADR 0021 s5)."""
+    _write_backfill_sync(project_dir)
+
+    def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("runtime setup must not run for a refused range override")
+
+    monkeypatch.setattr("drt.config.credentials.load_profile", unexpected)
+    monkeypatch.setattr("drt.cli.main._get_source", unexpected)
+    monkeypatch.setattr("drt.cli.main._get_destination", unexpected)
+    monkeypatch.setattr("drt.state.factory.build_state_bundle", unexpected)
+
+    result = await call(
+        create_server(project_dir), "drt_run_sync", sync_name="backfill", **arguments
+    )
+
+    assert "mutually exclusive" in result["error"]
+    assert expected in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_range_override_requires_a_backfill_sync(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("runtime setup must not run for a refused range override")
+
+    monkeypatch.setattr("drt.config.credentials.load_profile", unexpected)
+    monkeypatch.setattr("drt.cli.main._get_source", unexpected)
+
+    syncs = sorted(path.stem for path in (project_dir / "syncs").glob("*.yml"))
+    assert syncs, "the fixture project must contain at least one sync"
+    result = await call(
+        create_server(project_dir), "drt_run_sync", sync_name=syncs[0], backfill_start="1"
+    )
+
+    assert "only valid for a sync with sync.backfill" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_forwards_the_range_to_the_engine(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    _write_backfill_sync(project_dir)
+    seen: dict[str, Any] = {}
+
+    def fake_engine(*_args: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        from drt.destinations.base import SyncResult
+
+        return SyncResult()
+
+    class _Bundle:
+        state = object()
+        dlq = object()
+        ledger = None
+        audit_trail = None
+
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.state.factory.build_state_bundle", lambda *_a, **_k: _Bundle())
+    monkeypatch.setattr("drt.cli._helpers.get_watermark_storage", lambda *_a, **_k: None)
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_engine)
+    monkeypatch.setattr(
+        "drt.config.credentials.resolve_profile_paths", lambda profile, _dir: profile
+    )
+
+    await call(
+        create_server(project_dir),
+        "drt_run_sync",
+        sync_name="backfill",
+        backfill_start="3",
+        backfill_end="9",
+    )
+
+    assert seen["backfill_start"] == "3" and seen["backfill_end"] == "9"
+    assert seen["allow_backfill_execution"] is True
+
+
+@pytest.mark.asyncio
 async def test_run_sync_backfill_with_skip_wires_dlq_observer(
     project_dir: Path, monkeypatch: Any
 ) -> None:

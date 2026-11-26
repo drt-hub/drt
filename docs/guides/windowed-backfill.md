@@ -178,6 +178,38 @@ triggers). Do not downgrade and run an older drt against state written by a
 backfill: older behavior is backend-dependent and may discard or reinterpret
 the exclusive marker.
 
+## Range overrides: `--backfill-start` and `--backfill-end`
+
+For a one-off replay or a bounded catch-up you can override the range for a single
+run without editing YAML:
+
+```bash
+# Re-send one day that a destination lost, without touching the checkpoint
+drt run --select events_to_crm \
+  --backfill-start 2026-03-01T00:00:00Z --backfill-end 2026-03-02T00:00:00Z
+
+# Numeric cursor: integers
+drt run --select orders_to_crm --backfill-start 1000000 --backfill-end 2000000
+```
+
+- **Start precedence:** `--backfill-start`, then the durable checkpoint, then
+  `sync.backfill.start`. `--backfill-end` replaces the configured or automatic
+  (run-time) ceiling and is exclusive, like every window high.
+- **Format follows the sync:** integers for a numeric backfill, ISO-8601 instants
+  for a timestamp backfill (offsets are converted to UTC). A value of the wrong
+  kind is refused instead of reinterpreted, and the start must be before the end.
+- **A start below the checkpoint is a replay, not a rewind.** The windows run and
+  write again, but the checkpoint stays where it was until a completed window's
+  high exceeds it, so a later scheduled run still resumes from the real progress.
+  A start above the checkpoint skips the gap and the checkpoint advances normally.
+- `watermark.lag` is not applied to a CLI start (it applies only when the start
+  came from durable storage).
+- **Exactly one selected sync, and it must declare `sync.backfill`.** The two flags
+  carry one range, so selecting several syncs, or a sync without `sync.backfill`,
+  is an error rather than applying the same text to unrelated syncs.
+- They are mutually exclusive with `--cursor-value`, `--full-refresh` and `--limit`.
+- MCP `drt_run_sync` takes the same range as `backfill_start` / `backfill_end`.
+
 ## Current limits
 
 - Backfill requires `mode: incremental`, cursor strategy, and a top-level
@@ -195,9 +227,9 @@ the exclusive marker.
 - Dry-run is not a backfill preview in slice 3: `drt run --dry-run`, MCP
   `dry_run`, `drt build --dry-run`, `--diff`, and plan/apply do not query any
   window. Dry-run/diff arrives with slice 4.
-- CLI `--backfill-start` and `--backfill-end` range overrides arrive in the next
-  operational-surfaces slice. For now, configure `start` and optional `end` in
-  YAML.
+- Range overrides are available as `--backfill-start` / `--backfill-end` (see
+  above). Dry-run/diff previews, per-window `run_results.json` entries, window
+  OTel spans and aggregate alert/history wording remain later slices.
 - Windows are deliberately sequential. `--threads` can run different syncs in
   parallel but never parallelizes windows inside one sync.
 - Calendar windows, adaptive sizing, split-on-timeout, and distributed leases

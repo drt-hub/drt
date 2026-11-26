@@ -10,8 +10,9 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from itertools import chain, islice
 from pathlib import Path
 from typing import Any, Literal
@@ -43,6 +44,7 @@ from drt.engine.backfill import (
     apply_lag_then_clamp,
     canonical_window_upsert_key,
     canonicalize_bound,
+    parse_cli_range,
     plan_windows,
     validate_window_row,
     validate_window_upsert_keys,
@@ -413,6 +415,8 @@ def run_sync(
     full_refresh: bool = False,
     *,
     allow_backfill_execution: bool = False,
+    backfill_start: str | int | None = None,
+    backfill_end: str | int | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -486,6 +490,12 @@ def run_sync(
         allow_backfill_execution: Explicit caller opt-in for slice-3 windowed
             execution. Only ``drt run`` and MCP ``drt_run_sync`` set this;
             every library/orchestrator/preview caller fails closed by default.
+        backfill_start: Optional start override for a ``sync.backfill`` run
+            (``drt run --backfill-start``): beats the durable checkpoint and the
+            configured start. A start below the checkpoint is a bounded replay;
+            the checkpoint itself never moves backwards.
+        backfill_end: Optional exclusive ceiling override
+            (``--backfill-end``), replacing the configured/automatic ceiling.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -494,6 +504,10 @@ def run_sync(
     if observer is None:
         observer = NullObserver()
     backfill = sync.sync.backfill
+    if backfill is None and (backfill_start is not None or backfill_end is not None):
+        raise ValueError(
+            "--backfill-start/--backfill-end are only valid for a sync with sync.backfill."
+        )
     if backfill is not None:
         if not allow_backfill_execution:
             raise ValueError(
@@ -512,8 +526,8 @@ def run_sync(
             )
         if cursor_value_override is not None:
             raise ValueError(
-                "--cursor-value is not allowed with sync.backfill; CLI range overrides "
-                "arrive in ADR 0021 slice 4."
+                "--cursor-value is not allowed with sync.backfill; use --backfill-start "
+                "and --backfill-end to override the range."
             )
         if full_refresh:
             raise ValueError("--full-refresh is not allowed with sync.backfill.")
@@ -626,7 +640,15 @@ def run_sync(
             if run_id is not None:
                 run_span.set_attribute("run.id", run_id)
             try:
-                body = _run_backfill_body if backfill is not None else _run_sync_body
+                body: Callable[..., SyncResult] = (
+                    partial(
+                        _run_backfill_body,
+                        backfill_start=backfill_start,
+                        backfill_end=backfill_end,
+                    )
+                    if backfill is not None
+                    else _run_sync_body
+                )
                 result = body(
                     sync=sync,
                     source=source,
@@ -919,6 +941,8 @@ def _run_backfill_body(
     audit_trail: ComplianceAuditTrail | None = None,
     audit_fields: list[str] | None = None,
     exact: bool = False,
+    backfill_start: str | int | None = None,
+    backfill_end: str | int | None = None,
 ) -> SyncResult:
     """Plan and execute ADR 0021 windows sequentially around the existing body."""
     del cursor_value_override, compute_diff, extract_limit, exact
@@ -938,9 +962,15 @@ def _run_backfill_body(
     durable_checkpoint = (
         _coerce_checkpoint(stored, configured_start) if stored is not None else None
     )
+    cli_start, cli_end = parse_cli_range(configured_start, backfill_start, backfill_end)
     effective_start = durable_checkpoint if durable_checkpoint is not None else configured_start
     watermark_lag: str | None = None
-    if (
+    if cli_start is not None:
+        # An explicit start beats the checkpoint and the config. Lag is not applied to
+        # CLI range overrides. Starting below the checkpoint is a bounded replay: the
+        # never-regress rule keeps the durable checkpoint where it is.
+        effective_start = cli_start
+    elif (
         durable_checkpoint is not None
         and sync.sync.watermark is not None
         and sync.sync.watermark.lag is not None
@@ -956,10 +986,10 @@ def _run_backfill_body(
             "must implement synchronous extract_window(query, profile, low, high)."
         )
 
-    if config.end is not None:
-        ceiling: BackfillBound | None = canonicalize_bound(
-            config.end, field_name="sync.backfill.end"
-        )
+    if cli_end is not None:
+        ceiling: BackfillBound | None = cli_end
+    elif config.end is not None:
+        ceiling = canonicalize_bound(config.end, field_name="sync.backfill.end")
     elif isinstance(config.window, int):
         resolved_model = resolve_model_ref(
             sync.model,
@@ -993,7 +1023,9 @@ def _run_backfill_body(
         "final_checkpoint": final_checkpoint,
     }
     total_result.backfill = summary
-    total_result.watermark_source = "storage" if stored is not None else "config"
+    total_result.watermark_source = (
+        "cli" if cli_start is not None else ("storage" if stored is not None else "config")
+    )
     total_result.cursor_value_used = _stringify_cursor_value(effective_start)
     total_result.watermark_lag = watermark_lag
 
