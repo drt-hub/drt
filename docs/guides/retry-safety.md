@@ -54,7 +54,7 @@ duplicate the object or message; the planned ADR step is noted.
 | Type | Write kind | What drt retries | Status |
 |---|---|---|---|
 | `airtable` | Record create / upsert | One HTTP attempt loop around each request | Not yet classified (ADR 0023 item 3) |
-| `amplitude` | Event ingestion | One HTTP attempt loop around each request | Not yet classified; stable-key verification planned (ADR 0023 item 3) |
+| `amplitude` | Event ingestion / user identify | Events: keyed by `insert_id` (configured or a deterministic hash of the row), deduplicated for 7 days; docs scope the match to the same `device_id`, so send one; identify: one HTTP attempt loop, not classified | Events classified (keyed, `device_id` recommended); identify not yet (ADR 0023 item 3) |
 | `azure_blob` | Object upload | Nothing: no drt retry; the SDK's own retries are not verified here | Documented only (ADR 0023 item 4) |
 | `bigquery` | Warehouse write | Nothing: drt does not wrap warehouse writes in retries; replay safety follows `sync.mode` and `upsert_key` | Documented only; see the connector page |
 | `clickhouse` | Warehouse insert | One retry with the same `insert_deduplication_token`; best effort, only effective when the table's deduplication window is enabled | Documented (ADR 0023 item 5) |
@@ -72,8 +72,8 @@ duplicate the object or message; the planned ADR step is noted.
 | `jira` | Issue create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second issue (ADR 0023 item 1) |
 | `klaviyo` | Profile / list / event | Keyed or reconciled (see above) | Classified |
 | `linear` | Issue create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second issue (ADR 0023 item 1) |
-| `meta_conversions` | Conversion event | One HTTP attempt loop around each request | Not yet classified; keyed-path verification planned (ADR 0023 item 3) |
-| `mixpanel` | Event / profile | One HTTP attempt loop around each request | Not yet classified; keyed-path verification planned (ADR 0023 item 3) |
+| `meta_conversions` | Conversion event | Keyed by the required `event_id` (name + id, first of matching events within 48 hours kept); the same batch is re-sent | Classified (keyed) |
+| `mixpanel` | Event / profile | Events: keyed by `$insert_id` (set `time_field` to deduplicate across runs); profiles: `$set` is idempotent | Classified |
 | `mysql` | Warehouse write | Nothing: as for `bigquery` | Documented only |
 | `notion` | Page create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second page (ADR 0023 item 1) |
 | `parquet` | Local file write | Nothing | Not applicable: no remote side effect |

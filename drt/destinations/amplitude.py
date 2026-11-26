@@ -41,7 +41,7 @@ from drt.config.models import (
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import OperationSafety, resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
@@ -354,7 +354,10 @@ def _post_events(
         response.raise_for_status()
         return response
 
-    with_retry(do_post, retry_config)
+    # KEYED: every event carries an ``insert_id`` (configured, or a deterministic hash of
+    # the row and event type) and the same body is re-sent, so Amplitude deduplicates a
+    # replay (ADR 0023).
+    with_retry(do_post, retry_config, operation=OperationSafety.KEYED)
 
 
 def _chunks(

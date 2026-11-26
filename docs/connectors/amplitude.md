@@ -113,6 +113,25 @@ destination:
 
 The limiter is shared per **project and region** (API key + `region`). The `identify` and `event` endpoints bill against one project quota, so they share a bucket — but `region: eu` is a genuinely different host with its own budget and gets its own. Several syncs into one project concurrently (`drt run --threads 4`) pace through one bucket; when they request different rates, the lowest wins for both.
 
+## Retry safety
+
+- **`endpoint: event` is keyed.** Each event carries `insert_id`: your
+  `insert_id_field` value, otherwise a SHA-256 of the row and event type, so the same
+  row always gets the same id. After a lost response drt re-sends the same body, which
+  is what Amplitude's [batching and retry guide](https://amplitude.com/docs/apis/analytics/http-api-batching-retries)
+  asks for, and Amplitude ignores a repeated `insert_id` seen within the past
+  **7 days** ([HTTP V2 API](https://amplitude.com/docs/apis/analytics/http-v2)).
+- **Send a `device_id` (`device_id_field`) if you can.** The HTTP V2 page scopes that
+  match to the same `device_id` ("if the event has a device_id value"), while the
+  Batch Event Upload page states it without a device. If your rows carry only a
+  `user_id`, a replay is deduplicated according to the second wording, which drt
+  cannot verify without a live account.
+- **`endpoint: identify` is not classified yet.** It keeps the previous retry behavior;
+  replaying property *sets* is harmless but a template that uses additive operations
+  (for example `$add`) would double-apply.
+
+See [retry safety](../guides/retry-safety.md). Vendor contract rechecked 2026-11-26.
+
 ## Notes
 
 - Use separate sync YAMLs for identify vs events (one `endpoint` per destination config).

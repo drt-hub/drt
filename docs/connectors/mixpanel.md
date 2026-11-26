@@ -72,6 +72,24 @@ export MIXPANEL_SA_USERNAME="your-service-account.mp-service-account"
 export MIXPANEL_SA_SECRET="your-service-account-secret"
 ```
 
+## Retry safety
+
+- **`endpoint: import_events` is keyed.** Each event carries `$insert_id`: your
+  `insert_id_field` value, otherwise a SHA-256 of the row and event name, so the same
+  row always gets the same id. After a lost response drt re-sends the *same* batch
+  and Mixpanel deduplicates on event name, `distinct_id`, `time` and `$insert_id`
+  together ([event deduplication](https://docs.mixpanel.com/reference/event-deduplication)).
+  Mixpanel's docs also say retries are safe only if the resent event is identical,
+  which is why drt re-sends the same payload.
+- **Set `time_field` if you rely on deduplication across runs or DLQ replays.**
+  Without it the event time is the time drt built the payload, so a later run builds
+  a different `time` and Mixpanel treats it as a different event. Within one run's
+  retry the payload is reused, so the retry is safe either way.
+- **`endpoint: people_set` is idempotent:** `$set` writes the same property values on
+  a replay.
+
+See [retry safety](../guides/retry-safety.md). Vendor contract rechecked 2026-11-26.
+
 ## Notes
 
 - Both endpoints batch up to **2000 records** per request.

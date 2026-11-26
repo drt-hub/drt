@@ -89,6 +89,19 @@ does not document an event-indexed partial-failure array, so request failures
 and acknowledgement-count mismatches fail the submitted batch atomically; drt
 does not guess which event failed.
 
+## Retry safety
+
+Every event carries a required `event_id` (`event_id_field`), and Meta
+[deduplicates events with the same name and `event_id`](https://developers.facebook.com/docs/marketing-api/conversions-api/deduplicate-pixel-and-server-events).
+After a lost response, or a transient error Meta reports, drt re-sends the same batch,
+so the replay does not double-count. This is **keyed**: use a stable id per real event
+(for example an order id), never a per-run value. Meta keeps only the first of
+matching events **sent within 48 hours** of each other, so a replay that arrives much
+later (a DLQ retry days afterwards, for example) is treated as a new event. A batch is
+accepted only when Meta acknowledges every event.
+
+See [retry safety](../guides/retry-safety.md). Vendor contract rechecked 2026-11-26.
+
 ## Rate limiting
 
 drt applies one limiter slot per HTTP batch and acquires again on every retry.

@@ -59,7 +59,7 @@ from drt.config.models import (
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, RateLimiterBackend, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import OperationSafety, resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
@@ -135,7 +135,13 @@ class MixpanelDestination:
                     result,
                     sync_options,
                     rate_limiter,
-                    lambda: _post_json(client, url, payloads, retry_config),
+                    lambda: _post_json(
+                        client,
+                        url,
+                        payloads,
+                        retry_config,
+                        operation=OperationSafety.IDEMPOTENT,
+                    ),
                 )
 
     # -- /import -------------------------------------------------------------
@@ -329,7 +335,16 @@ def _post_json(
     retry_config: RetryConfig,
     auth: tuple[str, str] | None = None,
     params: dict[str, str] | None = None,
+    *,
+    operation: OperationSafety = OperationSafety.KEYED,
 ) -> None:
+    """POST one batch. Callers state why replaying it is safe (ADR 0023).
+
+    ``/import`` events are KEYED: every event carries a deterministic ``$insert_id``
+    built from the row, and the same payload object is re-sent on retry. ``/engage``
+    profile ``$set`` is IDEMPOTENT: replaying it writes the same values.
+    """
+
     def do_post() -> httpx.Response:
         kwargs: dict[str, Any] = {"json": payload}
         if auth is not None:
@@ -340,7 +355,7 @@ def _post_json(
         response.raise_for_status()
         return response
 
-    with_retry(do_post, retry_config)
+    with_retry(do_post, retry_config, operation=operation)
 
 
 def _chunks(
