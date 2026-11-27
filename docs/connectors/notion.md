@@ -29,6 +29,7 @@ destination:
 | `database_id` | string | — | Target Notion database id |
 | `properties_template` | string \| null | null | Jinja2 template → JSON object of Notion page properties |
 | `auth` | bearer | bearer | Bearer auth — set `token_env` to your integration token |
+| `retry_creates` | bool | `false` | `true` restores blind replay of an ambiguous page create (duplicate risk); see [Retry safety](#retry-safety) |
 | `retry` | object \| null | null | Per-destination retry override |
 
 ## Authentication
@@ -82,6 +83,18 @@ destination:
 ```
 
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a token but request different rates, the lowest wins for both.
+
+## Retry safety
+
+Page creation ([`POST /v1/pages`](https://developers.notion.com/reference/post-page)) documents no idempotency key, so it is a **blind create**. After a dropped response or a
+retryable 5xx, drt returns a delivery-unknown `RowError` after one request: assume
+a page may already exist, check Notion before replaying, and do not auto-resend.
+HTTP 429 and connection failures proven to happen before the request was sent
+remain retryable.
+
+`retry_creates: true` restores the legacy second attempt after an ambiguous
+write and logs a duplicate-risk warning. See [retry safety](../guides/retry-safety.md).
+Vendor contract rechecked 2026-11-25.
 
 ## Notes
 
