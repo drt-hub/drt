@@ -114,7 +114,16 @@ def classify_failure_safety(
         return FailureSafety.SAFE_TO_REPLAY
     if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
         return FailureSafety.SAFE_TO_REPLAY
-    if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+    if isinstance(
+        error,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.PoolTimeout,
+            httpx.ProxyError,
+            httpx.UnsupportedProtocol,
+        ),
+    ):
         return FailureSafety.SAFE_TO_REPLAY
     return FailureSafety.DELIVERY_UNKNOWN
 

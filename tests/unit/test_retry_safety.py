@@ -29,6 +29,8 @@ def _status_error(status: int) -> httpx.HTTPStatusError:
         httpx.ConnectError("connect failed"),
         httpx.ConnectTimeout("connect timed out"),
         httpx.PoolTimeout("no connection acquired"),
+        httpx.ProxyError("proxy connection failed"),
+        httpx.UnsupportedProtocol("unsupported protocol"),
         _status_error(429),
     ],
 )
@@ -44,6 +46,9 @@ def test_create_pre_send_and_429_failures_are_safe_to_replay(error: Exception) -
         httpx.ReadError("response dropped"),
         httpx.ReadTimeout("response timed out"),
         httpx.WriteError("request write failed"),
+        httpx.WriteTimeout("request write timed out"),
+        httpx.CloseError("connection close failed"),
+        httpx.LocalProtocolError("client protocol error"),
         httpx.RemoteProtocolError("invalid response"),
         _status_error(500),
         _status_error(503),

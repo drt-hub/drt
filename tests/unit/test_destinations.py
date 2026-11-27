@@ -656,7 +656,7 @@ class TestNotionDestination:
 
         def handler(_request):  # type: ignore[no-untyped-def]
             call_count["n"] += 1
-            return Response("Service Unavailable", status=503)
+            return Response("Too Many Requests", status=429)  # 429 stays retryable (ADR 0023)
 
         httpserver.expect_request("/v1/pages").respond_with_handler(handler)
         config = NotionDestinationConfig(
@@ -690,7 +690,7 @@ class TestNotionDestination:
 
         def handler(_request):  # type: ignore[no-untyped-def]
             call_count["n"] += 1
-            return Response("Service Unavailable", status=503)
+            return Response("Too Many Requests", status=429)  # 429 stays retryable (ADR 0023)
 
         httpserver.expect_request("/v1/pages").respond_with_handler(handler)
         config = NotionDestinationConfig(
@@ -717,7 +717,7 @@ class TestNotionDestination:
 
         def handler(_request):  # type: ignore[no-untyped-def]
             call_count["n"] += 1
-            return Response("Service Unavailable", status=503)
+            return Response("Too Many Requests", status=429)  # 429 stays retryable (ADR 0023)
 
         httpserver.expect_request("/v1/pages").respond_with_handler(handler)
         # destination.retry says 7 attempts; sync.retry says 2.

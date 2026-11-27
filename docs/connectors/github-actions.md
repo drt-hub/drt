@@ -28,6 +28,7 @@ destination:
 | `ref` | string | `"main"` | Branch or tag the workflow runs on. |
 | `inputs_template` | string \| null | null | Jinja2 template rendering a JSON object of `workflow_dispatch` inputs. |
 | `auth` | Bearer | bearer | Token auth — set `token_env` to an env var holding a PAT / fine-grained token. |
+| `retry_creates` | bool | `false` | `true` restores blind replay of an ambiguous run create (duplicate risk); see [Retry safety](#retry-safety) |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 
 ## Authentication
@@ -62,6 +63,18 @@ destination:
 ```
 
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a token but request different rates, the lowest wins for both.
+
+## Retry safety
+
+A [`workflow_dispatch`](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event) request carries no idempotency key, so it is a **blind create**. After a dropped response or a
+retryable 5xx, drt returns a delivery-unknown `RowError` after one request: assume
+a workflow run may already exist, check GitHub Actions before replaying, and do not auto-resend.
+HTTP 429 and connection failures proven to happen before the request was sent
+remain retryable.
+
+`retry_creates: true` restores the legacy second attempt after an ambiguous
+write and logs a duplicate-risk warning. See [retry safety](../guides/retry-safety.md).
+Vendor contract rechecked 2026-11-25.
 
 ## Notes
 

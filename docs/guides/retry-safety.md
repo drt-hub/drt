@@ -32,6 +32,10 @@ transport failures are delivery-unknown for blind and reconciled creates.
 | Slack Incoming Webhook | Blind | The [Incoming Webhook contract](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) exposes no client key or returned message timestamp. | A channel receives duplicate messages. |
 | Discord Execute Webhook | Blind | The [Execute Webhook parameters](https://docs.discord.com/developers/resources/webhook#execute-webhook) expose no idempotency field. `wait` requests confirmation; it does not deduplicate. | A channel receives duplicate messages or embeds. |
 | Microsoft Teams Incoming Webhook / workflow URL | Blind | The [Teams incoming-webhook contract](https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook) exposes no client dedup key. | A channel receives duplicate cards or messages; a workflow can trigger twice. |
+| Notion page create | Blind | None. [Create a page](https://developers.notion.com/reference/post-page) documents no idempotency key. | A replay creates a second page. |
+| Linear `issueCreate` | Blind | None verified. A client-supplied issue `id` is mentioned by third-party connector docs, but duplicate behaviour is unconfirmed. | A replay creates a second issue. |
+| Jira issue create | Blind | None. [Create issue](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/) documents no idempotency key. | A replay creates a second issue. Updates address one id and stay retryable. |
+| GitHub Actions `workflow_dispatch` | Blind | None. The [dispatch endpoint](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event) takes no idempotency key. | A replay starts a second run. |
 | Pipedrive person create | Reconciled | Exact configured `match_field` search | Protects the immediate attempt when one match is visible. A stale miss fails closed; later runs still need the warehouse ledger or source discipline. |
 | Intercom contact create | Reconciled when non-empty `external_id` and/or email exists; otherwise blind | Exact contact search | Same immediate protection and search-lag boundary; duplicate contacts are the risk. |
 | HubSpot CRM object create | Reconciled when configured `id_property` is non-empty; otherwise blind | Exact equality search on `id_property` | Same immediate protection and search-lag boundary; duplicate CRM objects are the risk. |
@@ -64,18 +68,18 @@ duplicate the object or message; the planned ADR step is noted.
 | `email_smtp` | Email send | Nothing: drt does not retry SMTP sends | Documented only (ADR 0023 item 4) |
 | `file` | Local file write | Nothing | Not applicable: no remote side effect |
 | `gcs` | Object upload | Nothing: no drt retry; the SDK's own retries are not verified here | Documented only (ADR 0023 item 4) |
-| `github_actions` | Workflow dispatch | One HTTP attempt loop around the dispatch | Not yet classified; a replay can start a second run (ADR 0023 item 1) |
+| `github_actions` | Workflow dispatch | Blind (see above) | Classified |
 | `google_ads` | Conversion / offline upload | One HTTP attempt loop around each request | Not yet classified (ADR 0023 item 3) |
 | `google_sheets` | Sheet append | Nothing: drt does not retry the append | Documented only (ADR 0023 item 4) |
 | `hubspot` | CRM object create / update | Reconciled when `id_property` is set (see above) | Classified |
 | `intercom` | Contact create / update | Reconciled when a key exists (see above) | Classified |
-| `jira` | Issue create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second issue (ADR 0023 item 1) |
+| `jira` | Issue create / update | Create is blind; update is idempotent (see above) | Classified |
 | `klaviyo` | Profile / list / event | Keyed or reconciled (see above) | Classified |
-| `linear` | Issue create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second issue (ADR 0023 item 1) |
+| `linear` | Issue create | Blind (see above) | Classified |
 | `meta_conversions` | Conversion event | One HTTP attempt loop around each request | Not yet classified; keyed-path verification planned (ADR 0023 item 3) |
 | `mixpanel` | Event / profile | One HTTP attempt loop around each request | Not yet classified; keyed-path verification planned (ADR 0023 item 3) |
 | `mysql` | Warehouse write | Nothing: as for `bigquery` | Documented only |
-| `notion` | Page create | One HTTP attempt loop around each request | Not yet classified; a replay can create a second page (ADR 0023 item 1) |
+| `notion` | Page create | Blind (see above) | Classified |
 | `parquet` | Local file write | Nothing | Not applicable: no remote side effect |
 | `pipedrive` | Person create / update | Reconciled (see above) | Classified |
 | `postgres` | Warehouse write | Nothing: as for `bigquery` | Documented only |
