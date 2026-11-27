@@ -237,6 +237,7 @@ class TestZendeskDestination:
             )
 
         assert result.failed == 1
+        assert result.skipped == 1
         mock_client.post.assert_not_called()
 
     def test_http_error_marks_each_row_in_failed_user_batch(self) -> None:
@@ -275,6 +276,7 @@ class TestZendeskDestination:
 
         assert result.success == 0
         assert result.failed == 100
+        assert result.skipped == 1
         assert mock_client.post.call_count == 1
 
     def test_generic_user_batch_error_marks_batch_failed(self) -> None:
@@ -297,6 +299,7 @@ class TestZendeskDestination:
             )
 
         assert result.failed == 100
+        assert result.skipped == 1
         assert mock_client.post.call_count == 1
         assert result.row_errors[0].error_message == "boom"
 
@@ -336,6 +339,7 @@ class TestZendeskDestination:
             )
 
         assert result.failed == 1
+        assert result.skipped == 1
         mock_client.post.assert_not_called()
 
     def test_organization_http_error_fail_stops(self) -> None:
@@ -353,6 +357,7 @@ class TestZendeskDestination:
             )
 
         assert result.failed == 1
+        assert result.skipped == 1
         assert result.row_errors[0].http_status == 400
         assert mock_client.post.call_count == 1
 
@@ -373,6 +378,7 @@ class TestZendeskDestination:
             )
 
         assert result.failed == 1
+        assert result.skipped == 1
         assert result.row_errors[0].error_message == "boom"
         assert mock_client.post.call_count == 1
 

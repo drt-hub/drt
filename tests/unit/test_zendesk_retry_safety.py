@@ -1,20 +1,26 @@
-"""Replay safety for Zendesk create-or-update writes (ADR 0023).
-
-Zendesk matches an existing user on id / external_id / email and an organization on
-id / external_id, so a replay of an *identified* row updates the same record. A row
-with none of those creates a new record per attempt and is treated as a blind create.
-"""
+"""Replay safety for Zendesk create-or-update writes (ADR 0023)."""
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
-from drt.config.models import RateLimitConfig, RetryConfig, SyncOptions, ZendeskDestinationConfig
+import drt.cli._helpers as cli_helpers
+from drt.cli.commands.retry import replay_dead_letters
+from drt.config.models import (
+    RateLimitConfig,
+    RetryConfig,
+    SyncConfig,
+    SyncOptions,
+    ZendeskDestinationConfig,
+)
+from drt.destinations.base import SyncResult
 from drt.destinations.zendesk import ZendeskDestination
+from drt.state.dlq import DeadLetter, DlqStore
 from tests.http_fault_injection import BlindCreateFaultHarness, FaultMode, install_mock_transport
 
 _USERS_PATH = "/api/v2/users/create_or_update_many.json"
@@ -55,7 +61,7 @@ def _user_key(payload: dict[str, Any]) -> Any:
 
 def _org_key(payload: dict[str, Any]) -> Any:
     organization = payload.get("organization", payload)
-    return organization.get("external_id")
+    return organization.get("external_id") or organization.get("id")
 
 
 def _harness(path: str, mode: FaultMode, *, keyed: Any = None) -> BlindCreateFaultHarness:
@@ -82,6 +88,47 @@ def test_identified_user_replay_updates_the_same_record(
     assert (result.success, result.failed) == (1, 0)
     assert harness.create_attempts == 2
     assert len(harness.remote_objects) == 1
+
+
+@pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+@pytest.mark.parametrize(
+    ("record", "config_overrides"),
+    [
+        ({"name": "Ada", "id": 123}, {}),
+        ({"name": "Ada", "warehouse_id": 123}, {"id_field": "warehouse_id"}),
+        ({"name": "Ada", "email": 0}, {}),
+        ({"name": "Ada", "external_id": False}, {}),
+        ({"name": "Ada", "email": "   "}, {}),
+        ({"name": "Ada", "external_id": None}, {}),
+        ({"name": "Ada", "email": {"nested": "value"}}, {}),
+        ({"name": "Ada", "external_id": ["nested"]}, {}),
+    ],
+    ids=[
+        "id-only",
+        "custom-id-field",
+        "zero",
+        "false",
+        "whitespace",
+        "null",
+        "nested-object",
+        "nested-list",
+    ],
+)
+def test_user_replay_is_blind_without_a_documented_string_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: FaultMode,
+    record: dict[str, Any],
+    config_overrides: dict[str, Any],
+) -> None:
+    harness = _harness(_USERS_PATH, mode)
+    install_mock_transport(monkeypatch, harness)
+
+    result = ZendeskDestination().load([record], _config(**config_overrides), _options())
+
+    assert (result.success, result.failed) == (0, 1)
+    assert harness.create_attempts == 1
+    assert len(harness.remote_objects) == 1
+    assert "delivery is unknown" in result.row_errors[0].error_message
 
 
 @pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
@@ -165,14 +212,136 @@ def test_identified_organization_replay_updates_the_same_record(
     assert len(harness.remote_objects) == 1
 
 
-def test_organization_identified_only_by_name_is_blind(monkeypatch: pytest.MonkeyPatch) -> None:
-    harness = _harness(_ORGS_PATH, "commit-then-drop")
+@pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+@pytest.mark.parametrize("organization_id", [123, "123"], ids=["integer-id", "string-id"])
+def test_organization_id_replay_updates_the_same_record(
+    monkeypatch: pytest.MonkeyPatch, mode: FaultMode, organization_id: int | str
+) -> None:
+    harness = _harness(_ORGS_PATH, mode, keyed=_org_key)
     install_mock_transport(monkeypatch, harness)
 
     result = ZendeskDestination().load(
-        [{"name": "Acme"}], _config(object="organization"), _options()
+        [{"name": "Acme", "id": organization_id}],
+        _config(object="organization"),
+        _options(),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert harness.create_attempts == 2
+    assert len(harness.remote_objects) == 1
+
+
+@pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+def test_organization_custom_id_field_replay_updates_the_same_record(
+    monkeypatch: pytest.MonkeyPatch, mode: FaultMode
+) -> None:
+    harness = _harness(_ORGS_PATH, mode, keyed=_org_key)
+    install_mock_transport(monkeypatch, harness)
+
+    result = ZendeskDestination().load(
+        [{"name": "Acme", "warehouse_id": 123}],
+        _config(object="organization", id_field="warehouse_id"),
+        _options(),
+    )
+
+    assert (result.success, result.failed) == (1, 0)
+    assert harness.create_attempts == 2
+    assert len(harness.remote_objects) == 1
+
+
+@pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
+@pytest.mark.parametrize(
+    ("record", "config_overrides"),
+    [
+        ({"name": "Acme"}, {}),
+        ({"name": "Acme", "id": 0}, {}),
+        ({"name": "Acme", "id": False}, {}),
+        ({"name": "Acme", "external_id": "   "}, {}),
+        ({"name": "Acme", "external_id": None}, {}),
+        ({"name": "Acme", "external_id": {"nested": "value"}}, {}),
+        ({"name": "Acme", "external_id": ["nested"]}, {}),
+        (
+            {"name": "Acme", "warehouse_id": {"nested": "value"}},
+            {"id_field": "warehouse_id"},
+        ),
+    ],
+    ids=[
+        "name-only",
+        "zero",
+        "false",
+        "whitespace",
+        "null",
+        "nested-object",
+        "nested-list",
+        "invalid-custom-id-field",
+    ],
+)
+def test_organization_replay_is_blind_without_a_documented_valid_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: FaultMode,
+    record: dict[str, Any],
+    config_overrides: dict[str, Any],
+) -> None:
+    harness = _harness(_ORGS_PATH, mode)
+    install_mock_transport(monkeypatch, harness)
+
+    result = ZendeskDestination().load(
+        [record], _config(object="organization", **config_overrides), _options()
     )
 
     assert (result.success, result.failed) == (0, 1)
     assert harness.create_attempts == 1
     assert "delivery is unknown" in result.row_errors[0].error_message
+
+
+def test_failed_first_user_chunk_keeps_unattempted_dlq_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [{"name": f"User {index}"} for index in range(101)]
+    store = DlqStore(tmp_path)
+    store.append(
+        "zendesk_users",
+        [DeadLetter(record=record, error_message="old failure") for record in records],
+    )
+    sync = SyncConfig(
+        name="zendesk_users",
+        model="ref('users')",
+        destination=_config(),
+        sync=SyncOptions(
+            batch_size=101,
+            on_error="fail",
+            retry=RetryConfig(
+                max_attempts=2,
+                initial_backoff=0.0,
+                backoff_multiplier=1.0,
+            ),
+            rate_limit=RateLimitConfig(requests_per_second=0),
+        ),
+    )
+    harness = _harness(_USERS_PATH, "commit-then-drop")
+    install_mock_transport(monkeypatch, harness)
+    destination = ZendeskDestination()
+    captured: list[SyncResult] = []
+    real_load = destination.load
+
+    def capture_result(
+        retry_records: list[dict[str, Any]],
+        config: ZendeskDestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        result = real_load(retry_records, config, sync_options)
+        captured.append(result)
+        return result
+
+    monkeypatch.setattr(destination, "load", capture_result)
+    monkeypatch.setattr(cli_helpers, "get_destination", lambda _sync: destination)
+
+    summary = replay_dead_letters(sync, project_dir=tmp_path)
+
+    assert (captured[0].failed, captured[0].skipped) == (100, 1)
+    assert harness.create_attempts == 1
+    assert summary["still_failing"] == 101
+    remaining = store.read("zendesk_users")
+    assert len(remaining) == 101
+    assert remaining[-1].record == records[-1]
+    assert remaining[-1].error_message == "not attempted: the destination stopped after a failure"

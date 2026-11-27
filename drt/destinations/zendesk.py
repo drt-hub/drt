@@ -60,11 +60,6 @@ _ZENDESK_MAX_REQUESTS_PER_SECOND = 11
 _USER_CUSTOM_FIELDS_KEY = "user_fields"
 _ORGANIZATION_CUSTOM_FIELDS_KEY = "organization_fields"
 _CANONICAL_ID_FIELDS = {"id", "external_id"}
-# Zendesk's create-or-update calls match an existing record on one of these, so a
-# replay of an identified row updates the same record. A row carrying none of them
-# creates a new record on every attempt, i.e. a blind create (ADR 0023).
-_USER_IDENTITY_KEYS = ("id", "external_id", "email")
-_ORGANIZATION_IDENTITY_KEYS = ("id", "external_id")
 
 
 class ZendeskDestination:
@@ -149,11 +144,17 @@ class ZendeskDestination:
             except Exception as exc:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - 1
                     return
 
         url = f"{base_url}/users/create_or_update_many.json"
-        for chunk in _chunks(indexed_payloads, _ZENDESK_MAX_USER_BATCH_SIZE):
+        for chunk_start, chunk in enumerate(
+            _chunks(indexed_payloads, _ZENDESK_MAX_USER_BATCH_SIZE)
+        ):
             users = [payload for _, _, payload in chunk]
+            remaining = len(indexed_payloads) - (
+                chunk_start * _ZENDESK_MAX_USER_BATCH_SIZE + len(chunk)
+            )
 
             def do_post(_users: list[dict[str, Any]] = users) -> httpx.Response:
                 response = client.post(
@@ -166,7 +167,12 @@ class ZendeskDestination:
                 return response
 
             operation, on_unknown = _replay_policy(
-                users, _USER_IDENTITY_KEYS, config, retry_config, "user create-or-update"
+                users,
+                _has_user_identity,
+                config,
+                retry_config,
+                "user create-or-update",
+                "email or external_id",
             )
             try:
                 rate_limiter.acquire()
@@ -181,6 +187,7 @@ class ZendeskDestination:
                 for index, record, _ in chunk:
                     _add_row_error(result, index, record, exc.http_status, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += remaining
                     break
             except httpx.HTTPStatusError as exc:
                 for index, record, _ in chunk:
@@ -192,11 +199,13 @@ class ZendeskDestination:
                         exc.response.text[:500],
                     )
                 if sync_options.on_error == "fail":
+                    result.skipped += remaining
                     break
             except Exception as exc:
                 for index, record, _ in chunk:
                     _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += remaining
                     break
 
     def _load_organizations(
@@ -224,6 +233,7 @@ class ZendeskDestination:
             except Exception as exc:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - index - 1
                     break
                 continue
 
@@ -239,10 +249,11 @@ class ZendeskDestination:
 
             operation, on_unknown = _replay_policy(
                 [organization],
-                _ORGANIZATION_IDENTITY_KEYS,
+                _has_organization_identity,
                 config,
                 retry_config,
                 "organization create-or-update",
+                "id or external_id",
             )
             try:
                 rate_limiter.acquire()
@@ -256,6 +267,7 @@ class ZendeskDestination:
             except DeliveryUnknownError as exc:
                 _add_row_error(result, index, record, exc.http_status, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - index - 1
                     break
             except httpx.HTTPStatusError as exc:
                 _add_row_error(
@@ -266,10 +278,12 @@ class ZendeskDestination:
                     exc.response.text[:500],
                 )
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - index - 1
                     break
             except Exception as exc:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - index - 1
                     break
 
 
@@ -312,7 +326,7 @@ def _build_zendesk_object(
     if config.id_field:
         id_value = record.get(config.id_field)
         should_copy_to_id = (
-            _has_value(id_value)
+            _is_zendesk_id(id_value)
             and "id" not in payload
             and config.id_field not in _CANONICAL_ID_FIELDS
         )
@@ -348,13 +362,14 @@ def _render_custom_fields(
 
 def _replay_policy(
     payloads: list[dict[str, Any]],
-    identity_keys: tuple[str, ...],
+    has_identity: Callable[[dict[str, Any]], bool],
     config: ZendeskDestinationConfig,
     retry_config: RetryConfig,
     operation_label: str,
+    identity_label: str,
 ) -> tuple[OperationSafety, Callable[[Exception, int], RetryDirective] | None]:
     """Keyed when every payload carries an identity Zendesk matches on, else blind."""
-    if all(any(_has_value(payload.get(key)) for key in identity_keys) for payload in payloads):
+    if all(has_identity(payload) for payload in payloads):
         return OperationSafety.KEYED, None
 
     def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
@@ -364,15 +379,38 @@ def _replay_policy(
             retry_creates=config.retry_creates,
             max_attempts=retry_config.max_attempts,
             destination="Zendesk",
-            operation=operation_label + " without id, external_id or email",
+            operation=f"{operation_label} without valid {identity_label}",
             logger=logger,
         )
 
     return OperationSafety.BLIND_CREATE, on_delivery_unknown
 
 
-def _has_value(value: Any) -> bool:
-    return value is not None and str(value).strip() != ""
+def _has_non_blank_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_zendesk_id(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value > 0
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped.isdecimal() and int(stripped) > 0
+    return False
+
+
+def _has_user_identity(payload: dict[str, Any]) -> bool:
+    # create_or_update_many documents only email and external_id as match keys.
+    return _has_non_blank_string(payload.get("email")) or _has_non_blank_string(
+        payload.get("external_id")
+    )
+
+
+def _has_organization_identity(payload: dict[str, Any]) -> bool:
+    # create_or_update documents id and external_id, but explicitly not name.
+    return _is_zendesk_id(payload.get("id")) or _has_non_blank_string(payload.get("external_id"))
 
 
 def _chunks(
