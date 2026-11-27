@@ -86,31 +86,37 @@ def successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -
     """Indices into ``record_batch`` this ``load()`` call actually reported
     success for, or an empty set when that can't be determined safely.
 
-    Every ``RowError.batch_index`` is excluded (a positive, per-row
-    failure signal). But some destinations skip a row *without* recording
-    a ``RowError`` — ``match_policy: update_only``/``create_only``'s
-    ``skipped_no_match`` (#757) is a bare counter with no per-row index at
-    all. Treating "not in row_errors" as "therefore delivered" would
-    wrongly mark a skipped-no-match row as successfully delivered (caught
-    in Codex review on #1100, which shares this helper): a real, silent
-    compliance/idempotency-ledger false positive, since a skip is neither
-    a failure nor a delivery. So whenever this batch reports *any* skip
-    (``result.skipped``, which ``skipped_no_match`` is a documented subset
-    of), this returns an empty set rather than guess — fail closed, not
-    open: missing one batch's dedup/audit protection is a far smaller cost
-    than permanently marking a never-delivered record as delivered.
+    Every ``RowError.batch_index`` and attributed ``result.unattempted``
+    index is excluded. A skip without per-record attribution — including
+    ``skipped_no_match`` (#757) — still makes the whole result fail closed:
+    treating "not in row_errors" as "therefore delivered" could permanently
+    mark a never-delivered record in the idempotency ledger. Exact
+    ``unattempted`` attribution is the one safe exception because the
+    remaining positions can be checked against ``result.success``.
 
     Shared by ``run_sync()``'s per-batch ``mark_delivered``/audit-log write
     and ``drt retry``'s ``replay_dead_letters()`` (#1118, caught in Codex
     review on #1126 for the same reason #1100 caught it here first) — both
     need the same "which of these did the destination confirm" computation.
     """
-    if result.skipped > 0 or result.total != len(record_batch):
+    if result.total != len(record_batch) or result.skipped_no_match > 0:
         return set()
     failed_indices = {
         err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
     }
-    successful = [i for i in range(len(record_batch)) if i not in failed_indices]
+    unattempted_indices = set(result.unattempted)
+    if result.skipped > 0 and (
+        len(unattempted_indices) != len(result.unattempted)
+        or len(unattempted_indices) != result.skipped
+        or any(i < 0 or i >= len(record_batch) for i in unattempted_indices)
+        or not unattempted_indices.isdisjoint(failed_indices)
+    ):
+        return set()
+    successful = [
+        i
+        for i in range(len(record_batch))
+        if i not in failed_indices and i not in unattempted_indices
+    ]
     if len(successful) != result.success:
         return set()
     return set(successful)

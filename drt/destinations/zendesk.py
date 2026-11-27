@@ -145,6 +145,7 @@ class ZendeskDestination:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
                     result.skipped += len(records) - 1
+                    result.unattempted.extend(i for i in range(len(records)) if i != index)
                     return
 
         url = f"{base_url}/users/create_or_update_many.json"
@@ -155,6 +156,9 @@ class ZendeskDestination:
             remaining = len(indexed_payloads) - (
                 chunk_start * _ZENDESK_MAX_USER_BATCH_SIZE + len(chunk)
             )
+            remaining_payloads = indexed_payloads[
+                chunk_start * _ZENDESK_MAX_USER_BATCH_SIZE + len(chunk) :
+            ]
 
             def do_post(_users: list[dict[str, Any]] = users) -> httpx.Response:
                 response = client.post(
@@ -188,6 +192,7 @@ class ZendeskDestination:
                     _add_row_error(result, index, record, exc.http_status, str(exc))
                 if sync_options.on_error == "fail":
                     result.skipped += remaining
+                    result.unattempted.extend(index for index, _, _ in remaining_payloads)
                     break
             except httpx.HTTPStatusError as exc:
                 for index, record, _ in chunk:
@@ -200,12 +205,14 @@ class ZendeskDestination:
                     )
                 if sync_options.on_error == "fail":
                     result.skipped += remaining
+                    result.unattempted.extend(index for index, _, _ in remaining_payloads)
                     break
             except Exception as exc:
                 for index, record, _ in chunk:
                     _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
                     result.skipped += remaining
+                    result.unattempted.extend(index for index, _, _ in remaining_payloads)
                     break
 
     def _load_organizations(
@@ -234,6 +241,7 @@ class ZendeskDestination:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
                     result.skipped += len(records) - index - 1
+                    result.unattempted.extend(range(index + 1, len(records)))
                     break
                 continue
 
@@ -268,6 +276,7 @@ class ZendeskDestination:
                 _add_row_error(result, index, record, exc.http_status, str(exc))
                 if sync_options.on_error == "fail":
                     result.skipped += len(records) - index - 1
+                    result.unattempted.extend(range(index + 1, len(records)))
                     break
             except httpx.HTTPStatusError as exc:
                 _add_row_error(
@@ -279,11 +288,13 @@ class ZendeskDestination:
                 )
                 if sync_options.on_error == "fail":
                     result.skipped += len(records) - index - 1
+                    result.unattempted.extend(range(index + 1, len(records)))
                     break
             except Exception as exc:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
                     result.skipped += len(records) - index - 1
+                    result.unattempted.extend(range(index + 1, len(records)))
                     break
 
 

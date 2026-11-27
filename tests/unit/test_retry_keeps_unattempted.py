@@ -42,6 +42,20 @@ class _StopsAfterFirstFailure:
         return result
 
 
+class _SucceedsThenStopsWithAttribution:
+    """Confirms record 0, fails record 1, and never attempts record 2."""
+
+    def load(
+        self, records: list[dict[str, Any]], config: DestinationConfig, sync_options: SyncOptions
+    ) -> SyncResult:
+        result = SyncResult(success=1, failed=1, skipped=1, unattempted=[2])
+        result.row_errors.append(
+            RowError(batch_index=1, record_preview="{}", error_message="boom", http_status=500)
+        )
+        result.errors.append("boom")
+        return result
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
@@ -74,6 +88,22 @@ def test_records_the_destination_never_attempted_stay_queued(
     assert [e.record["id"] for e in remaining] == [1, 2, 3]
     unattempted = [e for e in remaining if e.record["id"] != 1]
     assert all("not attempted" in e.error_message for e in unattempted)
+
+
+def test_attributed_unattempted_rows_do_not_requeue_confirmed_successes(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        helpers, "get_destination", lambda sync: _SucceedsThenStopsWithAttribution()
+    )
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    remaining = DlqStore(project).read("post_users")
+    assert [e.record["id"] for e in remaining] == [2, 3]
+    assert remaining[0].error_message == "boom"
+    assert remaining[1].error_message == "not attempted: the destination stopped after a failure"
 
 
 def test_a_policy_skip_that_is_explained_is_still_removed(

@@ -75,6 +75,24 @@ def _harness(path: str, mode: FaultMode, *, keyed: Any = None) -> BlindCreateFau
     )
 
 
+def _retry_sync(name: str, destination: ZendeskDestinationConfig, *, batch_size: int) -> SyncConfig:
+    return SyncConfig(
+        name=name,
+        model="ref('zendesk_records')",
+        destination=destination,
+        sync=SyncOptions(
+            batch_size=batch_size,
+            on_error="fail",
+            retry=RetryConfig(
+                max_attempts=2,
+                initial_backoff=0.0,
+                backoff_multiplier=1.0,
+            ),
+            rate_limit=RateLimitConfig(requests_per_second=0),
+        ),
+    )
+
+
 @pytest.mark.parametrize("mode", ["commit-then-drop", "commit-then-5xx"])
 @pytest.mark.parametrize("identity", [{"email": "ada@example.com"}, {"external_id": "ext-1"}])
 def test_identified_user_replay_updates_the_same_record(
@@ -294,30 +312,92 @@ def test_organization_replay_is_blind_without_a_documented_valid_identity(
     assert "delivery is unknown" in result.row_errors[0].error_message
 
 
-def test_failed_first_user_chunk_keeps_unattempted_dlq_rows(
+def test_retry_removes_successful_organization_before_later_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    records = [{"name": f"User {index}"} for index in range(101)]
+    records = [
+        {"name": "Org 1", "external_id": "org-1"},
+        {"name": "Org 2", "external_id": "org-2"},
+        {"name": "Org 3", "external_id": "org-3"},
+    ]
+    store = DlqStore(tmp_path)
+    store.append(
+        "zendesk_orgs",
+        [DeadLetter(record=record, error_message="old failure") for record in records],
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _ok(request, 1)
+        return httpx.Response(400, text="bad organization", request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    destination = ZendeskDestination()
+    monkeypatch.setattr(cli_helpers, "get_destination", lambda _sync: destination)
+
+    summary = replay_dead_letters(
+        _retry_sync("zendesk_orgs", _config(object="organization"), batch_size=3),
+        project_dir=tmp_path,
+    )
+
+    assert len(requests) == 2
+    assert (summary["succeeded"], summary["still_failing"]) == (1, 2)
+    remaining = store.read("zendesk_orgs")
+    assert [entry.record["external_id"] for entry in remaining] == ["org-2", "org-3"]
+    assert remaining[0].error_message == "bad organization"
+    assert remaining[1].error_message == "not attempted: the destination stopped after a failure"
+
+
+def test_retry_removes_successful_user_chunk_before_later_chunk_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [
+        {"name": f"User {index}", "email": f"user-{index}@example.com"} for index in range(250)
+    ]
     store = DlqStore(tmp_path)
     store.append(
         "zendesk_users",
         [DeadLetter(record=record, error_message="old failure") for record in records],
     )
-    sync = SyncConfig(
-        name="zendesk_users",
-        model="ref('users')",
-        destination=_config(),
-        sync=SyncOptions(
-            batch_size=101,
-            on_error="fail",
-            retry=RetryConfig(
-                max_attempts=2,
-                initial_backoff=0.0,
-                backoff_multiplier=1.0,
-            ),
-            rate_limit=RateLimitConfig(requests_per_second=0),
-        ),
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _ok(request, 1)
+        return httpx.Response(400, text="bad user chunk", request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    destination = ZendeskDestination()
+    monkeypatch.setattr(cli_helpers, "get_destination", lambda _sync: destination)
+
+    summary = replay_dead_letters(
+        _retry_sync("zendesk_users", _config(), batch_size=250),
+        project_dir=tmp_path,
     )
+
+    assert len(requests) == 2
+    assert (summary["succeeded"], summary["still_failing"]) == (100, 150)
+    remaining = store.read("zendesk_users")
+    assert [entry.record["email"] for entry in remaining] == [
+        f"user-{index}@example.com" for index in range(100, 250)
+    ]
+    assert all(entry.error_message == "bad user chunk" for entry in remaining[:100])
+    assert all("not attempted" in entry.error_message for entry in remaining[100:])
+
+
+def test_failed_first_user_chunk_keeps_unattempted_dlq_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [{"name": f"User {index}"} for index in range(250)]
+    store = DlqStore(tmp_path)
+    store.append(
+        "zendesk_users",
+        [DeadLetter(record=record, error_message="old failure") for record in records],
+    )
+    sync = _retry_sync("zendesk_users", _config(), batch_size=250)
     harness = _harness(_USERS_PATH, "commit-then-drop")
     install_mock_transport(monkeypatch, harness)
     destination = ZendeskDestination()
@@ -338,10 +418,11 @@ def test_failed_first_user_chunk_keeps_unattempted_dlq_rows(
 
     summary = replay_dead_letters(sync, project_dir=tmp_path)
 
-    assert (captured[0].failed, captured[0].skipped) == (100, 1)
+    assert (captured[0].failed, captured[0].skipped) == (100, 150)
+    assert captured[0].unattempted == list(range(100, 250))
     assert harness.create_attempts == 1
-    assert summary["still_failing"] == 101
+    assert summary["still_failing"] == 250
     remaining = store.read("zendesk_users")
-    assert len(remaining) == 101
+    assert len(remaining) == 250
     assert remaining[-1].record == records[-1]
     assert remaining[-1].error_message == "not attempted: the destination stopped after a failure"
