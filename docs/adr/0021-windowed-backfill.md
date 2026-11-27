@@ -1012,3 +1012,31 @@ Four fail-closed refinements supersede the affected earlier wording:
    explicitly shifted replay windows, while distinct cursor occurrences remain
    distinct. As in rounds 13/14, this changes only unreleased backfill IDs and needs
    no migration.
+
+## Amendment 2026-11-27 (slice 4 round-2 review)
+
+Two fail-closed refinements supersede the affected round-1 wording:
+
+1. **Operator replay renews ledger retention time.** The frozen
+   `IdempotencyLedger` Protocol keeps `mark_delivered` unchanged. A separate
+   additive `RenewingIdempotencyLedger` capability inserts a missing key or
+   updates an existing key's `delivered_at` after acknowledged operator-replay
+   delivery. PostgreSQL implements this with `ON CONFLICT ... DO UPDATE`; it is
+   the only ledger backend currently exposed by `drt/state` (the other state
+   dialects reject `state.idempotency`). Ordinary runs retain `mark_delivered`'s
+   duplicate no-op. An explicit range with a configured ledger and resolvable
+   key refuses before extraction if renewal is unavailable. Renewal errors
+   propagate and a failed operator replay skips ledger pruning, so an old key
+   cannot be deleted on the failure path. A successful renewal precedes the
+   normal seven-day prune, preventing the next lagged resume from redelivering
+   the replayed row.
+2. **Keyless DLQ fallback identity is typed and collision-intolerant.** The hash
+   input now uses a canonical recursive encoding with explicit tags for null,
+   boolean, integer, float, string, datetime/date/time, duration, decimal, UUID,
+   bytes, mappings, and collection shapes; `default=str` is no longer part of
+   deterministic identity. Unsupported fallback values refuse rather than being
+   stringified. For a keyless backfill capability, the engine tracks these IDs
+   across streamed batches in one window and rejects the first repeat before its
+   batch reaches the destination. The operator must configure a unique
+   destination key or deduplicate the model. Keyed destinations retain their
+   existing destination-upsert-key validation and identity path.

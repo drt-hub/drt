@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
 from drt.state.dlq import (
     DeadLetter,
@@ -217,6 +220,38 @@ def test_backfill_dead_letter_id_is_scoped_by_sync_row_cursor_and_stable_identit
     )
     assert keyless_first == backfill_dead_letter_id("events", 1, keyless)
     assert keyless_first != backfill_dead_letter_id("events", 2, keyless)
+
+
+def test_backfill_dead_letter_id_type_tags_keyless_fallback_values() -> None:
+    moment = datetime(2026, 11, 27, 12, 34, 56)
+    day = date(2026, 11, 27)
+    identifier = UUID("12345678-1234-5678-1234-567812345678")
+    values = [
+        1,
+        "1",
+        1.0,
+        True,
+        None,
+        Decimal("1"),
+        moment,
+        moment.isoformat(),
+        day,
+        day.isoformat(),
+        identifier,
+        str(identifier),
+        b"1",
+    ]
+
+    ids = {
+        backfill_dead_letter_id(
+            "events",
+            1,
+            {"pre_metadata_record": {"cursor": 1, "value": value}},
+        )
+        for value in values
+    }
+
+    assert len(ids) == len(values)
 
 
 def test_legacy_line_gets_the_same_id_on_repeated_reads(tmp_path: Path) -> None:

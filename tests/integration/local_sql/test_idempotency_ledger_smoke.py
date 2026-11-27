@@ -76,6 +76,20 @@ def test_mark_delivered_is_idempotent_for_a_repeated_key(pg_profile: PostgresPro
     assert ledger.already_delivered("orders", ["k1"]) == {"k1"}
 
 
+def test_renew_delivered_refreshes_a_repeated_key_before_prune(
+    pg_profile: PostgresProfile,
+) -> None:
+    ledger = PostgresWarehouseIdempotencyLedger(pg_profile)
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    recent = datetime.now(timezone.utc).isoformat()
+
+    ledger.mark_delivered("orders", ["replayed-key"], old)
+    ledger.renew_delivered("orders", ["replayed-key"], recent)
+
+    assert ledger.prune("orders", retention_days=7) == 0
+    assert ledger.already_delivered("orders", ["replayed-key"]) == {"replayed-key"}
+
+
 def test_prune_removes_only_rows_older_than_retention(pg_profile: PostgresProfile) -> None:
     ledger = PostgresWarehouseIdempotencyLedger(pg_profile)
     now = datetime.now(timezone.utc)

@@ -86,10 +86,15 @@ from drt.sources.base import (
     is_window_capable,
 )
 from drt.state.audit_trail import AuditEntry, ComplianceAuditTrail, json_safe_audit_value
-from drt.state.dlq import DeadLetter, backfill_dead_letter_id
+from drt.state.dlq import (
+    DeadLetter,
+    backfill_dead_letter_id,
+    validate_keyless_backfill_identities,
+)
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.idempotency import (
     IdempotencyLedger,
+    RenewingIdempotencyLedger,
     compute_idempotency_key,
     resolve_idempotency_key_template,
     successful_indices,
@@ -779,7 +784,17 @@ def run_sync(
         # config block) — same scope-narrowing call made on #755; a
         # configurable retention is a defensible follow-up, not a gap that
         # needs solving now.
-        if not dry_run and not exact and idempotency_ledger is not None:
+        failed_operator_replay = (
+            raised is not None
+            and backfill is not None
+            and (backfill_start is not None or backfill_end is not None)
+        )
+        if (
+            not dry_run
+            and not exact
+            and idempotency_ledger is not None
+            and not failed_operator_replay
+        ):
             try:
                 idempotency_ledger.prune(sync.name, retention_days=7)
             except Exception as exc:  # noqa: BLE001 — best-effort
@@ -917,6 +932,25 @@ def _flush_uncheckpointed_window(
                 pass
 
 
+def _record_idempotency_delivery(
+    ledger: IdempotencyLedger,
+    sync_name: str,
+    keys: list[str],
+    delivered_at: str,
+    *,
+    renew: bool,
+) -> None:
+    """Mark ordinary deliveries or refresh marks after an operator replay."""
+    if renew:
+        if not isinstance(ledger, RenewingIdempotencyLedger):
+            raise RuntimeError(
+                "Operator replay requires the idempotency ledger's renew_delivered capability."
+            )
+        ledger.renew_delivered(sync_name, keys, delivered_at)
+        return
+    ledger.mark_delivered(sync_name, keys, delivered_at)
+
+
 def _run_backfill_body(
     *,
     sync: SyncConfig,
@@ -966,6 +1000,17 @@ def _run_backfill_body(
     )
     cli_start, cli_end = parse_cli_range(configured_start, backfill_start, backfill_end)
     operator_replay = cli_start is not None or cli_end is not None
+    if (
+        operator_replay
+        and idempotency_ledger is not None
+        and resolve_idempotency_key_template(sync) is not None
+        and not isinstance(idempotency_ledger, RenewingIdempotencyLedger)
+    ):
+        raise RuntimeError(
+            "Explicit backfill range replay with an idempotency ledger requires "
+            "the additive renew_delivered capability; refusing before extraction "
+            "because an old delivery mark could otherwise be pruned immediately."
+        )
     effective_start = durable_checkpoint if durable_checkpoint is not None else configured_start
     watermark_lag: str | None = None
     if cli_start is not None:
@@ -1075,6 +1120,7 @@ def _run_backfill_body(
                 audit_fields=audit_fields,
                 window_bounds=bounds,
                 bypass_idempotency_filter=operator_replay,
+                renew_idempotency_marks=operator_replay,
                 notify_completion=False,
             )
         except BaseException as exc:
@@ -1128,10 +1174,12 @@ def _run_backfill_body(
                 delivered_at = datetime.now(timezone.utc).isoformat()
                 if idempotency_ledger is not None and window_result._deferred_ledger_keys:
                     with _stage_ctx("state"):
-                        idempotency_ledger.mark_delivered(
+                        _record_idempotency_delivery(
+                            idempotency_ledger,
                             sync.name,
                             window_result._deferred_ledger_keys,
                             delivered_at,
+                            renew=operator_replay,
                         )
                 if audit_trail is not None and window_result._deferred_audit_entries:
                     with _stage_ctx("state"):
@@ -1193,6 +1241,7 @@ def _run_sync_body(
     exact: bool = False,
     window_bounds: BackfillWindow | None = None,
     bypass_idempotency_filter: bool = False,
+    renew_idempotency_marks: bool = False,
     notify_completion: bool = True,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
@@ -1556,6 +1605,8 @@ def _run_sync_body(
     stream_consumed = True
     window_key_digests: set[bytes] = set()
     window_key_row_ordinal = 0
+    window_keyless_dlq_ids: set[str] = set()
+    window_keyless_row_ordinal = 0
     window_upsert_key = (
         getattr(sync.destination, "upsert_key", None) if window_bounds is not None else None
     )
@@ -1768,6 +1819,16 @@ def _run_sync_body(
                         seen_key_digests=window_key_digests,
                         row_ordinal=window_key_row_ordinal,
                     )
+                else:
+                    window_keyless_row_ordinal = validate_keyless_backfill_identities(
+                        sync.name,
+                        [record for record in batch_pre_metadata_records if record is not None],
+                        batch_window_cursors,
+                        low=window_bounds[0],
+                        high=window_bounds[1],
+                        seen_ids=window_keyless_dlq_ids,
+                        row_ordinal=window_keyless_row_ordinal,
+                    )
 
             # Managed destination tables (#760): the check runs on the first
             # destination-facing batch, after every transform and before plan
@@ -1936,8 +1997,12 @@ def _run_sync_body(
                         delivered_at = datetime.now(timezone.utc).isoformat()
                         if idempotency_ledger is not None and delivered_keys:
                             with _stage_ctx("state"):
-                                idempotency_ledger.mark_delivered(
-                                    sync.name, delivered_keys, delivered_at
+                                _record_idempotency_delivery(
+                                    idempotency_ledger,
+                                    sync.name,
+                                    delivered_keys,
+                                    delivered_at,
+                                    renew=renew_idempotency_marks,
                                 )
                         if audit_trail is not None and audit_entries:
                             with _stage_ctx("state"):

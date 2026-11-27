@@ -43,8 +43,12 @@ Windows run sequentially. The existing transforms, destination lookups,
 idempotency ledger, batching, DLQ behavior, and destination finalizer apply to
 every window. Ordinary resume runs use the ledger's already-delivered filter.
 An explicit operator range replay bypasses that filter so it can restore rows
-the destination lost; successful deliveries are still marked in the ledger for
-the audit trail and later ordinary resumes.
+the destination lost. After acknowledged success, drt renews each existing
+ledger key's `delivered_at` through an additive ledger capability (or inserts a
+missing key) before retention pruning. This prevents an old replayed key from
+being pruned immediately and then re-delivered by the next ordinary lagged
+resume. A configured ledger without renewal support refuses the replay before
+extraction.
 
 After a window is fully consumed and finalized, drt writes a provisional
 `partial` StateStore record with `cursor_boundary: exclusive`, then writes a
@@ -162,9 +166,14 @@ canonicalized in the backfill family, and the validated destination upsert key,
 not from either window boundary or the final payload. Thus an open-ended retry
 or an explicit replay with shifted window alignment replaces the existing entry
 for the same row. Keyless plugin capabilities use the same row-cursor scheme
-with the record captured before metadata injection. This ID scheme replaces
-only IDs from earlier unreleased slice commits: mainline has not enabled
-backfill execution, so no compatibility migration is needed.
+with the record captured before metadata injection. The fallback is serialized
+canonically with explicit type tags, so values such as `1`, `"1"`, `1.0`,
+`true`, `null`, and a datetime never collapse through string coercion. If two
+keyless rows in one window would still produce the same deterministic ID, drt
+refuses before that batch's destination write and checkpoint; configure a
+unique destination key or deduplicate the model. This ID scheme replaces only
+IDs from earlier unreleased slice commits: mainline has not enabled backfill
+execution, so no compatibility migration is needed.
 
 ## Recovery and state safety
 
@@ -214,9 +223,11 @@ drt run --select orders_to_crm --backfill-start 1000000 --backfill-end 2000000
   A start above the checkpoint skips the gap and the checkpoint advances normally.
 - **Either range flag makes this an operator replay.** drt does not apply the
   idempotency ledger's already-delivered filter, because the explicit purpose may
-  be to restore rows missing from the destination. It still marks successful keys.
-  The run summary reports `ledger_bypassed: true`; ordinary resume runs report
-  `false` and retain the normal duplicate filter.
+  be to restore rows missing from the destination. It renews successful keys'
+  delivery timestamps before pruning; a ledger that lacks the additive renewal
+  capability is refused before extraction. The run summary reports
+  `ledger_bypassed: true`; ordinary resume runs report `false` and retain the
+  normal duplicate filter.
 - `watermark.lag` is not applied to a CLI start (it applies only when the start
   came from durable storage).
 - **Exactly one selected sync, and it must declare `sync.backfill`.** The two flags

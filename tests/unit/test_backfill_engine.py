@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from collections.abc import Collection, Iterator
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ from drt.config.models import (
     SnowflakeDestinationConfig,
     SyncConfig,
     SyncOptions,
+    WatermarkConfig,
 )
 from drt.connectors.registry import get_destination, windowed_backfill_destination_types
 from drt.destinations.base import SyncResult
@@ -381,6 +382,108 @@ def test_every_backfill_destination_rejects_duplicate_composite_key_before_write
     load.assert_not_called()
     assert checkpoint.checkpoints == 0
     assert state.value is None
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
+def test_duplicate_keyless_rows_are_refused_before_write_for_strict_dlq_backends(
+    backend: str,
+    tmp_path: Path,
+) -> None:
+    sync = _sync(end=3, on_error="skip")
+    destination = RecordingDestination()
+    state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    observer = CompositeObserver(
+        [checkpoint, DlqObserver(_strict_dlq_backend(backend, tmp_path))],
+        checkpoint_observer=checkpoint,
+    )
+    duplicate = {"cursor": 1, "payload": "same"}
+
+    with pytest.raises(ValueError, match="unique destination.upsert_key or deduplicate"):
+        run_sync(
+            sync,
+            WindowSource([duplicate, dict(duplicate)]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+    assert destination.calls == []
+    assert checkpoint.checkpoints == 0
+    assert state.value is None
+
+
+def test_duplicate_keyless_identity_is_tracked_across_window_batches(
+    tmp_path: Path,
+) -> None:
+    sync = _sync(end=3, on_error="skip")
+    sync.sync.batch_size = 1
+    destination = RecordingDestination()
+    state = MemoryState()
+    duplicate = {"cursor": 1, "payload": "same"}
+
+    with pytest.raises(ValueError, match="row ordinal 2"):
+        run_sync(
+            sync,
+            WindowSource([duplicate, dict(duplicate)]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(state),
+        )
+
+    assert destination.calls == [[duplicate]]
+    assert state.value is None
+
+
+def test_uncanonicalizable_keyless_identity_is_refused_before_write(
+    tmp_path: Path,
+) -> None:
+    class UnsupportedValue:
+        pass
+
+    destination = RecordingDestination()
+
+    with pytest.raises(TypeError, match="cannot canonically serialize"):
+        run_sync(
+            _sync(end=3),
+            WindowSource([{"cursor": 1, "payload": UnsupportedValue()}]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(MemoryState()),
+        )
+
+    assert destination.calls == []
+
+
+def test_keyed_rows_with_same_cursor_and_payload_keep_distinct_dlq_identity(
+    tmp_path: Path,
+) -> None:
+    config = _capable_destination_config("postgres").model_copy(update={"upsert_key": ["id"]})
+    sync = _sync_for_destination(config)
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=2))
+    destination.load = load
+    rows = [
+        {"cursor": 1, "id": 1, "payload": "same"},
+        {"cursor": 1, "id": 2, "payload": "same"},
+    ]
+
+    run_sync(
+        sync,
+        WindowSource(rows),
+        destination,
+        _profile(),
+        tmp_path,
+        observer=_observer(MemoryState()),
+    )
+
+    load.assert_called_once_with(rows, config, sync.sync)
 
 
 def test_duplicate_key_across_batches_fails_before_second_batch_write(tmp_path: Path) -> None:
@@ -2531,6 +2634,10 @@ def test_operator_replay_bypasses_ledger_filter_but_normal_resume_keeps_it(
             self.marked.extend(keys)
             self.delivered.update(keys)
 
+        def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            self.marked.extend(keys)
+            self.delivered.update(keys)
+
         def prune(self, sync_name: str, retention_days: int) -> int:
             return 0
 
@@ -2584,6 +2691,158 @@ def test_operator_replay_bypasses_ledger_filter_but_normal_resume_keeps_it(
     assert normal_ledger.marked == []
     assert normal.skipped_duplicate == 1
     assert normal.backfill is not None and normal.backfill["ledger_bypassed"] is False
+
+
+def test_operator_replay_refuses_ledger_without_renewal_before_extraction(
+    tmp_path: Path,
+) -> None:
+    class LegacyLedger:
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return set()
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            return None
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            return 0
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    source = WindowSource([{"cursor": 1}])
+    destination = RecordingDestination()
+
+    with pytest.raises(RuntimeError, match="renew_delivered capability"):
+        _run_range(
+            tmp_path,
+            MemoryState(),
+            source,
+            sync=sync,
+            destination=destination,
+            idempotency_ledger=LegacyLedger(),
+            backfill_start=0,
+            backfill_end=3,
+        )
+
+    assert source.windows == []
+    assert destination.calls == []
+
+
+def test_failed_operator_replay_renewal_propagates_without_pruning(
+    tmp_path: Path,
+) -> None:
+    class FailingRenewalLedger:
+        def __init__(self) -> None:
+            self.prune_calls = 0
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return set()
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            return None
+
+        def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            raise RuntimeError("renewal unavailable")
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            self.prune_calls += 1
+            return 0
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    ledger = FailingRenewalLedger()
+    destination = RecordingDestination()
+
+    with pytest.raises(RuntimeError, match="renewal unavailable"):
+        _run_range(
+            tmp_path,
+            MemoryState(),
+            WindowSource([{"cursor": 1}]),
+            sync=sync,
+            destination=destination,
+            idempotency_ledger=ledger,
+            backfill_start=0,
+            backfill_end=3,
+        )
+
+    assert destination.calls == [[{"cursor": 1}]]
+    assert ledger.prune_calls == 0
+
+
+def test_operator_replay_renews_expired_key_before_prune_and_lagged_resume(
+    tmp_path: Path,
+) -> None:
+    class ExpiringLedger:
+        def __init__(self) -> None:
+            self.delivered_at = {
+                "1": datetime.now(timezone.utc) - timedelta(days=10),
+            }
+            self.renewed: list[str] = []
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return keys & self.delivered_at.keys()
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            for key in keys:
+                self.delivered_at.setdefault(key, datetime.fromisoformat(delivered_at))
+
+        def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            self.renewed.extend(keys)
+            for key in keys:
+                self.delivered_at[key] = datetime.fromisoformat(delivered_at)
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            expired = [
+                key for key, delivered_at in self.delivered_at.items() if delivered_at < cutoff
+            ]
+            for key in expired:
+                del self.delivered_at[key]
+            return len(expired)
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    sync.sync.watermark = WatermarkConfig(lag=3)
+    state = MemoryState(
+        SyncState(
+            "events",
+            "old",
+            1,
+            "partial",
+            last_cursor_value="3",
+            cursor_boundary="exclusive",
+        )
+    )
+    ledger = ExpiringLedger()
+    replay_destination = RecordingDestination()
+
+    _run_range(
+        tmp_path,
+        state,
+        WindowSource([{"cursor": 1}]),
+        sync=sync,
+        destination=replay_destination,
+        idempotency_ledger=ledger,
+        backfill_start=0,
+        backfill_end=3,
+    )
+
+    assert replay_destination.calls == [[{"cursor": 1}]]
+    assert ledger.renewed == ["1"]
+    assert "1" in ledger.delivered_at
+
+    resume_destination = RecordingDestination()
+    result = _run_range(
+        tmp_path,
+        state,
+        WindowSource([{"cursor": 1}]),
+        sync=sync,
+        destination=resume_destination,
+        idempotency_ledger=ledger,
+    )
+
+    assert resume_destination.calls == []
+    assert result.skipped_duplicate == 1
+    assert "1" in ledger.delivered_at
 
 
 def test_cli_start_above_the_checkpoint_advances_it(tmp_path: Path) -> None:

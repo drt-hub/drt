@@ -21,15 +21,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 import threading
 import uuid
+from base64 import b64encode
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
+from uuid import UUID
 
 from drt.state._atomic import _fsync_parent_directory
 from drt.state._filelock import advisory_lock
@@ -101,25 +105,110 @@ def backfill_dead_letter_id(
     providing its deterministic fallback.
     """
     payload = json.dumps(
-        {
-            "sync_name": sync_name,
-            "row_cursor": {
-                "value": canonical_row_cursor,
-                "family": (
-                    "integer"
-                    if isinstance(canonical_row_cursor, int)
-                    else "timestamp"
-                    if isinstance(canonical_row_cursor, str)
-                    else "missing"
-                ),
-            },
-            "identity": stable_identity,
-        },
-        sort_keys=True,
+        _type_tagged_canonical_value(
+            {
+                "sync_name": sync_name,
+                "row_cursor": {
+                    "value": canonical_row_cursor,
+                    "family": (
+                        "integer"
+                        if isinstance(canonical_row_cursor, int)
+                        else "timestamp"
+                        if isinstance(canonical_row_cursor, str)
+                        else "missing"
+                    ),
+                },
+                "identity": stable_identity,
+            }
+        ),
+        ensure_ascii=False,
         separators=(",", ":"),
-        default=str,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _type_tagged_canonical_value(value: Any) -> list[Any]:
+    """Encode a DLQ identity without Python/JSON scalar coercion collisions."""
+    if value is None:
+        return ["none"]
+    if type(value) is bool:
+        return ["bool", value]
+    if type(value) is int:
+        return ["int", str(value)]
+    if type(value) is float:
+        if math.isnan(value):
+            encoded_float = "nan"
+        elif math.isinf(value):
+            encoded_float = "+inf" if value > 0 else "-inf"
+        else:
+            encoded_float = value.hex()
+        return ["float", encoded_float]
+    if type(value) is str:
+        return ["str", value]
+    if isinstance(value, datetime):
+        return ["datetime", value.isoformat()]
+    if isinstance(value, date):
+        return ["date", value.isoformat()]
+    if isinstance(value, time):
+        return ["time", value.isoformat()]
+    if isinstance(value, timedelta):
+        return ["timedelta", str(value.days), str(value.seconds), str(value.microseconds)]
+    if isinstance(value, Decimal):
+        return ["decimal", str(value)]
+    if isinstance(value, UUID):
+        return ["uuid", str(value)]
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return ["bytes", b64encode(bytes(value)).decode("ascii")]
+    if isinstance(value, Mapping):
+        items = [
+            [_type_tagged_canonical_value(key), _type_tagged_canonical_value(item)]
+            for key, item in value.items()
+        ]
+        items.sort(key=lambda item: json.dumps(item[0], ensure_ascii=False, separators=(",", ":")))
+        return ["mapping", items]
+    if isinstance(value, list):
+        return ["list", [_type_tagged_canonical_value(item) for item in value]]
+    if isinstance(value, tuple):
+        return ["tuple", [_type_tagged_canonical_value(item) for item in value]]
+    if isinstance(value, (set, frozenset)):
+        items = [_type_tagged_canonical_value(item) for item in value]
+        items.sort(key=lambda item: json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+        return ["frozenset" if isinstance(value, frozenset) else "set", items]
+    raise TypeError(
+        "Backfill DLQ identity cannot canonically serialize a value of type "
+        f"{type(value).__name__!r}; cast it in the model or configure a unique "
+        "destination.upsert_key."
+    )
+
+
+def validate_keyless_backfill_identities(
+    sync_name: str,
+    records: list[dict[str, Any]],
+    row_cursors: list[str | int | None],
+    *,
+    low: str | int,
+    high: str | int,
+    seen_ids: set[str],
+    row_ordinal: int,
+) -> int:
+    """Reject a repeated keyless deterministic DLQ id before its batch write."""
+    for record_index, (record, row_cursor) in enumerate(zip(records, row_cursors, strict=True)):
+        entry_id = backfill_dead_letter_id(
+            sync_name,
+            row_cursor,
+            {"pre_metadata_record": record},
+        )
+        if entry_id in seen_ids:
+            duplicate_ordinal = row_ordinal + record_index + 1
+            raise ValueError(
+                f"Windowed backfill sync {sync_name!r} cannot preserve two keyless "
+                f"dead letters: deterministic DLQ identity first repeats at destination "
+                f"row ordinal {duplicate_ordinal} for window [{low!r}, {high!r}). "
+                "Configure a unique destination.upsert_key or deduplicate the model; "
+                "refusing the destination write and checkpoint."
+            )
+        seen_ids.add(entry_id)
+    return row_ordinal + len(records)
 
 
 def _decode_dead_letter_line_with_origin(raw_line: str) -> tuple[DeadLetter, bool]:
