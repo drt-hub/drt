@@ -184,7 +184,8 @@ def _build_event(
             f"Row event id field {event_id_field!r} is NaN or infinite — a common "
             "missing-value sentinel in tabular data, not a usable id. Distinct rows "
             "with a NaN id would all stringify to the same 'nan' event_id, and Meta "
-            "deduplicates matching event name + event_id pairs, silently discarding "
+            "deduplicates matching event name + event_id pairs (documented between "
+            "the browser Pixel and the server API), which could silently discard "
             "all but one."
         )
     event_id = str(event_id)

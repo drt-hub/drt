@@ -478,3 +478,14 @@ normative for the implementation PRs.
    create/upsert/event path safe until the shared fault harness proves one logical
    remote side effect after both a dropped response and a post-commit proxy 5xx;
    ordinary mocked 5xx tests do not exercise the bug.
+
+## Amendment 2026-11-28 (Meta Conversions)
+
+The inventory row above labels Meta Conversions a keyed event path. Review of the
+rollout found that Meta documents `event_id` + `event_name` deduplication between the
+browser Pixel and the server API, **not between two server submissions**. A retry after
+a lost response is therefore not proven safe, and per decision 8 the path is **not
+classified**: it keeps its previous retry behavior (transient errors and 5xx are
+retried) until server-to-server deduplication is confirmed, at which point it can be
+classified keyed, or made blind with `retry_creates` if it is not. The connector guide,
+API reference and retry-safety index state the same.
