@@ -98,9 +98,10 @@ See [retry safety](../guides/retry-safety.md). Vendor contract rechecked 2026-11
   run is deduplicated by Mixpanel; deduplicating a later **run** also needs a stable
   `time` (set `time_field`), because Mixpanel keys on event name, `distinct_id`, `time`
   and `$insert_id` together.
-- A source column or `properties_template` that overwrites `$insert_id`, `distinct_id` or
-  `time` with an empty or non-usable value is refused as a row error instead of being
-  sent, so a retried batch never carries an unusable deduplication key.
+- A source column or `properties_template` can overwrite the derived `$insert_id`. The
+  value is sent exactly as before (Mixpanel validates it), but a batch containing an event
+  without a non-empty string `$insert_id` is not classified as keyed and keeps the previous
+  retry behavior.
 - EU data residency: set `region: eu` to route to
   `api-eu.mixpanel.com`.
 

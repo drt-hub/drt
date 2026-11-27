@@ -182,7 +182,17 @@ class MixpanelDestination:
                     sync_options,
                     rate_limiter,
                     lambda: _post_json(
-                        client, url, payloads, retry_config, auth=auth, params=params
+                        client,
+                        url,
+                        payloads,
+                        retry_config,
+                        auth=auth,
+                        params=params,
+                        operation=(
+                            OperationSafety.KEYED
+                            if all(_event_is_keyed(p["properties"]) for p in payloads)
+                            else None
+                        ),
                     ),
                 )
 
@@ -280,46 +290,20 @@ def _build_event(record: dict[str, Any], config: MixpanelDestinationConfig) -> d
     properties.update(_row_properties(record, config, reserved=frozenset()))
     if config.properties_template:
         properties.update(_render_properties_template(config.properties_template, record))
-    _validate_event_identity(properties)
 
     return {"event": str(event_name), "properties": properties}
 
 
-def _validate_event_identity(properties: dict[str, Any]) -> None:
-    """Refuse an event whose dedup identity was overwritten by a passthrough column or template.
+def _event_is_keyed(properties: dict[str, Any]) -> bool:
+    """Whether an event still carries a usable deduplication key (``$insert_id``).
 
-    ``$insert_id`` (with event name, ``distinct_id`` and ``time``) is what makes a replay of
-    ``/import`` safe, so the request is only classified KEYED if every event still carries a
-    usable one. A source column or ``properties_template`` can legitimately *supply* a value;
-    only a clearly unusable result is refused here: an empty or non-string ``$insert_id``, an
-    empty or non-scalar ``distinct_id``, and a ``time`` that is missing, boolean or a container.
-    Numeric Unix seconds/milliseconds and ISO-8601 strings (both accepted by Mixpanel) are
-    left alone, and Mixpanel's own limits on ``$insert_id`` length and characters stay the
-    vendor's to enforce, so no previously accepted value is rejected locally.
+    A source column or ``properties_template`` may overwrite the derived ``$insert_id``.
+    Whatever it was overwritten with is sent exactly as before (vendor validation stays the
+    vendor's), but a batch containing an event without a non-empty string ``$insert_id``
+    cannot be called KEYED, so it keeps the legacy, unclassified retry behaviour.
     """
     insert_id = properties.get("$insert_id")
-    if not isinstance(insert_id, str) or not insert_id.strip():
-        raise ValueError(
-            "Mixpanel event $insert_id must be a non-empty string; a source column or "
-            "properties_template overwrote it with an unusable value."
-        )
-    distinct_id = properties.get("distinct_id")
-    if isinstance(distinct_id, (dict, list)) or not _has_value(distinct_id):
-        raise ValueError(
-            "Mixpanel event distinct_id must be a non-empty scalar; a source column or "
-            "properties_template overwrote it."
-        )
-    time_value = properties.get("time")
-    if (
-        isinstance(time_value, bool)
-        or time_value is None
-        or isinstance(time_value, (dict, list))
-        or not _has_value(time_value)
-    ):
-        raise ValueError(
-            "Mixpanel event time must be a Unix timestamp or ISO-8601 string; a source "
-            "column or properties_template overwrote it."
-        )
+    return isinstance(insert_id, str) and bool(insert_id.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -375,13 +359,15 @@ def _post_json(
     auth: tuple[str, str] | None = None,
     params: dict[str, str] | None = None,
     *,
-    operation: OperationSafety = OperationSafety.KEYED,
+    operation: OperationSafety | None = None,
 ) -> None:
     """POST one batch. Callers state why replaying it is safe (ADR 0023).
 
-    ``/import`` events are KEYED: every event carries a deterministic ``$insert_id``
-    built from the row, and the same payload object is re-sent on retry. ``/engage``
-    profile ``$set`` is IDEMPOTENT: replaying it writes the same values.
+    ``/import`` events are KEYED when every event still carries a non-empty string
+    ``$insert_id`` (derived from the row unless overridden) and the same payload object is
+    re-sent on retry; otherwise the batch keeps the legacy, unclassified behaviour
+    (``operation=None``). ``/engage`` profile ``$set`` is IDEMPOTENT: replaying it writes
+    the same values.
     """
 
     def do_post() -> httpx.Response:

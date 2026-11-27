@@ -214,21 +214,28 @@ def _mixpanel(**overrides: Any) -> tuple[Any, Any]:
     return destination, config
 
 
-@pytest.mark.parametrize(
-    "record",
-    [
-        {"distinct_id": "u1", "$insert_id": ""},
-        {"distinct_id": "u1", "$insert_id": 7},
-        {"distinct_id": "u1", "$insert_id": "   "},
-        {"distinct_id": "u1", "time": ""},
-        {"distinct_id": "u1", "time": [1]},
-        {"distinct_id": "u1", "time": True},
-    ],
-    ids=["empty", "non-string", "blank", "empty-time", "list-time", "bool-time"],
-)
-def test_passthrough_column_cannot_break_the_event_identity(
+_OVERRIDES = [
+    {"distinct_id": "u1", "$insert_id": ""},
+    {"distinct_id": "u1", "$insert_id": 7},
+    {"distinct_id": "u1", "$insert_id": "   "},
+]
+
+
+@pytest.mark.parametrize("record", _OVERRIDES, ids=["empty", "non-string", "blank"])
+def test_an_unusable_overridden_key_is_sent_as_before_but_not_classified_keyed(
     monkeypatch: pytest.MonkeyPatch, record: dict[str, Any]
 ) -> None:
+    """No new rejection (vendor validation stays the vendor's); the batch just isn't KEYED."""
+    import drt.destinations.mixpanel as target
+
+    seen: list[Any] = []
+    real = target.with_retry
+
+    def spy(fn: Any, config: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("operation"))
+        return real(fn, config, *args, **kwargs)
+
+    monkeypatch.setattr(target, "with_retry", spy)
     destination, config = _mixpanel()
     harness = BlindCreateFaultHarness(
         "/import",
@@ -241,16 +248,28 @@ def test_passthrough_column_cannot_break_the_event_identity(
 
     result = destination.load([record], config, _options())
 
-    assert (result.success, result.failed) == (0, 1)
-    assert harness.create_attempts == 0
-    assert "must be" in result.row_errors[0].error_message
+    assert (result.success, result.failed) == (1, 0)
+    assert harness.create_attempts == 2
+    assert seen == [None]
 
 
-def test_template_cannot_null_the_insert_id(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_template_nulling_the_insert_id_is_not_classified_keyed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import drt.destinations.mixpanel as target
+
+    seen: list[Any] = []
+    real = target.with_retry
+
+    def spy(fn: Any, config: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("operation"))
+        return real(fn, config, *args, **kwargs)
+
+    monkeypatch.setattr(target, "with_retry", spy)
     destination, config = _mixpanel(properties_template='{"$insert_id": null}')
     harness = BlindCreateFaultHarness(
         "/import",
-        mode="commit-then-drop",
+        mode="commit-then-5xx",
         fallback=_unexpected,
         create_response=lambda r, _i: httpx.Response(200, json={}, request=r),
         decode_request=_json_list,
@@ -259,8 +278,8 @@ def test_template_cannot_null_the_insert_id(monkeypatch: pytest.MonkeyPatch) -> 
 
     result = destination.load([{"distinct_id": "u1"}], config, _options())
 
-    assert (result.success, result.failed) == (0, 1)
-    assert harness.create_attempts == 0
+    assert (result.success, result.failed) == (1, 0)
+    assert seen == [None]
 
 
 def test_a_valid_override_from_a_column_is_accepted_and_replay_safe(
@@ -304,48 +323,3 @@ def test_a_null_passthrough_column_is_dropped_and_the_derived_id_stays(
 
     assert (result.success, result.failed) == (1, 0)
     assert len(harness.remote_objects[0]["items"][0]["properties"]["$insert_id"]) == 32
-
-
-@pytest.mark.parametrize(
-    "time_value",
-    [1700000000, 1700000000.5, 1700000000123, "2026-09-11T01:11:10.341Z"],
-    ids=["seconds", "float-seconds", "milliseconds", "iso-8601"],
-)
-def test_every_timestamp_form_mixpanel_accepts_still_passes(
-    monkeypatch: pytest.MonkeyPatch, time_value: Any
-) -> None:
-    destination, config = _mixpanel()
-    harness = BlindCreateFaultHarness(
-        "/import",
-        mode="commit-then-5xx",
-        fallback=_unexpected,
-        create_response=lambda r, _i: httpx.Response(200, json={}, request=r),
-        replay_mode="keyed",
-        dedup_key=lambda payload: payload["items"][0]["properties"]["$insert_id"],
-        decode_request=_json_list,
-    )
-    install_mock_transport(monkeypatch, harness)
-
-    result = destination.load([{"distinct_id": "u1", "time": time_value}], config, _options())
-
-    assert (result.success, result.failed) == (1, 0)
-    assert harness.remote_objects[0]["items"][0]["properties"]["time"] == time_value
-
-
-def test_template_cannot_replace_distinct_id_with_a_container(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    destination, config = _mixpanel(properties_template='{"distinct_id": {"nested": 1}}')
-    harness = BlindCreateFaultHarness(
-        "/import",
-        mode="commit-then-drop",
-        fallback=_unexpected,
-        create_response=lambda r, _i: httpx.Response(200, json={}, request=r),
-        decode_request=_json_list,
-    )
-    install_mock_transport(monkeypatch, harness)
-
-    result = destination.load([{"distinct_id": "u1"}], config, _options())
-
-    assert (result.success, result.failed) == (0, 1)
-    assert harness.create_attempts == 0

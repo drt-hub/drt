@@ -11,7 +11,7 @@ Example::
       pixel_id: "123456789012345"
       event_name: Purchase
       event_time_field: occurred_at  # Required — the row's real transaction time.
-      event_id_field: event_id  # Required so retries can be deduplicated.
+      event_id_field: event_id  # Required; pair with the browser Pixel event id.
       event_source_url_field: page_url  # Required for website events.
       client_user_agent_field: user_agent  # Required for website events.
       email_field: email        # At least one customer identifier is required.
