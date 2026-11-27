@@ -48,7 +48,10 @@ ledger key's `delivered_at` through an additive ledger capability (or inserts a
 missing key) before retention pruning. This prevents an old replayed key from
 being pruned immediately and then re-delivered by the next ordinary lagged
 resume. A configured ledger without renewal support refuses the replay before
-extraction.
+extraction. If renewal fails after the destination has accepted a row, drt still
+attempts the compliance audit entry with that delivery timestamp, then propagates
+the renewal error without checkpointing or pruning the replay window. This also
+applies when delivery is acknowledged through `flush_pending()`.
 
 After a window is fully consumed and finalized, drt writes a provisional
 `partial` StateStore record with `cursor_boundary: exclusive`, then writes a
@@ -171,7 +174,10 @@ canonically with explicit type tags, so values such as `1`, `"1"`, `1.0`,
 `true`, `null`, and a datetime never collapse through string coercion. If two
 keyless rows in one window would still produce the same deterministic ID, drt
 refuses before that batch's destination write and checkpoint; configure a
-unique destination key or deduplicate the model. This ID scheme replaces only
+unique destination key or deduplicate the model. The same window-wide check runs
+before missing, null, or out-of-range cursor failures reach the DLQ, so strict
+DLQ storage never silently coalesces two source-contract failures into one
+retryable entry. This ID scheme replaces only
 IDs from earlier unreleased slice commits: mainline has not enabled backfill
 execution, so no compatibility migration is needed.
 

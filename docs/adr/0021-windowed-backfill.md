@@ -1040,3 +1040,20 @@ Two fail-closed refinements supersede the affected round-1 wording:
    batch reaches the destination. The operator must configure a unique
    destination key or deduplicate the model. Keyed destinations retain their
    existing destination-upsert-key validation and identity path.
+
+## Amendment 2026-11-27 (slice 4 round-3 review)
+
+Two further fail-closed refinements supersede the affected round-2 wording:
+
+1. **Delivery audit is independent of strict ledger renewal.** After a target
+   acknowledges delivery, drt captures a renewal failure, still attempts the
+   compliance audit write with the same `delivered_at`, and then re-raises the
+   original renewal error. The window remains uncheckpointed and operator-replay
+   ledger pruning remains suppressed. The same ordering applies after a
+   `PendingFlushCapable` destination acknowledges its deferred writes.
+2. **Source-contract rows share the window-wide keyless collision guard.** Before
+   missing, null, or out-of-range cursor failures can emit deterministic fallback
+   dead letters, drt checks their IDs against the same per-window set used by
+   destination failures, including IDs seen in earlier streamed batches. A repeat
+   raises the existing unique-key/deduplication error before any DLQ append, so a
+   strict backend cannot coalesce two reported failures into one retryable row.

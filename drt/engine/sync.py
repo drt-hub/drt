@@ -41,6 +41,7 @@ from drt.destinations.lookup import (
 from drt.engine.backfill import (
     BackfillBound,
     BackfillWindow,
+    WindowCursorRangeError,
     apply_lag_then_clamp,
     canonical_window_upsert_key,
     canonicalize_bound,
@@ -951,6 +952,50 @@ def _record_idempotency_delivery(
     ledger.mark_delivered(sync_name, keys, delivered_at)
 
 
+def _record_confirmed_delivery(
+    *,
+    idempotency_ledger: IdempotencyLedger | None,
+    audit_trail: ComplianceAuditTrail | None,
+    sync_name: str,
+    run_id: str | None,
+    sync_run_id: str | None,
+    destination_type: str,
+    delivered_keys: list[str],
+    audit_entries: list[AuditEntry],
+    delivered_at: str,
+    renew_idempotency_marks: bool,
+) -> None:
+    """Persist independent post-delivery records without masking ledger failure."""
+    ledger_error: BaseException | None = None
+    if idempotency_ledger is not None and delivered_keys:
+        try:
+            with _stage_ctx("state"):
+                _record_idempotency_delivery(
+                    idempotency_ledger,
+                    sync_name,
+                    delivered_keys,
+                    delivered_at,
+                    renew=renew_idempotency_marks,
+                )
+        except BaseException as exc:
+            ledger_error = exc
+
+    try:
+        if audit_trail is not None and audit_entries:
+            with _stage_ctx("state"):
+                audit_trail.log_delivered(
+                    sync_name,
+                    run_id,
+                    sync_run_id,
+                    destination_type,
+                    audit_entries,
+                    delivered_at,
+                )
+    finally:
+        if ledger_error is not None:
+            raise ledger_error
+
+
 def _run_backfill_body(
     *,
     sync: SyncConfig,
@@ -1172,25 +1217,18 @@ def _run_backfill_body(
                 with _stage_ctx("destination"):
                     destination.flush_pending()
                 delivered_at = datetime.now(timezone.utc).isoformat()
-                if idempotency_ledger is not None and window_result._deferred_ledger_keys:
-                    with _stage_ctx("state"):
-                        _record_idempotency_delivery(
-                            idempotency_ledger,
-                            sync.name,
-                            window_result._deferred_ledger_keys,
-                            delivered_at,
-                            renew=operator_replay,
-                        )
-                if audit_trail is not None and window_result._deferred_audit_entries:
-                    with _stage_ctx("state"):
-                        audit_trail.log_delivered(
-                            sync.name,
-                            total_result.run_id,
-                            total_result.sync_run_id,
-                            sync.destination.type,
-                            window_result._deferred_audit_entries,
-                            delivered_at,
-                        )
+                _record_confirmed_delivery(
+                    idempotency_ledger=idempotency_ledger,
+                    audit_trail=audit_trail,
+                    sync_name=sync.name,
+                    run_id=total_result.run_id,
+                    sync_run_id=total_result.sync_run_id,
+                    destination_type=sync.destination.type,
+                    delivered_keys=window_result._deferred_ledger_keys,
+                    audit_entries=window_result._deferred_audit_entries,
+                    delivered_at=delivered_at,
+                    renew_idempotency_marks=operator_replay,
+                )
             checkpoint_writer = getattr(observer, "checkpoint_window", None)
             if not callable(checkpoint_writer):
                 raise RuntimeError("The designated checkpoint observer is unavailable.")
@@ -1630,18 +1668,38 @@ def _run_sync_body(
                 assert cursor_field is not None
                 valid_records: list[dict[str, Any]] = []
                 range_errors = []
+                range_failure: WindowCursorRangeError | None = None
+                source_contract_indices: list[int] = []
                 for index, row in enumerate(record_batch):
-                    row_error = validate_window_row(
-                        row,
-                        cursor_field,
-                        window_bounds[0],
-                        window_bounds[1],
-                        batch_index=index,
-                    )
+                    try:
+                        row_error = validate_window_row(
+                            row,
+                            cursor_field,
+                            window_bounds[0],
+                            window_bounds[1],
+                            batch_index=index,
+                        )
+                    except WindowCursorRangeError as exc:
+                        range_failure = range_failure or exc
+                        source_contract_indices.append(index)
+                        continue
                     if row_error is None:
                         valid_records.append(row)
                     else:
                         range_errors.append(row_error)
+                        source_contract_indices.append(index)
+                if source_contract_indices and not window_upsert_key:
+                    window_keyless_row_ordinal = validate_keyless_backfill_identities(
+                        sync.name,
+                        [record_batch[index] for index in source_contract_indices],
+                        [None] * len(source_contract_indices),
+                        low=window_bounds[0],
+                        high=window_bounds[1],
+                        seen_ids=window_keyless_dlq_ids,
+                        row_ordinal=window_keyless_row_ordinal,
+                    )
+                if range_failure is not None:
+                    raise range_failure
                 if range_errors:
                     total_result.failed += len(range_errors)
                     total_result.row_errors.extend(range_errors)
@@ -1995,25 +2053,18 @@ def _run_sync_body(
                         total_result._deferred_audit_entries.extend(audit_entries)
                     else:
                         delivered_at = datetime.now(timezone.utc).isoformat()
-                        if idempotency_ledger is not None and delivered_keys:
-                            with _stage_ctx("state"):
-                                _record_idempotency_delivery(
-                                    idempotency_ledger,
-                                    sync.name,
-                                    delivered_keys,
-                                    delivered_at,
-                                    renew=renew_idempotency_marks,
-                                )
-                        if audit_trail is not None and audit_entries:
-                            with _stage_ctx("state"):
-                                audit_trail.log_delivered(
-                                    sync.name,
-                                    total_result.run_id,
-                                    total_result.sync_run_id,
-                                    sync.destination.type,
-                                    audit_entries,
-                                    delivered_at,
-                                )
+                        _record_confirmed_delivery(
+                            idempotency_ledger=idempotency_ledger,
+                            audit_trail=audit_trail,
+                            sync_name=sync.name,
+                            run_id=total_result.run_id,
+                            sync_run_id=total_result.sync_run_id,
+                            destination_type=sync.destination.type,
+                            delivered_keys=delivered_keys,
+                            audit_entries=audit_entries,
+                            delivered_at=delivered_at,
+                            renew_idempotency_marks=renew_idempotency_marks,
+                        )
 
                 # Dead Letter Queue (#278): hand the engine's full failed records
                 # to the observer so a DlqObserver can persist them for `drt

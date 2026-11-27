@@ -440,6 +440,61 @@ def test_duplicate_keyless_identity_is_tracked_across_window_batches(
     assert state.value is None
 
 
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
+@pytest.mark.parametrize(
+    "invalid_row",
+    [{"payload": "same"}, {"cursor": 999, "payload": "same"}],
+    ids=["missing-cursor", "out-of-range-cursor"],
+)
+def test_duplicate_source_contract_rows_are_refused_before_strict_dlq_append(
+    backend: str,
+    invalid_row: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    class BrokenSource(WindowSource):
+        def extract_window(
+            self,
+            query: str,
+            profile: RestApiProfile,
+            low: str | int,
+            high: str | int,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            yield dict(invalid_row)
+            yield dict(invalid_row)
+
+    sync = _sync(end=3, on_error="skip")
+    destination = RecordingDestination()
+    state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    store = _strict_dlq_backend(backend, tmp_path)
+    strict_append = MagicMock()
+    setattr(store, "_append_strict", strict_append)
+    observer = CompositeObserver(
+        [checkpoint, DlqObserver(store)],
+        checkpoint_observer=checkpoint,
+    )
+
+    with pytest.raises(ValueError, match="unique destination.upsert_key or deduplicate"):
+        run_sync(
+            sync,
+            BrokenSource([]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+    assert destination.calls == []
+    strict_append.assert_not_called()
+    assert checkpoint.checkpoints == 0
+    assert state.value is None
+
+
 def test_uncanonicalizable_keyless_identity_is_refused_before_write(
     tmp_path: Path,
 ) -> None:
@@ -2730,8 +2785,98 @@ def test_operator_replay_refuses_ledger_without_renewal_before_extraction(
 def test_failed_operator_replay_renewal_propagates_without_pruning(
     tmp_path: Path,
 ) -> None:
+    renewal_error = RuntimeError("renewal unavailable")
+    events: list[str] = []
+
     class FailingRenewalLedger:
         def __init__(self) -> None:
+            self.prune_calls = 0
+            self.delivered_at: str | None = None
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return set()
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            return None
+
+        def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            events.append("renew")
+            self.delivered_at = delivered_at
+            raise renewal_error
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            self.prune_calls += 1
+            return 0
+
+    class Audit:
+        def __init__(self) -> None:
+            self.logged: list[tuple[list[Any], str]] = []
+
+        def log_delivered(
+            self,
+            sync_name: str,
+            run_id: str | None,
+            sync_run_id: str | None,
+            destination_type: str,
+            entries: list[Any],
+            delivered_at: str,
+        ) -> None:
+            events.append("audit")
+            self.logged.append((entries, delivered_at))
+
+        def prune(self, sync_name: str, retain_days: int) -> int:
+            return 0
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    ledger = FailingRenewalLedger()
+    audit = Audit()
+    destination = RecordingDestination()
+    state = MemoryState()
+
+    with pytest.raises(RuntimeError, match="renewal unavailable") as exc_info:
+        _run_range(
+            tmp_path,
+            state,
+            WindowSource([{"cursor": 1}]),
+            sync=sync,
+            destination=destination,
+            idempotency_ledger=ledger,
+            audit_trail=audit,
+            audit_fields=["cursor"],
+            backfill_start=0,
+            backfill_end=3,
+        )
+
+    assert exc_info.value is renewal_error
+    assert destination.calls == [[{"cursor": 1}]]
+    assert events == ["renew", "audit"]
+    assert len(audit.logged) == 1
+    assert len(audit.logged[0][0]) == 1
+    assert audit.logged[0][0][0].record_key == "1"
+    assert audit.logged[0][1] == ledger.delivered_at
+    assert state.value is None
+    assert ledger.prune_calls == 0
+
+
+def test_pending_flush_replay_audits_before_reraising_renewal_failure(
+    tmp_path: Path,
+) -> None:
+    renewal_error = RuntimeError("deferred renewal unavailable")
+    events: list[str] = []
+
+    class PendingDestination(RecordingDestination):
+        def __init__(self) -> None:
+            super().__init__()
+            self.flush_calls = 0
+
+        def flush_pending(self) -> None:
+            self.flush_calls += 1
+            events.append("flush")
+
+    class FailingRenewalLedger:
+        def __init__(self) -> None:
+            self.delivered_at: str | None = None
             self.prune_calls = 0
 
         def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
@@ -2741,30 +2886,63 @@ def test_failed_operator_replay_renewal_propagates_without_pruning(
             return None
 
         def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
-            raise RuntimeError("renewal unavailable")
+            events.append("renew")
+            self.delivered_at = delivered_at
+            raise renewal_error
 
         def prune(self, sync_name: str, retention_days: int) -> int:
             self.prune_calls += 1
             return 0
 
+    class Audit:
+        def __init__(self) -> None:
+            self.logged: list[tuple[list[Any], str]] = []
+
+        def log_delivered(
+            self,
+            sync_name: str,
+            run_id: str | None,
+            sync_run_id: str | None,
+            destination_type: str,
+            entries: list[Any],
+            delivered_at: str,
+        ) -> None:
+            events.append("audit")
+            self.logged.append((entries, delivered_at))
+
+        def prune(self, sync_name: str, retain_days: int) -> int:
+            return 0
+
     sync = _sync(end=3)
     sync.sync.idempotency_key = "{{ row.cursor }}"
+    destination = PendingDestination()
     ledger = FailingRenewalLedger()
-    destination = RecordingDestination()
+    audit = Audit()
+    state = MemoryState()
 
-    with pytest.raises(RuntimeError, match="renewal unavailable"):
+    with pytest.raises(RuntimeError, match="deferred renewal unavailable") as exc_info:
         _run_range(
             tmp_path,
-            MemoryState(),
+            state,
             WindowSource([{"cursor": 1}]),
             sync=sync,
             destination=destination,
             idempotency_ledger=ledger,
+            audit_trail=audit,
+            audit_fields=["cursor"],
             backfill_start=0,
             backfill_end=3,
         )
 
+    assert exc_info.value is renewal_error
     assert destination.calls == [[{"cursor": 1}]]
+    assert destination.flush_calls == 1
+    assert events == ["flush", "renew", "audit"]
+    assert len(audit.logged) == 1
+    assert len(audit.logged[0][0]) == 1
+    assert audit.logged[0][0][0].record_key == "1"
+    assert audit.logged[0][1] == ledger.delivered_at
+    assert state.value is None
     assert ledger.prune_calls == 0
 
 
