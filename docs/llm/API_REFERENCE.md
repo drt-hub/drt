@@ -1119,8 +1119,15 @@ destination:
       "health_score": "{{ row.health_score }}",
       "plan": "{{ row.plan }}"
     }
-  retry_creates: false                   # default; true can duplicate a user/organization that has no id/external_id/email
+  retry_creates: false                   # default; true restores blind replay (duplicate risk)
 ```
+
+Replay safety is endpoint-specific. A **user** request is replay-safe only when every row
+carries a non-blank string `email` or `external_id` (a user `id`, including one copied by
+`id_field`, is not a create-or-update-many match key). An **organization** is replay-safe
+only with a valid positive numeric `id` or a non-blank string `external_id` (`email` and
+`name` do not count). Any other row is a blind create: an ambiguous failure becomes a
+delivery-unknown RowError after one request; `retry_creates: true` restores the replay.
 
 > Users are upserted through `users/create_or_update_many` in 100-record batches. Organizations use `organizations/create_or_update` per row. Custom fields are sent as `user_fields` or `organization_fields`.
 
