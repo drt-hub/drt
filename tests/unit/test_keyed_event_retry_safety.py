@@ -203,3 +203,103 @@ def test_each_write_declares_its_replay_safety_class(
     destination.load([record], config, _options())
 
     assert seen == [expected]
+
+
+def _mixpanel(**overrides: Any) -> tuple[Any, Any]:
+    destination, config_data, _record, *_rest = _case("mixpanel_import")
+    config_data.update(overrides)
+    config = SyncConfig.model_validate(
+        {"name": "events", "model": "events", "destination": config_data}
+    ).destination
+    return destination, config
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"distinct_id": "u1", "$insert_id": ""},
+        {"distinct_id": "u1", "$insert_id": 7},
+        {"distinct_id": "u1", "$insert_id": "   "},
+        {"distinct_id": "u1", "time": "yesterday"},
+        {"distinct_id": "u1", "time": True},
+    ],
+    ids=["empty", "non-string", "blank", "string-time", "bool-time"],
+)
+def test_passthrough_column_cannot_break_the_event_identity(
+    monkeypatch: pytest.MonkeyPatch, record: dict[str, Any]
+) -> None:
+    destination, config = _mixpanel()
+    harness = BlindCreateFaultHarness(
+        "/import",
+        mode="commit-then-drop",
+        fallback=_unexpected,
+        create_response=lambda r, _i: httpx.Response(200, json={}, request=r),
+        decode_request=_json_list,
+    )
+    install_mock_transport(monkeypatch, harness)
+
+    result = destination.load([record], config, _options())
+
+    assert (result.success, result.failed) == (0, 1)
+    assert harness.create_attempts == 0
+    assert "must be" in result.row_errors[0].error_message
+
+
+def test_template_cannot_null_the_insert_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    destination, config = _mixpanel(properties_template='{"$insert_id": null}')
+    harness = BlindCreateFaultHarness(
+        "/import",
+        mode="commit-then-drop",
+        fallback=_unexpected,
+        create_response=lambda r, _i: httpx.Response(200, json={}, request=r),
+        decode_request=_json_list,
+    )
+    install_mock_transport(monkeypatch, harness)
+
+    result = destination.load([{"distinct_id": "u1"}], config, _options())
+
+    assert (result.success, result.failed) == (0, 1)
+    assert harness.create_attempts == 0
+
+
+def test_a_valid_override_from_a_column_is_accepted_and_replay_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination, config = _mixpanel()
+    harness = BlindCreateFaultHarness(
+        "/import",
+        mode="commit-then-drop",
+        fallback=_unexpected,
+        create_response=lambda r, _i: httpx.Response(200, json={}, request=r),
+        replay_mode="keyed",
+        dedup_key=lambda payload: payload["items"][0]["properties"]["$insert_id"],
+        decode_request=_json_list,
+    )
+    install_mock_transport(monkeypatch, harness)
+
+    result = destination.load([{"distinct_id": "u1", "$insert_id": "order-9"}], config, _options())
+
+    assert (result.success, result.failed) == (1, 0)
+    assert harness.create_attempts == 2 and len(harness.remote_objects) == 1
+    assert harness.remote_objects[0]["items"][0]["properties"]["$insert_id"] == "order-9"
+
+
+def test_a_null_passthrough_column_is_dropped_and_the_derived_id_stays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination, config = _mixpanel()
+    harness = BlindCreateFaultHarness(
+        "/import",
+        mode="commit-then-drop",
+        fallback=_unexpected,
+        create_response=lambda r, _i: httpx.Response(200, json={}, request=r),
+        replay_mode="keyed",
+        dedup_key=lambda payload: payload["items"][0]["properties"]["$insert_id"],
+        decode_request=_json_list,
+    )
+    install_mock_transport(monkeypatch, harness)
+
+    result = destination.load([{"distinct_id": "u1", "$insert_id": None}], config, _options())
+
+    assert (result.success, result.failed) == (1, 0)
+    assert len(harness.remote_objects[0]["items"][0]["properties"]["$insert_id"]) == 32

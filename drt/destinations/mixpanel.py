@@ -280,8 +280,34 @@ def _build_event(record: dict[str, Any], config: MixpanelDestinationConfig) -> d
     properties.update(_row_properties(record, config, reserved=frozenset()))
     if config.properties_template:
         properties.update(_render_properties_template(config.properties_template, record))
+    _validate_event_identity(properties)
 
     return {"event": str(event_name), "properties": properties}
+
+
+def _validate_event_identity(properties: dict[str, Any]) -> None:
+    """Refuse an event whose dedup key was overwritten by a passthrough column or template.
+
+    ``$insert_id`` (with event name, ``distinct_id`` and ``time``) is what makes a replay of
+    ``/import`` safe, so the request is only classified KEYED if every event still carries a
+    usable one. A source column or ``properties_template`` can legitimately *supply* a value,
+    but an empty, null or non-string result would send an unusable key and a retry after an
+    ambiguous failure could then duplicate the committed event.
+    """
+    insert_id = properties.get("$insert_id")
+    if not isinstance(insert_id, str) or not insert_id.strip():
+        raise ValueError(
+            "Mixpanel event $insert_id must be a non-empty string; a source column or "
+            "properties_template overwrote it with an unusable value."
+        )
+    if not _has_value(properties.get("distinct_id")):
+        raise ValueError("Mixpanel event distinct_id must not be overwritten with an empty value.")
+    time_value = properties.get("time")
+    if isinstance(time_value, bool) or not isinstance(time_value, (int, float)):
+        raise ValueError(
+            "Mixpanel event time must be a numeric Unix timestamp; a source column or "
+            "properties_template overwrote it."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +341,8 @@ def _resolve_insert_id(
         value = record.get(config.insert_id_field)
         if _has_value(value):
             return str(value)
-    # Deterministic so a re-run of the same sync does not double-count events.
+    # Deterministic, so the same row always gets the same id (see the connector notes for
+    # the time/deduplication limits).
     canonical = json.dumps(record, sort_keys=True, default=str)
     return hashlib.sha256(f"{canonical}:{event_name}".encode()).hexdigest()[:32]
 

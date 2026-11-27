@@ -94,8 +94,13 @@ See [retry safety](../guides/retry-safety.md). Vendor contract rechecked 2026-11
 
 - Both endpoints batch up to **2000 records** per request.
 - For `import_events`, each event gets a deterministic `$insert_id`
-  (derived from the row contents when `insert_id_field` is unset), so
-  re-running the same sync does **not** double-count events in Mixpanel.
+  (derived from the row contents when `insert_id_field` is unset). A retry within one
+  run is deduplicated by Mixpanel; deduplicating a later **run** also needs a stable
+  `time` (set `time_field`), because Mixpanel keys on event name, `distinct_id`, `time`
+  and `$insert_id` together.
+- A source column or `properties_template` that overwrites `$insert_id`, `distinct_id` or
+  `time` with an empty or non-usable value is refused as a row error instead of being
+  sent, so a retried batch never carries an unusable deduplication key.
 - EU data residency: set `region: eu` to route to
   `api-eu.mixpanel.com`.
 
