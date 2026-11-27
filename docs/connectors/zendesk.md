@@ -140,6 +140,7 @@ destination:
 ## Notes
 
 - User upserts use Zendesk's `users/create_or_update_many` endpoint in batches of 100.
+- **Known limitation:** `users/create_or_update_many` is an asynchronous bulk job. Zendesk acknowledges the request with a job status, and drt counts the batch as successful when that request is accepted. It does not poll the job, so a row Zendesk later rejects inside the job is not reported as a failed row. Verify the result in Zendesk if you need row-level confirmation. Organization upserts are synchronous and are not affected.
 - Organization upserts use Zendesk's `organizations/create_or_update` endpoint per row.
 - drt caps the default request rate at 11 requests per second, below Zendesk's common 700 requests/minute account limit.
 - `custom_fields_template` must render a JSON object.
