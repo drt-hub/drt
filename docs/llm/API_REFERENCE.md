@@ -361,6 +361,7 @@ sync:                       # optional: all fields have defaults
 # Priority order: destination.retry > sync.retry > RetryConfig defaults.
 # destination:
 #   type: notion
+#   retry_creates: false    # default; Notion page creation is blind (ADR 0023)
 #   retry:
 #     max_attempts: 7       # only this destination retries 7 times
 
@@ -1008,7 +1009,13 @@ destination:
   auth:
     type: bearer
     token_env: GITHUB_TOKEN       # needs actions:write permission
+  retry_creates: false            # default; true can start a second workflow run
 ```
+
+`workflow_dispatch` carries no idempotency key, so it is a blind create: an
+ambiguous failure becomes a delivery-unknown RowError after one request (429 and
+proven pre-send connection errors still retry). `retry_creates: true` restores
+the legacy replay with a warning.
 
 ### `type: hubspot`
 
@@ -1136,7 +1143,12 @@ destination:
   summary_template: "Alert: {{ row.title }}"         # required: Jinja2 template
   description_template: "Details: {{ row.body }}"    # required: Jinja2 template
   issue_id_field: issue_id              # default: "issue_id" — if present in row, updates the issue; otherwise creates
+  retry_creates: false                  # default; true can create a duplicate issue
 ```
+
+Issue creation is blind (no documented idempotency key): ambiguous failures become
+delivery-unknown RowErrors after one POST. Updates address one issue id and keep
+normal retries. `retry_creates: true` restores blind create replay with a warning.
 
 > **Create vs Update:** If the row contains the `issue_id_field` column (default: `issue_id`), the destination updates that Jira issue (PUT). Otherwise, it creates a new issue (POST). Description is rendered as Atlassian Document Format (ADF) for Jira REST API v3.
 
@@ -1343,7 +1355,12 @@ destination:
   team_id: "TEAM-ID"                   # required: Linear team ID
   title_template: "{{ row.title }}"    # Jinja2 template for issue title
   description_template: "{{ row.body }}"  # Jinja2 template for description
+  retry_creates: false                 # default; true can create a duplicate issue
 ```
+
+`issueCreate` is treated as blind (no verified replay key): ambiguous failures become
+delivery-unknown RowErrors after one request; 429 and proven pre-send connection
+errors still retry. `retry_creates: true` restores the legacy replay with a warning.
 
 ### `type: sendgrid`
 
