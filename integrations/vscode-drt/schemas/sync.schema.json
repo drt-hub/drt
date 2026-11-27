@@ -1740,6 +1740,11 @@
         "auth": {
           "$ref": "#/$defs/BearerAuth"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
@@ -2219,6 +2224,11 @@
           "title": "Issue Id Field",
           "type": "string"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
@@ -2512,6 +2522,11 @@
         },
         "auth": {
           "$ref": "#/$defs/BearerAuth"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [
@@ -3403,6 +3418,11 @@
         },
         "auth": {
           "$ref": "#/$defs/BearerAuth"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [

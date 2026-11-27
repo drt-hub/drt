@@ -17,7 +17,14 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, JiraDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    handle_blind_delivery_unknown,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_preview as _record_preview
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
@@ -60,7 +67,23 @@ class JiraDestination:
             response.raise_for_status()
             return response
 
-        with_retry(do_post, retry_config)
+        def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+            return handle_blind_delivery_unknown(
+                error,
+                attempt,
+                retry_creates=config.retry_creates,
+                max_attempts=retry_config.max_attempts,
+                destination="Jira",
+                operation="issue create",
+                logger=logger,
+            )
+
+        with_retry(
+            do_post,
+            retry_config,
+            operation=OperationSafety.BLIND_CREATE,
+            on_delivery_unknown=on_delivery_unknown,
+        )
 
     def update_issue(
         self,
@@ -90,7 +113,8 @@ class JiraDestination:
             response.raise_for_status()
             return response
 
-        with_retry(do_put, retry_config)
+        # An update addresses one fixed issue id, so replaying it is idempotent.
+        with_retry(do_put, retry_config, operation=OperationSafety.IDEMPOTENT)
 
     def load(
         self,
@@ -146,6 +170,18 @@ class JiraDestination:
                         )
                         logger.info("Jira issue created for row index %s", i)
                     result.success += 1
+                except DeliveryUnknownError as e:
+                    record_row_error(
+                        result,
+                        i,
+                        _record_preview(row),
+                        e,
+                        http_status=e.http_status,
+                        error_message=str(e),
+                    )
+                    logger.warning("Jira create delivery unknown for row %s: %s", i, e)
+                    if sync_options.on_error == "fail":
+                        break
                 except httpx.HTTPStatusError as e:
                     record_row_error(
                         result,

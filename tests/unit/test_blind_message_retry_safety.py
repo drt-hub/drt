@@ -19,6 +19,10 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.discord import DiscordDestination
+from drt.destinations.github_actions import GitHubActionsDestination
+from drt.destinations.jira import JiraDestination
+from drt.destinations.linear import LinearDestination
+from drt.destinations.notion import NotionDestination
 from drt.destinations.rest_api import RestApiDestination
 from drt.destinations.sendgrid import SendGridDestination
 from drt.destinations.slack import SlackDestination
@@ -30,7 +34,20 @@ from tests.http_fault_injection import (
     install_mock_transport,
 )
 
-_DESTINATIONS = ["rest_api", "sendgrid", "twilio", "slack", "discord", "teams"]
+_DESTINATIONS = [
+    "rest_api",
+    "sendgrid",
+    "twilio",
+    "slack",
+    "discord",
+    "teams",
+    "notion",
+    "linear",
+    "jira",
+    "github_actions",
+]
+
+_TEMPLATE_DESTINATIONS = ["notion", "linear", "jira", "github_actions"]
 
 
 def _options(on_error: str = "skip") -> SyncOptions:
@@ -142,6 +159,66 @@ def _case(
             "/teams",
             lambda request: json.loads(request.content),
         )
+    if name == "notion":
+        return (
+            NotionDestination(),
+            {
+                "type": "notion",
+                "database_id": "db-1",
+                "auth": {"type": "bearer", "token": "test-token"},
+                "retry_creates": retry_creates,
+            },
+            {"name": "Ada"},
+            "/v1/pages",
+            lambda request: json.loads(request.content),
+        )
+    if name == "linear":
+        return (
+            LinearDestination(),
+            {
+                "type": "linear",
+                "team_id": "team-1",
+                "title_template": "Issue for {{ row.name }}",
+                "description_template": "Body for {{ row.name }}",
+                "auth": {"type": "bearer", "token": "test-token"},
+                "retry_creates": retry_creates,
+            },
+            {"name": "Ada"},
+            "/graphql",
+            lambda request: json.loads(request.content),
+        )
+    if name == "jira":
+        return (
+            JiraDestination(),
+            {
+                "type": "jira",
+                "base_url_env": "FAULT_JIRA_BASE_URL",
+                "email_env": "FAULT_JIRA_EMAIL",
+                "token_env": "FAULT_JIRA_TOKEN",
+                "project_key": "OPS",
+                "summary_template": "Issue for {{ row.name }}",
+                "description_template": "Body for {{ row.name }}",
+                "retry_creates": retry_creates,
+            },
+            {"name": "Ada"},
+            "/rest/api/3/issue",
+            lambda request: json.loads(request.content),
+        )
+    if name == "github_actions":
+        return (
+            GitHubActionsDestination(),
+            {
+                "type": "github_actions",
+                "owner": "acme",
+                "repo": "app",
+                "workflow_id": "deploy.yml",
+                "auth": {"type": "bearer", "token": "test-token"},
+                "retry_creates": retry_creates,
+            },
+            {"name": "Ada"},
+            "/repos/acme/app/actions/workflows/deploy.yml/dispatches",
+            lambda request: json.loads(request.content),
+        )
     raise AssertionError(f"unknown test destination: {name}")
 
 
@@ -158,7 +235,35 @@ def _load(name: str, retry_creates: bool, on_error: str = "skip") -> tuple[Any, 
 
 
 def _success_response(request: httpx.Request, object_id: int) -> httpx.Response:
-    return httpx.Response(201, json={"sid": f"SM{object_id}"}, request=request)
+    # One body that every destination in this matrix accepts as a success.
+    body = {"sid": f"SM{object_id}", "data": {"issueCreate": {"success": True}}}
+    return httpx.Response(201, json=body, request=request)
+
+
+def _template_error_config(name: str) -> dict[str, Any]:
+    _, config, _, _, _ = _case(name)
+    templates = {
+        "notion": (
+            "properties_template",
+            '{"Name": {"title": [{"text": {"content": "{{ row.required }}"}}]}}',
+        ),
+        "linear": ("title_template", "Issue for {{ row.required }}"),
+        "jira": ("summary_template", "Issue for {{ row.required }}"),
+        "github_actions": (
+            "inputs_template",
+            '{"environment": "{{ row.required }}"}',
+        ),
+    }
+    field, template = templates[name]
+    config[field] = template
+    return config
+
+
+@pytest.fixture(autouse=True)
+def _jira_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAULT_JIRA_BASE_URL", "https://fault.test")
+    monkeypatch.setenv("FAULT_JIRA_EMAIL", "ops@example.com")
+    monkeypatch.setenv("FAULT_JIRA_TOKEN", "token")
 
 
 @pytest.mark.parametrize("name", _DESTINATIONS)
@@ -168,6 +273,43 @@ def test_retry_creates_is_explicit_destination_policy(name: str) -> None:
 
     assert default_config.retry_creates is False
     assert opted_in_config.retry_creates is True
+
+
+@pytest.mark.parametrize("name", _TEMPLATE_DESTINATIONS)
+@pytest.mark.parametrize(
+    ("on_error", "expected_success", "expected_requests"),
+    [("fail", 0, 0), ("skip", 1, 1)],
+)
+def test_pre_send_template_error_honors_on_error_before_next_record(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    on_error: str,
+    expected_success: int,
+    expected_requests: int,
+) -> None:
+    destination, _, _, _, _ = _case(name)
+    parsed = SyncConfig.model_validate(
+        {
+            "name": "template_error_safety",
+            "model": "events",
+            "destination": _template_error_config(name),
+        }
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _success_response(request, 1)
+
+    install_mock_transport(monkeypatch, handler)
+    result = destination.load(
+        [{"name": "missing required"}, {"name": "valid", "required": "production"}],
+        parsed.destination,
+        _options(on_error),
+    )
+
+    assert (result.success, result.failed) == (expected_success, 1)
+    assert len(requests) == expected_requests
 
 
 @pytest.mark.parametrize("name", _DESTINATIONS)
@@ -249,9 +391,11 @@ def test_429_is_retried_without_retry_creates(
 
 
 @pytest.mark.parametrize("name", _DESTINATIONS)
-def test_proven_pre_send_connection_error_is_retried(
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ProxyError])
+def test_proven_pre_send_error_is_retried_without_retry_creates(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
+    error_type: type[httpx.TransportError],
 ) -> None:
     destination, config, (record, _path, _decoder, options) = _load(name, False)
     requests: list[httpx.Request] = []
@@ -259,7 +403,7 @@ def test_proven_pre_send_connection_error_is_retried(
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if len(requests) == 1:
-            raise httpx.ConnectError("connection refused before send", request=request)
+            raise error_type("connection failed before send", request=request)
         return _success_response(request, 1)
 
     install_mock_transport(monkeypatch, handler)
