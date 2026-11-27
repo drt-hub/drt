@@ -21,6 +21,7 @@ import pytest
 from drt.config.models import RateLimitConfig, RetryConfig, SyncConfig, SyncOptions
 from drt.destinations.amplitude import AmplitudeDestination
 from drt.destinations.mixpanel import MixpanelDestination
+from drt.destinations.retry import OperationSafety
 from tests.http_fault_injection import BlindCreateFaultHarness, FaultMode, install_mock_transport
 
 
@@ -171,3 +172,34 @@ def test_mixpanel_event_without_time_field_uses_load_time(monkeypatch: pytest.Mo
 
     event = harness.remote_objects[0]["items"][0]
     assert event["properties"]["time"] == 1_700_000_000
+
+
+@pytest.mark.parametrize(
+    ("name", "module", "expected"),
+    [
+        ("mixpanel_import", "drt.destinations.mixpanel", OperationSafety.KEYED),
+        ("mixpanel_people", "drt.destinations.mixpanel", OperationSafety.IDEMPOTENT),
+        ("amplitude_event", "drt.destinations.amplitude", OperationSafety.KEYED),
+    ],
+)
+def test_each_write_declares_its_replay_safety_class(
+    monkeypatch: pytest.MonkeyPatch, name: str, module: str, expected: OperationSafety
+) -> None:
+    """The fault tests above also pass on the legacy retry loop; this pins the ADR class."""
+    import importlib
+
+    seen: list[OperationSafety | None] = []
+    target = importlib.import_module(module)
+    real = target.with_retry
+
+    def spy(fn: Any, config: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("operation"))
+        return real(fn, config, *args, **kwargs)
+
+    monkeypatch.setattr(target, "with_retry", spy)
+    destination, config, (record, harness) = _load(name, "commit-then-drop")
+    install_mock_transport(monkeypatch, harness)
+
+    destination.load([record], config, _options())
+
+    assert seen == [expected]
