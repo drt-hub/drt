@@ -286,13 +286,16 @@ def _build_event(record: dict[str, Any], config: MixpanelDestinationConfig) -> d
 
 
 def _validate_event_identity(properties: dict[str, Any]) -> None:
-    """Refuse an event whose dedup key was overwritten by a passthrough column or template.
+    """Refuse an event whose dedup identity was overwritten by a passthrough column or template.
 
     ``$insert_id`` (with event name, ``distinct_id`` and ``time``) is what makes a replay of
     ``/import`` safe, so the request is only classified KEYED if every event still carries a
-    usable one. A source column or ``properties_template`` can legitimately *supply* a value,
-    but an empty, null or non-string result would send an unusable key and a retry after an
-    ambiguous failure could then duplicate the committed event.
+    usable one. A source column or ``properties_template`` can legitimately *supply* a value;
+    only a clearly unusable result is refused here: an empty or non-string ``$insert_id``, an
+    empty or non-scalar ``distinct_id``, and a ``time`` that is missing, boolean or a container.
+    Numeric Unix seconds/milliseconds and ISO-8601 strings (both accepted by Mixpanel) are
+    left alone, and Mixpanel's own limits on ``$insert_id`` length and characters stay the
+    vendor's to enforce, so no previously accepted value is rejected locally.
     """
     insert_id = properties.get("$insert_id")
     if not isinstance(insert_id, str) or not insert_id.strip():
@@ -300,13 +303,22 @@ def _validate_event_identity(properties: dict[str, Any]) -> None:
             "Mixpanel event $insert_id must be a non-empty string; a source column or "
             "properties_template overwrote it with an unusable value."
         )
-    if not _has_value(properties.get("distinct_id")):
-        raise ValueError("Mixpanel event distinct_id must not be overwritten with an empty value.")
-    time_value = properties.get("time")
-    if isinstance(time_value, bool) or not isinstance(time_value, (int, float)):
+    distinct_id = properties.get("distinct_id")
+    if isinstance(distinct_id, (dict, list)) or not _has_value(distinct_id):
         raise ValueError(
-            "Mixpanel event time must be a numeric Unix timestamp; a source column or "
+            "Mixpanel event distinct_id must be a non-empty scalar; a source column or "
             "properties_template overwrote it."
+        )
+    time_value = properties.get("time")
+    if (
+        isinstance(time_value, bool)
+        or time_value is None
+        or isinstance(time_value, (dict, list))
+        or not _has_value(time_value)
+    ):
+        raise ValueError(
+            "Mixpanel event time must be a Unix timestamp or ISO-8601 string; a source "
+            "column or properties_template overwrote it."
         )
 
 
