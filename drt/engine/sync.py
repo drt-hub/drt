@@ -966,7 +966,10 @@ def _record_confirmed_delivery(
     renew_idempotency_marks: bool,
 ) -> None:
     """Persist independent post-delivery records without masking ledger failure."""
-    ledger_error: BaseException | None = None
+    # Only ordinary failures are deferred so the audit record is still written.
+    # Cancellation-class BaseExceptions (KeyboardInterrupt, SystemExit) propagate
+    # immediately and are never replaced by a deferred ledger error.
+    ledger_error: Exception | None = None
     if idempotency_ledger is not None and delivered_keys:
         try:
             with _stage_ctx("state"):
@@ -977,11 +980,11 @@ def _record_confirmed_delivery(
                     delivered_at,
                     renew=renew_idempotency_marks,
                 )
-        except BaseException as exc:
+        except Exception as exc:
             ledger_error = exc
 
-    try:
-        if audit_trail is not None and audit_entries:
+    if audit_trail is not None and audit_entries:
+        try:
             with _stage_ctx("state"):
                 audit_trail.log_delivered(
                     sync_name,
@@ -991,9 +994,13 @@ def _record_confirmed_delivery(
                     audit_entries,
                     delivered_at,
                 )
-    finally:
-        if ledger_error is not None:
-            raise ledger_error
+        except Exception:
+            if ledger_error is not None:
+                # Both failed: surface the ledger failure, keep the audit one as context.
+                raise ledger_error from None
+            raise
+    if ledger_error is not None:
+        raise ledger_error
 
 
 def _run_backfill_body(
@@ -1688,7 +1695,10 @@ def _run_sync_body(
                     else:
                         range_errors.append(row_error)
                         source_contract_indices.append(index)
-                if source_contract_indices and not window_upsert_key:
+                # Source-contract dead letters always use the keyless identity
+                # (no destination key exists for a row that failed validation),
+                # so the collision guard applies on keyed destinations too.
+                if source_contract_indices:
                     window_keyless_row_ordinal = validate_keyless_backfill_identities(
                         sync.name,
                         [record_batch[index] for index in source_contract_indices],

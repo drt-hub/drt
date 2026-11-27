@@ -3153,3 +3153,116 @@ def test_cli_end_at_or_below_the_checkpoint_is_a_noop_that_keeps_it(tmp_path: Pa
     assert source.windows == []
     assert result.backfill is not None and result.backfill["windows_planned"] == 0
     assert state.value is not None and state.value.last_cursor_value == "9"
+
+
+class _RaisingLedger:
+    def __init__(self, error: BaseException | None) -> None:
+        self.error = error
+
+    def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+        return set()
+
+    def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+        if self.error is not None:
+            raise self.error
+
+    def prune(self, sync_name: str, retention_days: int) -> int:
+        return 0
+
+
+class _RaisingAudit:
+    def __init__(self, error: BaseException | None) -> None:
+        self.error = error
+        self.calls = 0
+
+    def log_delivered(self, *args: Any, **kwargs: Any) -> None:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+
+
+def _confirm(ledger: Any, audit: Any) -> None:
+    from drt.engine.sync import _record_confirmed_delivery
+
+    _record_confirmed_delivery(
+        idempotency_ledger=ledger,
+        audit_trail=audit,
+        sync_name="events",
+        run_id="r",
+        sync_run_id="s",
+        destination_type="rest_api",
+        delivered_keys=["1"],
+        audit_entries=[object()],  # type: ignore[list-item]
+        delivered_at="2026-01-01T00:00:00+00:00",
+        renew_idempotency_marks=False,
+    )
+
+
+@pytest.mark.parametrize("cancel", [KeyboardInterrupt, SystemExit])
+def test_cancellation_from_ledger_propagates_immediately_without_audit(
+    cancel: type[BaseException],
+) -> None:
+    audit = _RaisingAudit(None)
+    with pytest.raises(cancel):
+        _confirm(_RaisingLedger(cancel()), audit)
+    assert audit.calls == 0
+
+
+@pytest.mark.parametrize("cancel", [KeyboardInterrupt, SystemExit])
+def test_cancellation_from_audit_is_not_replaced_by_deferred_ledger_error(
+    cancel: type[BaseException],
+) -> None:
+    audit = _RaisingAudit(cancel())
+    with pytest.raises(cancel):
+        _confirm(_RaisingLedger(RuntimeError("ledger down")), audit)
+    assert audit.calls == 1
+
+
+def test_ordinary_ledger_error_still_audits_then_raises() -> None:
+    audit = _RaisingAudit(None)
+    with pytest.raises(RuntimeError, match="ledger down"):
+        _confirm(_RaisingLedger(RuntimeError("ledger down")), audit)
+    assert audit.calls == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_row",
+    [{"payload": "same"}, {"cursor": 999, "payload": "same"}],
+    ids=["missing-cursor", "out-of-range-cursor"],
+)
+def test_duplicate_source_contract_rows_are_refused_on_keyed_destination(
+    invalid_row: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    class BrokenSource(WindowSource):
+        def extract_window(
+            self,
+            query: str,
+            profile: RestApiProfile,
+            low: str | int,
+            high: str | int,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            yield dict(invalid_row)
+            yield dict(invalid_row)
+
+    config = _capable_destination_config("postgres")
+    sync = _sync_for_destination(config, sync_options={"on_error": "skip"})
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=0))
+    destination.load = load
+    state = MemoryState()
+
+    with pytest.raises(ValueError, match="unique destination.upsert_key or deduplicate"):
+        run_sync(
+            sync,
+            BrokenSource([]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(state),
+        )
+
+    load.assert_not_called()
+    assert state.value is None
