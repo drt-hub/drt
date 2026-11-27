@@ -44,6 +44,7 @@ from drt.engine.backfill import (
     apply_lag_then_clamp,
     canonical_window_upsert_key,
     canonicalize_bound,
+    canonicalize_record_cursor,
     parse_cli_range,
     plan_windows,
     validate_window_row,
@@ -242,6 +243,7 @@ def _dead_letter_for_record(
     timestamp: str,
     sync_run_id: str | None,
     window_bounds: BackfillWindow | None,
+    row_cursor: BackfillBound | None = None,
     validated_upsert_key: list[str] | None = None,
     pre_metadata_record: dict[str, Any] | None = None,
 ) -> DeadLetter:
@@ -273,7 +275,7 @@ def _dead_letter_for_record(
         sync_run_id=sync_run_id,
         id=backfill_dead_letter_id(
             sync_name,
-            window_bounds[0],
+            row_cursor,
             stable_identity,
         ),
     )
@@ -963,6 +965,7 @@ def _run_backfill_body(
         _coerce_checkpoint(stored, configured_start) if stored is not None else None
     )
     cli_start, cli_end = parse_cli_range(configured_start, backfill_start, backfill_end)
+    operator_replay = cli_start is not None or cli_end is not None
     effective_start = durable_checkpoint if durable_checkpoint is not None else configured_start
     watermark_lag: str | None = None
     if cli_start is not None:
@@ -1021,6 +1024,7 @@ def _run_backfill_body(
         "windows_completed": 0,
         "failed_window": None,
         "final_checkpoint": final_checkpoint,
+        "ledger_bypassed": operator_replay,
     }
     total_result.backfill = summary
     total_result.watermark_source = (
@@ -1070,6 +1074,7 @@ def _run_backfill_body(
                 audit_trail=audit_trail,
                 audit_fields=audit_fields,
                 window_bounds=bounds,
+                bypass_idempotency_filter=operator_replay,
                 notify_completion=False,
             )
         except BaseException as exc:
@@ -1187,6 +1192,7 @@ def _run_sync_body(
     audit_fields: list[str] | None = None,
     exact: bool = False,
     window_bounds: BackfillWindow | None = None,
+    bypass_idempotency_filter: bool = False,
     notify_completion: bool = True,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
@@ -1480,6 +1486,7 @@ def _run_sync_body(
     staged_count = 0
     staged_records: list[dict[str, Any]] = []
     staged_pre_metadata_records: list[dict[str, Any] | None] = []
+    staged_window_cursors: list[BackfillBound | None] = []
     batches_processed = 0
     # 0-based index of each batch handed to ``destination.load()`` — used as
     # the ``batch_index`` attribute on the per-batch ``drt.sync.load`` span.
@@ -1554,7 +1561,8 @@ def _run_sync_body(
     )
     try:
         for record_batch in batch(records_iter, sync.sync.batch_size):
-            pre_metadata_records: dict[int, dict[str, Any]] = {}
+            batch_window_cursors: list[BackfillBound | None] = [None] * len(record_batch)
+            batch_pre_metadata_records: list[dict[str, Any] | None] = [None] * len(record_batch)
             # Cooperative shutdown — break before processing this batch.
             # Existing batches are already finalized; partial state save below
             # stays consistent because the loop body never starts on this batch.
@@ -1597,6 +1605,8 @@ def _run_sync_body(
                                 timestamp=error.timestamp,
                                 sync_run_id=total_result.sync_run_id,
                                 window_bounds=window_bounds,
+                                row_cursor=None,
+                                pre_metadata_record=record_batch[error.batch_index],
                             )
                             for error in range_errors
                         ],
@@ -1606,6 +1616,10 @@ def _run_sync_body(
                     # ``on_error: skip`` governs destination row failures only.
                     stream_consumed = False
                     break
+                batch_window_cursors = [
+                    canonicalize_record_cursor(row, cursor_field, window_bounds[0])
+                    for row in record_batch
+                ]
 
             # Track max cursor value seen across all batches.
             # Stringify with tz-naive UTC normalization for tz-aware datetimes
@@ -1650,6 +1664,10 @@ def _run_sync_body(
             lookup_fatal = False
             if lookup_maps:
                 batch_len_before = len(record_batch)
+                window_cursor_by_record = {
+                    id(record): cursor
+                    for record, cursor in zip(record_batch, batch_window_cursors, strict=True)
+                }
                 record_batch, lookup_errors, lookup_fatal = apply_lookups(
                     record_batch,
                     lookup_maps,
@@ -1657,6 +1675,9 @@ def _run_sync_body(
                 )
                 total_result.row_errors.extend(lookup_errors)
                 total_result.skipped += batch_len_before - len(record_batch)
+                batch_window_cursors = [
+                    window_cursor_by_record[id(record)] for record in record_batch
+                ]
                 if lookup_fatal:
                     # A fatal (on_miss: fail) lookup miss under on_error:
                     # fail (#1084 / #1074 / #1083 review): apply_lookups
@@ -1688,6 +1709,10 @@ def _run_sync_body(
             # effects.
             if sync.sync.computed_fields:
                 batch_len_before = len(record_batch)
+                window_cursor_by_record = {
+                    id(record): cursor
+                    for record, cursor in zip(record_batch, batch_window_cursors, strict=True)
+                }
                 record_batch, computed_errors = apply_computed_fields(
                     record_batch,
                     sync.sync.computed_fields,
@@ -1695,6 +1720,9 @@ def _run_sync_body(
                 )
                 total_result.row_errors.extend(computed_errors)
                 total_result.skipped += batch_len_before - len(record_batch)
+                batch_window_cursors = [
+                    window_cursor_by_record[id(record)] for record in record_batch
+                ]
                 if not record_batch:
                     continue
 
@@ -1719,7 +1747,7 @@ def _run_sync_body(
                 # identity. Preserve the destination-shaped row before
                 # engine-owned run metadata is injected; the persisted dead
                 # letter still carries the final payload for retry.
-                pre_metadata_records = {id(record): dict(record) for record in record_batch}
+                batch_pre_metadata_records = [dict(record) for record in record_batch]
             record_batch = apply_metadata_columns(
                 record_batch,
                 sync.sync.metadata_columns,
@@ -1795,9 +1823,11 @@ def _run_sync_body(
                 continue
 
             # Warehouse-backed idempotency ledger (#1099) — check-then-mark,
-            # never claim-then-send: filter out already-delivered records
-            # *before* the destination call below, and only mark the ones
-            # that were part of a *successful* load, further down. Marking
+            # never claim-then-send: ordinary runs filter out already-delivered
+            # records *before* the destination call below. An explicit backfill
+            # range bypasses only that filter so an operator can restore target
+            # rows; both paths mark records that were part of a *successful*
+            # load further down. Marking
             # before sending would leave a transient destination failure
             # permanently "delivered" in the ledger — silently skipped by
             # every future retry. See drt.state.idempotency for the full
@@ -1808,17 +1838,24 @@ def _run_sync_body(
             if idempotency_key_template is not None and idempotency_ledger is not None:
                 batch_len_before = len(record_batch)
                 keyed_batch = [
-                    (row, compute_idempotency_key(idempotency_key_template, row))
-                    for row in record_batch
+                    (
+                        row,
+                        compute_idempotency_key(idempotency_key_template, row),
+                        batch_window_cursors[index],
+                        batch_pre_metadata_records[index],
+                    )
+                    for index, row in enumerate(record_batch)
                 ]
-                candidate_keys = {key for _, key in keyed_batch if key is not None}
+                candidate_keys = {key for _, key, _, _ in keyed_batch if key is not None}
                 already: set[str] = set()
-                if candidate_keys:
+                if candidate_keys and not bypass_idempotency_filter:
                     with _stage_ctx("state"):
                         already = idempotency_ledger.already_delivered(sync.name, candidate_keys)
-                kept = [(row, key) for row, key in keyed_batch if key is None or key not in already]
-                record_batch = [row for row, _ in kept]
-                batch_idempotency_keys = [key for _, key in kept]
+                kept = [item for item in keyed_batch if item[1] is None or item[1] not in already]
+                record_batch = [row for row, _, _, _ in kept]
+                batch_idempotency_keys = [key for _, key, _, _ in kept]
+                batch_window_cursors = [cursor for _, _, cursor, _ in kept]
+                batch_pre_metadata_records = [record for _, _, _, record in kept]
                 total_result.skipped += batch_len_before - len(record_batch)
                 total_result.skipped_duplicate += batch_len_before - len(record_batch)
                 if not record_batch:
@@ -1830,9 +1867,8 @@ def _run_sync_body(
                     destination.stage(record_batch, sync.destination, sync.sync)
                 staged_count += len(record_batch)
                 staged_records.extend(record_batch)
-                staged_pre_metadata_records.extend(
-                    pre_metadata_records.get(id(record)) for record in record_batch
-                )
+                staged_pre_metadata_records.extend(batch_pre_metadata_records)
+                staged_window_cursors.extend(batch_window_cursors)
             else:
                 assert isinstance(destination, Destination)
                 # Per-batch load span (child of drt.sync.run). Only the
@@ -1929,10 +1965,9 @@ def _run_sync_body(
                             timestamp=err.timestamp,
                             sync_run_id=total_result.sync_run_id,
                             window_bounds=window_bounds,
+                            row_cursor=batch_window_cursors[err.batch_index],
                             validated_upsert_key=window_upsert_key,
-                            pre_metadata_record=pre_metadata_records.get(
-                                id(record_batch[err.batch_index])
-                            ),
+                            pre_metadata_record=batch_pre_metadata_records[err.batch_index],
                         )
                         for err in result.row_errors
                         if 0 <= err.batch_index < len(record_batch)
@@ -2026,6 +2061,7 @@ def _run_sync_body(
                     timestamp=error.timestamp,
                     sync_run_id=total_result.sync_run_id,
                     window_bounds=window_bounds,
+                    row_cursor=staged_window_cursors[error.batch_index],
                     validated_upsert_key=window_upsert_key,
                     pre_metadata_record=staged_pre_metadata_records[error.batch_index],
                 )

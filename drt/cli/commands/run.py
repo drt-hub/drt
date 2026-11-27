@@ -1084,9 +1084,19 @@ def run(
     # never attempts a sync -- both would otherwise write byte-identical
     # empty-results artifacts.
     exit_code = 0
+    range_override = backfill_start is not None or backfill_end is not None
 
     try:
         if not syncs:
+            if range_override:
+                _validate_backfill_range_flags(
+                    [],
+                    backfill_start,
+                    backfill_end,
+                    cursor_value=cursor_value,
+                    full_refresh=full_refresh,
+                    limit=limit,
+                )
             if not json_mode:
                 console.print("[dim]No syncs found in syncs/. Add .yml files to get started.[/dim]")
             raise typer.Exit()
@@ -1102,18 +1112,8 @@ def run(
         except SelectionError as e:
             print_error(str(e))
             raise typer.Exit(1)
-        if not syncs:
-            if is_state_only_select(select):
-                # Nothing changed relative to the baseline — the normal, healthy
-                # outcome for a CI job on a PR that touched no sync definitions,
-                # not an error the way a dud tag:/bare-name selector would be.
-                if not json_mode:
-                    console.print(
-                        "[dim]No syncs changed relative to the baseline — nothing to run.[/dim]"
-                    )
-                raise typer.Exit()
-            print_error("Selection matched no syncs (after --exclude).")
-            raise typer.Exit(1)
+        selection_was_empty = not syncs
+        state_only_selection_was_empty = selection_was_empty and is_state_only_select(select)
 
         # --failed (#773): sync-level re-run of the previous invocation's
         # failures. Applied after --select/--exclude (intersection semantics).
@@ -1126,7 +1126,37 @@ def run(
                 return prev is not None and prev.status != "success"
 
             syncs = [s for s in syncs if _last_run_failed(s)]
-            if not syncs:
+            if syncs and not json_mode and not quiet:
+                console.print(
+                    f"[dim]--failed: re-running {len(syncs)} sync(s): "
+                    f"{', '.join(s.name for s in syncs)}[/dim]"
+                )
+
+        # Range safety is evaluated against the final selection, after every
+        # selector, exclusion and --failed intersection, but before any healthy
+        # zero-selection exit. The mutual exclusions live inside this helper and
+        # deliberately fire even when the final selection is empty or ambiguous.
+        if range_override:
+            _validate_backfill_range_flags(
+                syncs,
+                backfill_start,
+                backfill_end,
+                cursor_value=cursor_value,
+                full_refresh=full_refresh,
+                limit=limit,
+            )
+
+        if not syncs:
+            if state_only_selection_was_empty:
+                # Nothing changed relative to the baseline — the normal, healthy
+                # outcome for a CI job on a PR that touched no sync definitions,
+                # not an error the way a dud tag:/bare-name selector would be.
+                if not json_mode:
+                    console.print(
+                        "[dim]No syncs changed relative to the baseline — nothing to run.[/dim]"
+                    )
+                raise typer.Exit()
+            if failed_only and not selection_was_empty:
                 if json_mode:
                     print(
                         json.dumps(
@@ -1144,11 +1174,8 @@ def run(
                         "[green]Nothing failed in the previous run — nothing to re-run.[/green]"
                     )
                 raise typer.Exit(0)
-            if not json_mode and not quiet:
-                console.print(
-                    f"[dim]--failed: re-running {len(syncs)} sync(s): "
-                    f"{', '.join(s.name for s in syncs)}[/dim]"
-                )
+            print_error("Selection matched no syncs (after --exclude).")
+            raise typer.Exit(1)
 
         # --limit (#774): sampled run guards. A sampled mirror would DELETE the
         # destination rows the sample skipped; a sampled replace would truncate
@@ -1192,16 +1219,6 @@ def run(
                 "--backfill-end to override the range: " + ", ".join(backfills)
             )
             raise typer.Exit(1)
-
-        if backfill_start is not None or backfill_end is not None:
-            _validate_backfill_range_flags(
-                syncs,
-                backfill_start,
-                backfill_end,
-                cursor_value=cursor_value,
-                full_refresh=full_refresh,
-                limit=limit,
-            )
 
         if full_refresh:
             _reset_watermarks_for(

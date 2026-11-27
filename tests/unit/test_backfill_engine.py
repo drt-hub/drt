@@ -1719,6 +1719,98 @@ def test_metadata_retry_replaces_same_keyed_dead_letter_across_strict_backends(
     "backend",
     ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
 )
+def test_shifted_operator_replay_replaces_same_dead_letter_across_strict_backends(
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RowFailingDestination(RecordingDestination):
+        def load(
+            self,
+            records: list[dict[str, Any]],
+            config: DestinationConfig,
+            sync_options: SyncOptions,
+        ) -> SyncResult:
+            return SyncResult(
+                failed=len(records),
+                row_errors=[RowError(0, "row", None, "rejected")],
+            )
+
+    sync = _sync_for_destination(
+        _capable_destination_config("postgres").model_copy(update={"upsert_key": ["cursor"]}),
+        sync_options={"on_error": "skip"},
+    )
+    store = _strict_dlq_backend(backend, tmp_path)
+    queue: list[DeadLetter] = []
+
+    def append(
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int:
+        strict_entries = prepare_strict_dlq_append(
+            sync_name,
+            {entry.id for entry in queue},
+            len(queue),
+            entries,
+            max_records=max_records,
+            incoming_ids=incoming_ids,
+        )
+        positions = {entry.id: index for index, entry in enumerate(queue)}
+        for entry in strict_entries:
+            index = positions.get(entry.id)
+            if index is None:
+                positions[entry.id] = len(queue)
+                queue.append(entry)
+            else:
+                queue[index] = entry
+        return len(queue)
+
+    monkeypatch.setattr(store, "_append_strict", append)
+    state = MemoryState()
+
+    def observer() -> CompositeObserver:
+        checkpoint = StatePersistingObserver(state, None)
+        return CompositeObserver(
+            [checkpoint, DlqObserver(store, max_records=1)],
+            checkpoint_observer=checkpoint,
+        )
+
+    run_sync(
+        sync,
+        WindowSource([{"cursor": 1, "payload": "original"}]),
+        RowFailingDestination(),
+        _profile(),
+        tmp_path,
+        observer=observer(),
+        run_id="original-window",
+    )
+    [first] = queue
+
+    replay = run_sync(
+        sync,
+        WindowSource([{"cursor": 1, "payload": "replayed"}]),
+        RowFailingDestination(),
+        _profile(),
+        tmp_path,
+        observer=observer(),
+        run_id="shifted-window",
+        backfill_start=1,
+        backfill_end=2,
+    )
+
+    assert len(queue) == 1
+    assert queue[0].id == first.id
+    assert queue[0].record["payload"] == "replayed"
+    assert replay.backfill is not None and replay.backfill["ledger_bypassed"] is True
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
 @pytest.mark.parametrize(
     ("existing_values", "current_values"),
     [([], [0, 1]), ([99], [0])],
@@ -2420,6 +2512,78 @@ def test_cli_start_below_the_checkpoint_replays_without_moving_it_back(tmp_path:
     assert state.value.cursor_boundary == "exclusive"
     assert result.watermark_source == "cli"
     assert result.backfill is not None and result.backfill["effective_start"] == 3
+
+
+def test_operator_replay_bypasses_ledger_filter_but_normal_resume_keeps_it(
+    tmp_path: Path,
+) -> None:
+    class Ledger:
+        def __init__(self, delivered: set[str]) -> None:
+            self.delivered = set(delivered)
+            self.lookups: list[set[str]] = []
+            self.marked: list[str] = []
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            self.lookups.append(set(keys))
+            return keys & self.delivered
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            self.marked.extend(keys)
+            self.delivered.update(keys)
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            return 0
+
+    sync = _sync(end=9)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    replay_state = MemoryState(
+        SyncState(
+            "events",
+            "old",
+            1,
+            "partial",
+            last_cursor_value="9",
+            cursor_boundary="exclusive",
+        )
+    )
+    replay_ledger = Ledger({"3"})
+    replay_destination = RecordingDestination()
+
+    replay = _run_range(
+        tmp_path,
+        replay_state,
+        WindowSource([{"cursor": 3}]),
+        sync=sync,
+        destination=replay_destination,
+        idempotency_ledger=replay_ledger,
+        backfill_start=3,
+        backfill_end=6,
+    )
+
+    assert replay_destination.calls == [[{"cursor": 3}]]
+    assert replay_ledger.lookups == []
+    assert replay_ledger.marked == ["3"]
+    assert replay.backfill is not None and replay.backfill["ledger_bypassed"] is True
+    assert replay_state.value is not None and replay_state.value.last_cursor_value == "9"
+
+    normal_sync = _sync(end=3)
+    normal_sync.sync.idempotency_key = "{{ row.cursor }}"
+    normal_ledger = Ledger({"1"})
+    normal_destination = RecordingDestination()
+    normal = _run_range(
+        tmp_path,
+        MemoryState(),
+        WindowSource([{"cursor": 1}]),
+        sync=normal_sync,
+        destination=normal_destination,
+        idempotency_ledger=normal_ledger,
+    )
+
+    assert normal_destination.calls == []
+    assert normal_ledger.lookups == [{"1"}]
+    assert normal_ledger.marked == []
+    assert normal.skipped_duplicate == 1
+    assert normal.backfill is not None and normal.backfill["ledger_bypassed"] is False
 
 
 def test_cli_start_above_the_checkpoint_advances_it(tmp_path: Path) -> None:

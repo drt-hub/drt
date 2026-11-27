@@ -1353,7 +1353,10 @@ async def test_run_sync_forwards_the_range_to_the_engine(
         seen.update(kwargs)
         from drt.destinations.base import SyncResult
 
-        return SyncResult()
+        result = SyncResult()
+        result.backfill = {"ledger_bypassed": True}
+        result.windows = [{"low": 3, "high": 6}]
+        return result
 
     class _Bundle:
         state = object()
@@ -1371,7 +1374,7 @@ async def test_run_sync_forwards_the_range_to_the_engine(
         "drt.config.credentials.resolve_profile_paths", lambda profile, _dir: profile
     )
 
-    await call(
+    result = await call(
         create_server(project_dir),
         "drt_run_sync",
         sync_name="backfill",
@@ -1381,6 +1384,8 @@ async def test_run_sync_forwards_the_range_to_the_engine(
 
     assert seen["backfill_start"] == "3" and seen["backfill_end"] == "9"
     assert seen["allow_backfill_execution"] is True
+    assert result["backfill"]["ledger_bypassed"] is True
+    assert result["windows"] == [{"low": 3, "high": 6}]
 
 
 @pytest.mark.asyncio

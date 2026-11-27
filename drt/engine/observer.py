@@ -341,8 +341,7 @@ class StatePersistingObserver:
         destination window must never be followed by later windows unless its
         resume point is durable.
         """
-        from drt.engine.backfill import stringify_cursor_value
-        from drt.engine.cursor import cursor_gt
+        from drt.engine.backfill import _parse_timestamp, canonicalize_bound
         from drt.state.manager import SyncState
 
         if self._state_manager is None:
@@ -351,15 +350,51 @@ class StatePersistingObserver:
                 "configure state persistence before running sync.backfill."
             )
 
-        proposed = stringify_cursor_value(high)
+        proposed_bound = canonicalize_bound(high, field_name="sync.backfill window high")
+
+        def canonical_stored(value: str, *, store_name: str) -> BackfillBound:
+            try:
+                if isinstance(proposed_bound, int):
+                    return canonicalize_bound(
+                        int(value), field_name=f"stored {store_name} window checkpoint"
+                    )
+                return canonicalize_bound(
+                    value, field_name=f"stored {store_name} window checkpoint"
+                )
+            except (TypeError, ValueError) as exc:
+                family = "integer" if isinstance(proposed_bound, int) else "timestamp"
+                raise ValueError(
+                    f"Stored {store_name} checkpoint for sync {sync_name!r} is not a valid "
+                    f"{family} value: {value!r}; refusing to overwrite either window "
+                    "checkpoint store."
+                ) from exc
+
         current_state = self._state_manager.get_last_sync(sync_name)
-        state_value = proposed
-        if (
-            current_state is not None
-            and current_state.last_cursor_value is not None
-            and cursor_gt(current_state.last_cursor_value, proposed)
-        ):
-            state_value = current_state.last_cursor_value
+        candidates = [proposed_bound]
+        if current_state is not None and current_state.last_cursor_value is not None:
+            candidates.append(
+                canonical_stored(current_state.last_cursor_value, store_name="StateStore")
+            )
+
+        current_watermark: str | None = None
+        if self._watermark_storage is not None:
+            current_watermark = self._watermark_storage.get(sync_name)
+            if current_watermark is not None:
+                candidates.append(
+                    canonical_stored(current_watermark, store_name="WatermarkStorage")
+                )
+
+        if isinstance(proposed_bound, int):
+            typed_max = max(candidates)
+            assert isinstance(typed_max, int)
+            durable = str(typed_max)
+        else:
+            typed_max = max(
+                candidates,
+                key=lambda value: _parse_timestamp(value, field_name="window checkpoint"),
+            )
+            assert isinstance(typed_max, str)
+            durable = typed_max
 
         self._state_manager.save_sync(
             SyncState(
@@ -368,19 +403,14 @@ class StatePersistingObserver:
                 records_synced=result.success,
                 status="partial",
                 error=result.errors[0] if result.errors else None,
-                last_cursor_value=state_value,
+                last_cursor_value=durable,
                 cursor_boundary="exclusive",
             )
         )
 
-        durable = state_value
         if self._watermark_storage is not None:
-            current_watermark = self._watermark_storage.get(sync_name)
-            if current_watermark is not None and cursor_gt(current_watermark, proposed):
-                durable = current_watermark
-            else:
-                self._watermark_storage.save(sync_name, proposed)
-                durable = proposed
+            if current_watermark != durable:
+                self._watermark_storage.save(sync_name, durable)
         return durable
 
     def read_window_checkpoint(self, sync_name: str) -> tuple[str | None, str | None]:

@@ -41,13 +41,23 @@ profiles must configure distinct `incremental.start_param` and
 Each query covers one half-open range: `cursor >= low AND cursor < high`.
 Windows run sequentially. The existing transforms, destination lookups,
 idempotency ledger, batching, DLQ behavior, and destination finalizer apply to
-every window.
+every window. Ordinary resume runs use the ledger's already-delivered filter.
+An explicit operator range replay bypasses that filter so it can restore rows
+the destination lost; successful deliveries are still marked in the ledger for
+the audit trail and later ordinary resumes.
 
 After a window is fully consumed and finalized, drt writes a provisional
 `partial` StateStore record with `cursor_boundary: exclusive`, then writes a
 separate configured watermark store. A failure of either write stops the run.
 Completed windows are never rolled back. Empty windows also checkpoint, which
 allows sparse histories to make progress.
+
+Before writing either checkpoint store, drt parses the proposed high and every
+stored cursor in the same exact family (signed integer, or UTC instant), takes
+one maximum, and writes that canonical maximum to both stores. This comparison
+does not pass integers through floating point and does not compare timestamp
+text lexicographically. An unparseable stored cursor fails closed before either
+store is changed.
 
 `on_error: fail` leaves a window uncheckpointed. `on_error: skip` checkpoints a
 fully consumed window when the *destination* reports pinpointed failed/DLQ rows,
@@ -147,14 +157,14 @@ extraction, interruption, or contract failure remains the primary failure and
 the capacity error is reported with it. Raise the cap or drain the queue with
 `drt retry NAME`. Backfill cleanup never uses the ordinary capped append.
 
-Backfill DLQ IDs are derived from the sync name, canonical window low boundary,
-and validated destination upsert key, not from the run-specific high ceiling or
-final payload. Thus a later open-ended retry replaces the existing entry even
-when its ceiling moved. A key appearing in a later completed window still has a
-different low boundary. Keyless plugin capabilities use the same low-boundary
-scheme with the record captured before metadata injection. This ID scheme
-replaces only IDs from earlier unreleased slice-3 commits: mainline has not
-enabled backfill execution, so no compatibility migration is needed.
+Backfill DLQ IDs are derived from the sync name, the row's own cursor value
+canonicalized in the backfill family, and the validated destination upsert key,
+not from either window boundary or the final payload. Thus an open-ended retry
+or an explicit replay with shifted window alignment replaces the existing entry
+for the same row. Keyless plugin capabilities use the same row-cursor scheme
+with the record captured before metadata injection. This ID scheme replaces
+only IDs from earlier unreleased slice commits: mainline has not enabled
+backfill execution, so no compatibility migration is needed.
 
 ## Recovery and state safety
 
@@ -202,22 +212,29 @@ drt run --select orders_to_crm --backfill-start 1000000 --backfill-end 2000000
   write again, but the checkpoint stays where it was until a completed window's
   high exceeds it, so a later scheduled run still resumes from the real progress.
   A start above the checkpoint skips the gap and the checkpoint advances normally.
+- **Either range flag makes this an operator replay.** drt does not apply the
+  idempotency ledger's already-delivered filter, because the explicit purpose may
+  be to restore rows missing from the destination. It still marks successful keys.
+  The run summary reports `ledger_bypassed: true`; ordinary resume runs report
+  `false` and retain the normal duplicate filter.
 - `watermark.lag` is not applied to a CLI start (it applies only when the start
   came from durable storage).
 - **Exactly one selected sync, and it must declare `sync.backfill`.** The two flags
   carry one range, so selecting several syncs, or a sync without `sync.backfill`,
-  is an error rather than applying the same text to unrelated syncs.
+  is an error rather than applying the same text to unrelated syncs. Validation
+  uses the final selection after `--exclude`, state selectors, and `--failed`; an
+  empty healthy selector result is still an error when either range flag is set.
 - They are mutually exclusive with `--cursor-value`, `--full-refresh` and `--limit`.
 - MCP `drt_run_sync` takes the same range as `backfill_start` / `backfill_end`.
 
 ## What a run reports
 
-A backfill run adds two keys to its entry in `target/drt/run_results.json` (and to
-`--output json`'s `syncs[]`):
+A backfill run adds two keys to its entry in `target/drt/run_results.json`, to
+`--output json`'s `syncs[]`, and to the MCP `drt_run_sync` response:
 
 - `backfill`: the plan summary — `requested_start`, `effective_start`, `ceiling`,
   `window`, `windows_planned`, `windows_completed`, `failed_window` (index or
-  `null`) and `final_checkpoint`.
+  `null`), `final_checkpoint`, and `ledger_bypassed`.
 - `windows`: one object per attempted window — `index`, `low`, `high` (half-open),
   `rows_extracted`, `rows_synced`/`rows_failed`/`rows_skipped`, `status`
   (`success`/`failed`), `checkpoint` (`written`, `not_written` or `failed`) and

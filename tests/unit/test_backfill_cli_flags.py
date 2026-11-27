@@ -13,6 +13,8 @@ import pytest
 from typer.testing import CliRunner
 
 from drt.cli.main import app
+from drt.state.manager import StateManager, SyncState
+from tests.unit._state_cli_helpers import write_state_baseline
 
 runner = CliRunner()
 
@@ -158,3 +160,68 @@ def test_conflicting_full_refresh_and_cursor_value_are_refused_first(project: Pa
 
     assert result.exit_code == 1
     assert "mutually exclusive" in " ".join(result.output.split())
+
+
+def test_range_is_validated_after_failed_filter_produces_no_syncs(project: Path) -> None:
+    StateManager(project).save_sync(SyncState("b", "now", 1, "success", last_cursor_value="3"))
+
+    result = runner.invoke(
+        app,
+        ["run", "--select", "b", "--failed", "--backfill-start", "0", "--backfill-end", "3"],
+    )
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+    assert "Nothing failed" not in result.output
+
+
+def test_range_is_validated_before_state_modified_noop(project: Path) -> None:
+    baseline = write_state_baseline(project)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--select",
+            "state:modified",
+            "--state",
+            str(baseline),
+            "--backfill-start",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+    assert "nothing to run" not in result.output
+
+
+def test_range_is_validated_after_exclude_empties_selection(project: Path) -> None:
+    result = runner.invoke(app, ["run", "--exclude", "*", "--backfill-start", "0"])
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+
+
+def test_range_is_validated_after_failed_filter_leaves_multiple_syncs(project: Path) -> None:
+    manager = StateManager(project)
+    for name in ("b", "p"):
+        manager.save_sync(SyncState(name, "now", 0, "failed", error="boom"))
+
+    result = runner.invoke(app, ["run", "--failed", "--backfill-start", "0"])
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+    assert "selected: b, p" in " ".join(result.output.split())
+
+
+def test_range_mutual_exclusion_wins_even_when_failed_filter_is_empty(project: Path) -> None:
+    StateManager(project).save_sync(SyncState("b", "now", 1, "success"))
+
+    result = runner.invoke(
+        app,
+        ["run", "--select", "b", "--failed", "--backfill-start", "0", "--limit", "1"],
+    )
+
+    assert result.exit_code == 1
+    assert "--limit are mutually exclusive" in " ".join(result.output.split())

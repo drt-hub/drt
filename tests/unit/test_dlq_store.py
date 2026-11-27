@@ -202,21 +202,21 @@ def test_dead_letter_id_defaults_are_unique() -> None:
     assert _dl(1).id != _dl(1).id
 
 
-def test_backfill_dead_letter_id_is_scoped_by_sync_low_and_stable_identity() -> None:
+def test_backfill_dead_letter_id_is_scoped_by_sync_row_cursor_and_stable_identity() -> None:
     keyed = {"destination_upsert_key": [["id", "int", "7"]]}
     keyless = {"pre_metadata_record": {"cursor": 1, "payload": "same"}}
 
-    first = backfill_dead_letter_id("events", 0, keyed)
-    keyless_first = backfill_dead_letter_id("events", 0, keyless)
+    first = backfill_dead_letter_id("events", 1, keyed)
+    keyless_first = backfill_dead_letter_id("events", 1, keyless)
 
-    assert first == backfill_dead_letter_id("events", 0, keyed)
-    assert first != backfill_dead_letter_id("events", 3, keyed)
-    assert first != backfill_dead_letter_id("other-events", 0, keyed)
+    assert first == backfill_dead_letter_id("events", 1, keyed)
+    assert first != backfill_dead_letter_id("events", 2, keyed)
+    assert first != backfill_dead_letter_id("other-events", 1, keyed)
     assert first != backfill_dead_letter_id(
-        "events", 0, {"destination_upsert_key": [["id", "int", "8"]]}
+        "events", 1, {"destination_upsert_key": [["id", "int", "8"]]}
     )
-    assert keyless_first == backfill_dead_letter_id("events", 0, keyless)
-    assert keyless_first != backfill_dead_letter_id("events", 3, keyless)
+    assert keyless_first == backfill_dead_letter_id("events", 1, keyless)
+    assert keyless_first != backfill_dead_letter_id("events", 2, keyless)
 
 
 def test_legacy_line_gets_the_same_id_on_repeated_reads(tmp_path: Path) -> None:

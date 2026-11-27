@@ -261,7 +261,7 @@ def plan_windows(
         low_dt = high_dt
 
 
-def _canonicalize_row_cursor(value: Any, low: BackfillBound) -> BackfillBound:
+def canonicalize_row_cursor(value: Any, low: BackfillBound) -> BackfillBound:
     """Canonicalize a source row cursor using the window's arithmetic family."""
     if isinstance(low, int) and not isinstance(low, bool):
         if isinstance(value, bool) or not isinstance(value, int):
@@ -281,6 +281,28 @@ def _canonicalize_row_cursor(value: Any, low: BackfillBound) -> BackfillBound:
         return canonicalize_bound(value, field_name="source row cursor")
     except ValueError as exc:
         raise WindowCursorRangeError(str(exc)) from exc
+
+
+def canonicalize_record_cursor(
+    record: Mapping[str, Any], cursor_field: str, low: BackfillBound
+) -> BackfillBound:
+    """Read and canonicalize a non-null row cursor in the window's family."""
+    value = _record_cursor_value(record, cursor_field)
+    if value is None:
+        raise WindowCursorRangeError(
+            f"sync.backfill row has null or missing cursor_field {cursor_field!r}."
+        )
+    return canonicalize_row_cursor(value, low)
+
+
+def _record_cursor_value(record: Mapping[str, Any], cursor_field: str) -> Any:
+    """Read a possibly nested cursor, returning ``None`` when absent or null."""
+    value: Any = record
+    for segment in cursor_field.split("."):
+        if not isinstance(value, Mapping) or segment not in value:
+            return None
+        value = value[segment]
+    return value
 
 
 def validate_window_row(
@@ -311,12 +333,7 @@ def validate_window_row(
         if canonical_low >= canonical_high:
             raise ValueError("sync.backfill window low must be less than high.")
 
-    value: Any = record
-    for segment in cursor_field.split("."):
-        if not isinstance(value, Mapping) or segment not in value:
-            value = None
-            break
-        value = value[segment]
+    value = _record_cursor_value(record, cursor_field)
     if value is None:
         return RowError(
             batch_index=batch_index,
@@ -328,7 +345,7 @@ def validate_window_row(
             ),
         )
 
-    canonical_value = _canonicalize_row_cursor(value, canonical_low)
+    canonical_value = canonicalize_row_cursor(value, canonical_low)
     if isinstance(canonical_low, int):
         assert isinstance(canonical_high, int)
         assert isinstance(canonical_value, int)

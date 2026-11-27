@@ -85,24 +85,33 @@ class DeadLetter:
 
 def backfill_dead_letter_id(
     sync_name: str,
-    canonical_low: str | int,
+    canonical_row_cursor: str | int | None,
     stable_identity: Mapping[str, Any],
 ) -> str:
-    """Return the stable identity of one failed row in one backfill window.
+    """Return the stable identity of one failed row in a backfill.
 
     A window may be delivered and DLQ-flushed before its checkpoint write
     fails.  Retrying that uncheckpointed window must update the existing dead
     letter, not append a second retryable copy of the same row. The identity is
     deliberately separate from the persisted post-transform record: injected
     run metadata changes on retry and must not create a new queue entry. The
-    canonical low bound is retry-stable; an open-ended run's high bound is not.
+    row's canonical cursor is stable across both checkpoint retries and an
+    operator replay whose window alignment changed. ``None`` is reserved for a
+    source-contract row whose cursor was missing, with ``stable_identity`` then
+    providing its deterministic fallback.
     """
     payload = json.dumps(
         {
             "sync_name": sync_name,
-            "window_low": {
-                "value": canonical_low,
-                "checkpoint_boundary": "exclusive",
+            "row_cursor": {
+                "value": canonical_row_cursor,
+                "family": (
+                    "integer"
+                    if isinstance(canonical_row_cursor, int)
+                    else "timestamp"
+                    if isinstance(canonical_row_cursor, str)
+                    else "missing"
+                ),
             },
             "identity": stable_identity,
         },

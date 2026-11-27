@@ -207,6 +207,9 @@ def run_sync(
     guards_outcome = getattr(result, "guards", None)
     if guards_outcome is not None:
         response["guards"] = guards_outcome
+    if result.backfill is not None:
+        response["backfill"] = dict(result.backfill)
+        response["windows"] = [dict(window) for window in result.windows]
     if force_guards:
         response["approved_by"] = approver
     diff_value = getattr(result, "diff", None)
