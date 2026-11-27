@@ -113,6 +113,8 @@ class GitHubActionsDestination:
                             e,
                             error_message=f"inputs_template error: {e}",
                         )
+                        if sync_options.on_error == "fail":
+                            return result
                         continue
 
                 payload: dict[str, Any] = {"ref": config.ref}

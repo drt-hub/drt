@@ -47,6 +47,8 @@ _DESTINATIONS = [
     "github_actions",
 ]
 
+_TEMPLATE_DESTINATIONS = ["notion", "linear", "jira", "github_actions"]
+
 
 def _options(on_error: str = "skip") -> SyncOptions:
     return SyncOptions(
@@ -238,6 +240,25 @@ def _success_response(request: httpx.Request, object_id: int) -> httpx.Response:
     return httpx.Response(201, json=body, request=request)
 
 
+def _template_error_config(name: str) -> dict[str, Any]:
+    _, config, _, _, _ = _case(name)
+    templates = {
+        "notion": (
+            "properties_template",
+            '{"Name": {"title": [{"text": {"content": "{{ row.required }}"}}]}}',
+        ),
+        "linear": ("title_template", "Issue for {{ row.required }}"),
+        "jira": ("summary_template", "Issue for {{ row.required }}"),
+        "github_actions": (
+            "inputs_template",
+            '{"environment": "{{ row.required }}"}',
+        ),
+    }
+    field, template = templates[name]
+    config[field] = template
+    return config
+
+
 @pytest.fixture(autouse=True)
 def _jira_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FAULT_JIRA_BASE_URL", "https://fault.test")
@@ -252,6 +273,43 @@ def test_retry_creates_is_explicit_destination_policy(name: str) -> None:
 
     assert default_config.retry_creates is False
     assert opted_in_config.retry_creates is True
+
+
+@pytest.mark.parametrize("name", _TEMPLATE_DESTINATIONS)
+@pytest.mark.parametrize(
+    ("on_error", "expected_success", "expected_requests"),
+    [("fail", 0, 0), ("skip", 1, 1)],
+)
+def test_pre_send_template_error_honors_on_error_before_next_record(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    on_error: str,
+    expected_success: int,
+    expected_requests: int,
+) -> None:
+    destination, _, _, _, _ = _case(name)
+    parsed = SyncConfig.model_validate(
+        {
+            "name": "template_error_safety",
+            "model": "events",
+            "destination": _template_error_config(name),
+        }
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _success_response(request, 1)
+
+    install_mock_transport(monkeypatch, handler)
+    result = destination.load(
+        [{"name": "missing required"}, {"name": "valid", "required": "production"}],
+        parsed.destination,
+        _options(on_error),
+    )
+
+    assert (result.success, result.failed) == (expected_success, 1)
+    assert len(requests) == expected_requests
 
 
 @pytest.mark.parametrize("name", _DESTINATIONS)
@@ -333,9 +391,11 @@ def test_429_is_retried_without_retry_creates(
 
 
 @pytest.mark.parametrize("name", _DESTINATIONS)
-def test_proven_pre_send_connection_error_is_retried(
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ProxyError])
+def test_proven_pre_send_error_is_retried_without_retry_creates(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
+    error_type: type[httpx.TransportError],
 ) -> None:
     destination, config, (record, _path, _decoder, options) = _load(name, False)
     requests: list[httpx.Request] = []
@@ -343,7 +403,7 @@ def test_proven_pre_send_connection_error_is_retried(
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if len(requests) == 1:
-            raise httpx.ConnectError("connection refused before send", request=request)
+            raise error_type("connection failed before send", request=request)
         return _success_response(request, 1)
 
     install_mock_transport(monkeypatch, handler)
