@@ -80,6 +80,8 @@ from dagster import (
     sensor,
 )
 
+from dagster_drt._secrets import project_secrets_scope
+
 if TYPE_CHECKING:
     # dagster's own CoercibleToAssetSelection type alias isn't exported from
     # the top-level dagster package — spelled out inline below instead.
@@ -89,6 +91,21 @@ if TYPE_CHECKING:
 
 
 def _current_signal(
+    project_dir: Path,
+    *,
+    watch_table: str | None = None,
+    minimum_interval_seconds: int | None = None,
+) -> str:
+    """Read the change signal with the project's ``.drt/secrets.toml`` in scope."""
+    with project_secrets_scope(project_dir):
+        return _current_signal_unscoped(
+            project_dir,
+            watch_table=watch_table,
+            minimum_interval_seconds=minimum_interval_seconds,
+        )
+
+
+def _current_signal_unscoped(
     project_dir: Path,
     *,
     watch_table: str | None = None,
