@@ -104,6 +104,9 @@ def test_attributed_unattempted_rows_do_not_requeue_confirmed_successes(
     assert [e.record["id"] for e in remaining] == [2, 3]
     assert remaining[0].error_message == "boom"
     assert remaining[1].error_message == "not attempted: the destination stopped after a failure"
+    # Only the row actually attempted and failed consumes a retry attempt.
+    assert remaining[0].attempts == DeadLetter(record={}, error_message="").attempts + 1
+    assert remaining[1].attempts == DeadLetter(record={}, error_message="").attempts
 
 
 def test_a_policy_skip_that_is_explained_is_still_removed(

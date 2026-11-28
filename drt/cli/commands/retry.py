@@ -445,7 +445,13 @@ def _replay_dead_letters(
                         ),
                         http_status=err.http_status if err is not None else None,
                         timestamp=entry.timestamp,  # preserve first-seen time
-                        attempts=entry.attempts + 1,
+                        # A row the destination never reached (attributed unattempted)
+                        # was not retried, so it must not look closer to "unrecoverable".
+                        attempts=(
+                            entry.attempts
+                            if pinpointed and err is None and i in unattempted_idx
+                            else entry.attempts + 1
+                        ),
                         # Preserve the *original* failure's run correlation, not
                         # this retry's (there isn't one — retry has no
                         # sync_run_id of its own) — matches metadata_columns'

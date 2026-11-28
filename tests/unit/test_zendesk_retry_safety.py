@@ -426,3 +426,6 @@ def test_failed_first_user_chunk_keeps_unattempted_dlq_rows(
     assert len(remaining) == 250
     assert remaining[-1].record == records[-1]
     assert remaining[-1].error_message == "not attempted: the destination stopped after a failure"
+    baseline = DeadLetter(record={}, error_message="").attempts
+    assert [e.attempts for e in remaining[:100]] == [baseline + 1] * 100
+    assert [e.attempts for e in remaining[100:]] == [baseline] * 150
