@@ -58,7 +58,7 @@ duplicate the object or message; the planned ADR step is noted.
 | Type | Write kind | What drt retries | Status |
 |---|---|---|---|
 | `airtable` | Record create / upsert | One HTTP attempt loop around each request | Not yet classified (ADR 0023 item 3) |
-| `amplitude` | Event ingestion / user identify | Events: keyed by `insert_id` (configured or a deterministic hash of the row), deduplicated for 7 days; docs scope the match to the same `device_id`, so send one; identify: one HTTP attempt loop, not classified | Events classified (keyed, `device_id` recommended); identify not yet (ADR 0023 item 3) |
+| `amplitude` | Event ingestion / user identify | Events: keyed by `insert_id` (configured, existing, or a deterministic hash of the row excluding configured engine metadata targets), deduplicated for 7 days; docs scope the match to the same `device_id`, so send one; identify: one HTTP attempt loop, not classified | Events classified (keyed, `device_id` recommended); identify not yet (ADR 0023 item 3) |
 | `azure_blob` | Object upload | Nothing: no drt retry; the SDK's own retries are not verified here | Documented only (ADR 0023 item 4) |
 | `bigquery` | Warehouse write | Nothing: drt does not wrap warehouse writes in retries; replay safety follows `sync.mode` and `upsert_key` | Documented only; see the connector page |
 | `clickhouse` | Warehouse insert | One retry with the same `insert_deduplication_token`; best effort, only effective when the table's deduplication window is enabled | Documented (ADR 0023 item 5) |
@@ -77,7 +77,7 @@ duplicate the object or message; the planned ADR step is noted.
 | `klaviyo` | Profile / list / event | Keyed or reconciled (see above) | Classified |
 | `linear` | Issue create | Blind (see above) | Classified |
 | `meta_conversions` | Conversion event | One HTTP attempt loop around each batch; batch counted only when Meta acknowledges every event | Not yet classified: Meta documents `event_id` dedup between browser Pixel and server, not between two server submissions (ADR 0023 item 3) |
-| `mixpanel` | Event / profile | Events: keyed by `$insert_id` (set `time_field` to deduplicate across runs); profiles: `$set` is idempotent | Classified |
+| `mixpanel` | Event / profile | Events: keyed only when the final event name + `distinct_id` + non-future integer `time` + `$insert_id` tuple is usable (fallback ids exclude configured engine metadata targets; set `time_field` to deduplicate across runs); profiles: `$set` is idempotent | Profiles classified; event batches with a proven final tuple classified, otherwise unclassified with unchanged retries |
 | `mysql` | Warehouse write | Nothing: as for `bigquery` | Documented only |
 | `notion` | Page create | Blind (see above) | Classified |
 | `parquet` | Local file write | Nothing | Not applicable: no remote side effect |
@@ -121,4 +121,3 @@ The optional warehouse idempotency ledger is useful across later runs and DLQ
 replays, but it cannot settle this immediate ambiguity: drt marks the ledger only
 after a positively confirmed destination result. Claiming before send would
 trade duplicates for silent message loss.
-

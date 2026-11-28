@@ -80,9 +80,9 @@ The existing mitigations column uses these names:
 | Klaviyo profiles | Profile create, conflict-to-update, optional list membership | `POST /profiles`, `PATCH /profiles/{id}`, `POST /lists/{id}/relationships/profiles` | **Yes, R** for all three (`drt/destinations/klaviyo.py:241-298`) | Email produces a 409 carrying the existing profile id in the implemented contract; separate vendor idempotency-key support is **unverified**. | A duplicate profile if conflict identity fails; repeated list membership should be treated as **unverified**. | Upsert-by-email in drt. | 409-to-PATCH; relationship uses returned profile id; ledger #1099. |
 | Klaviyo events | Ingest event | `POST /events` | **Yes, R** (`drt/destinations/klaviyo.py:151-221`) | Config requires a stable `unique_id_field` for events (`drt/config/destinations_saas.py:540-551`). Exact vendor dedup scope/retention is **unverified** here. | Event counted twice or automation triggered twice if vendor dedup does not apply. | Keyed event. | Required unique id; optional `backfill` suppresses live flows; ledger #1099 can add cross-run defense. |
 | Airtable | Append records or perform upsert | Append `POST /v0/{base}/{table}`; upsert `PATCH` with `performUpsert.fieldsToMergeOn` | **Yes, R** (`drt/destinations/airtable.py:68-94`) | Configured `primary_key` is a natural merge key for PATCH; append key support is **unverified**. | Duplicate Airtable rows, potentially the whole ten-row chunk. | Blind append or upsert-by-key. | `primary_key`/performUpsert; ledger #1099. |
-| Mixpanel | Profile set or event import | `POST /engage`; `POST /import` | **Yes, R** (`drt/destinations/mixpanel.py:122-180`, `drt/destinations/mixpanel.py:325-343`) | Profiles carry `$distinct_id`; events always receive a source value or deterministic `$insert_id` (`drt/destinations/mixpanel.py:234-278`, `drt/destinations/mixpanel.py:305-314`). Vendor dedup retention is **unverified**. | Repeated profile set or double-counted event if the key is not honored. | Keyed profile/event operation. | Natural profile id; deterministic event insert id; ledger #1099. |
-| Amplitude | Identify user or ingest events | `POST /identify`; `POST /2/httpapi` | **Yes, R** (`drt/destinations/amplitude.py:114-163`, `drt/destinations/amplitude.py:318-357`) | Identify carries user/device id; events get a source or deterministic `insert_id` (`drt/destinations/amplitude.py:184-226`, `drt/destinations/amplitude.py:293-307`). Vendor dedup retention is **unverified**. | Repeated identify mutation or double-counted event if the key is not honored. | Keyed profile/event operation. | Natural user/device id; deterministic insert id; ledger #1099. |
-| Meta Conversions | Upload conversion events | `POST /{version}/{pixel_id}/events` | **Yes, R+**; additionally retries HTTP 400 only when the response says `is_transient: true` (`drt/destinations/meta_conversions.py:80-109`, `drt/destinations/meta_conversions.py:272-283`) | Config requires `event_id_field`; the repository builds and validates `event_id` for every event (`drt/config/destinations_saas.py:950-982`, `drt/destinations/meta_conversions.py:163-187`). Exact vendor dedup scope is **unverified** here. | Conversion counted twice if event-id dedup does not apply. | Keyed event. | Required event id; ledger #1099. |
+| Mixpanel | Profile set or event import | `POST /engage`; `POST /import` | **Yes, R** (`drt/destinations/mixpanel.py`) | Profiles carry `$distinct_id`; events receive `$insert_id`, with fallback hashes excluding configured run metadata. Mixpanel deduplicates on event name, `distinct_id`, `time`, and `$insert_id`; drt classifies only a usable final tuple with a non-future integer timestamp. | Repeated profile set or double-counted event if the tuple is not honored or Mixpanel rewrites a component. | Idempotent profile set; event is keyed only when the final tuple is proven. | Natural profile id; full event tuple; ledger #1099. |
+| Amplitude | Identify user or ingest events | `POST /identify`; `POST /2/httpapi` | **Yes, R** (`drt/destinations/amplitude.py`) | Identify carries user/device id; events get a source, existing, or fallback `insert_id`. Fallback hashes exclude configured run metadata. Vendor dedup retention is **unverified**. | Repeated identify mutation or double-counted event if the key is not honored. | Identify unclassified; event keyed. | Natural user/device id; stable insert id; ledger #1099. |
+| Meta Conversions | Upload conversion events | `POST /{version}/{pixel_id}/events` | **Superseded by the 2026-11-28 amendment below.** The connector still retries R+ exactly as before, including HTTP 400 only when the response says `is_transient: true` (`drt/destinations/meta_conversions.py`). | `event_id` + `event_name` is documented for Pixel-to-server deduplication, not two server submissions. | Conversion may be counted twice after an ambiguous response. | **Unclassified; previous keyed inventory claim superseded.** | Keep previous retry behavior pending proof; ledger #1099 remains defense in depth. |
 | Google Ads | Upload click conversions | `POST /customers/{id}:uploadClickConversions` | **Yes, R** (`drt/destinations/google_ads.py:270-285`) | Optional `native_idempotency_key` is rendered as `orderId`; repository code recognizes `ORDER_ID_ALREADY_IN_USE` as successful dedup (`drt/destinations/google_ads.py:135-157`, `drt/destinations/google_ads.py:239-248`, `drt/destinations/google_ads.py:332-358`). | Conversion imported twice when no order id is supplied. | Keyed only when configured; otherwise blind event upload. | Native order id; duplicate response treated as success; ledger #1099. |
 | Slack | Incoming webhook message | `POST` configured webhook URL | **Yes, R** (`drt/destinations/slack.py:64-90`) | **Unverified**. No key is wired. | Duplicate channel message. | Blind side effect. | Ledger #1099 if explicitly keyed. |
 | Discord | Execute webhook | `POST` configured webhook URL | **Yes, R** (`drt/destinations/discord.py:62-88`) | **Unverified**. No key is wired. | Duplicate channel message/embed. | Blind side effect. | Ledger #1099 if explicitly keyed. |
@@ -168,9 +168,10 @@ does that. Its batch mode sends the same generated request id on every attempt o
 chunk, but nothing proves an arbitrary target honours that header, and the value
 changes on every run, so generic REST batch mode **stays classified blind** unless the
 operator asserts that the configured endpoint deduplicates on it (an explicit
-configuration contract); a stable value is necessary but not sufficient. Google Ads with `orderId`, Meta `event_id`, Klaviyo
+configuration contract); a stable value is necessary but not sufficient. Google Ads with `orderId`, Klaviyo
 `unique_id`, Mixpanel/Amplitude insert ids, FIFO SQS dedup ids and Elasticsearch
-`_id` each receive explicit connector tests before being classified safe. A vendor
+`_id` each receive explicit connector tests before being classified safe. Meta's
+`event_id` is not evidence for server-to-server retry deduplication (see the amendment). A vendor
 claim that is still “unverified” in the audit defaults to blind.
 
 This is internal behavior. It does not add a method to the frozen `Destination`
@@ -249,9 +250,11 @@ not whether a repeated create is safe.
    and Zendesk. Preserve retries only after natural-key conflict/reconciliation
    tests prove the committed-first-attempt case.
 3. **Append, bulk and event APIs:** Airtable append, Elasticsearch auto-id,
-   Google Ads without order id, then the keyed Meta/Klaviyo/Mixpanel/Amplitude and
-   FIFO SQS paths. Keyed paths keep retries only after their stable-key tests pass;
-   unkeyed variants default false.
+   Google Ads without order id, then the keyed Klaviyo/Mixpanel/Amplitude and FIFO
+   SQS paths. The former Meta keyed rollout reference is **superseded by the
+   2026-11-28 amendment**; Meta remains unclassified with unchanged retries. Keyed
+   paths keep retries only after their stable-key tests pass; unkeyed variants
+   default false.
 4. **Currently non-retried or SDK-owned writes:** Salesforce job creation, staged
    upload stage/trigger, Google Sheets append, SMTP and object-store uploads. Add
    explicit classification and documentation so a later retry refactor cannot
@@ -438,7 +441,7 @@ or document their own retry semantics. No method is added to `Destination`.
 | 2 | Config, validation and observability | Add direct per-destination `retry_creates`, schema generation, validation/deprecation warning and duplicate-risk/suppressed-retry warning. No frozen Protocol change. |
 | 3 | Highest-risk blind writes | Classify generic REST, webhooks, SendGrid, Twilio, Notion, Linear, Jira create and GitHub dispatch. Explicit false suppresses ambiguous retries; true preserves legacy. Fault-injection tests assert remote side-effect counts. |
 | 4 | CRM reconciliation | Implement Pipedrive re-search first, then Intercom/HubSpot/Klaviyo/Zendesk conflict or natural-key reconciliation. Test committed create + dropped response, zero/one/multiple matches and eventual-consistency miss. |
-| 5 | Append, event, bulk and queue matrix | Split Airtable append/upsert, Elasticsearch auto-id/id, Google Ads keyed/unkeyed, Klaviyo event, Meta, Mixpanel, Amplitude and SQS standard/FIFO. A path is classified keyed only with a non-empty stable key and a vendor-contract test fixture. |
+| 5 | Append, event, bulk and queue matrix | Split Airtable append/upsert, Elasticsearch auto-id/id, Google Ads keyed/unkeyed, Klaviyo event, Meta (**keyed rollout superseded by the 2026-11-28 amendment; leave unclassified**), Mixpanel, Amplitude and SQS standard/FIFO. A path is classified keyed only with a non-empty stable key and a vendor-contract test fixture. |
 | 6 | Ledger, DLQ and staged regression coverage | Prove the ledger cannot authorize an unsafe resend, preserve DLQ hit/miss behavior and staged exclusions, and add no-retry regression tests for Salesforce job creation and staged-upload stage/trigger. Document Google Sheets/SMTP/blob outer-replay risk. |
 | 7 | Documentation and 1.x deprecation | Add connector retry-safety tables, migration/recovery guide, examples for native keys and `retry_creates`, generated schemas and release notes. Validation warns when omitted on a blind-create destination during the deprecation window. |
 | 8 | v2 default flip | After the deprecation floor, make omitted `retry_creates` false only for blind creates; keep safe/keyed retries unchanged. Run the fault harness across every classified destination family and publish the breaking-change migration. |
@@ -481,8 +484,8 @@ normative for the implementation PRs.
 
 ## Amendment 2026-11-28 (Meta Conversions)
 
-The inventory row above labels Meta Conversions a keyed event path. Review of the
-rollout found that Meta documents `event_id` + `event_name` deduplication between the
+The inventory and rollout references above are marked superseded because review found
+that Meta documents `event_id` + `event_name` deduplication between the
 browser Pixel and the server API, **not between two server submissions**. A retry after
 a lost response is therefore not proven safe, and per decision 8 the path is **not
 classified**: it keeps its previous retry behavior (transient errors and 5xx are

@@ -124,7 +124,7 @@ class AmplitudeDestination:
         indexed_payloads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
         for index, record in enumerate(records):
             try:
-                payload = _build_payload(record, config)
+                payload = _build_payload(record, config, sync_options)
                 indexed_payloads.append((index, record, payload))
             except Exception as e:
                 _add_row_error(result, index, record, None, str(e))
@@ -181,7 +181,11 @@ class AmplitudeDestination:
         return result
 
 
-def _build_payload(record: dict[str, Any], config: AmplitudeDestinationConfig) -> dict[str, Any]:
+def _build_payload(
+    record: dict[str, Any],
+    config: AmplitudeDestinationConfig,
+    sync_options: SyncOptions,
+) -> dict[str, Any]:
     user_id = _field_value(record, config.user_id_field)
     device_id = _field_value(record, config.device_id_field) if config.device_id_field else None
 
@@ -207,7 +211,7 @@ def _build_payload(record: dict[str, Any], config: AmplitudeDestinationConfig) -
             if _has_value(time_value):
                 payload["time"] = time_value
 
-        insert_id = _resolve_insert_id(record, config, str(event_type))
+        insert_id = _resolve_insert_id(record, config, sync_options, str(event_type))
         if insert_id:
             payload["insert_id"] = insert_id
 
@@ -293,6 +297,7 @@ def _has_value(value: Any) -> bool:
 def _resolve_insert_id(
     record: dict[str, Any],
     config: AmplitudeDestinationConfig,
+    sync_options: SyncOptions,
     event_type: str,
 ) -> str | None:
     if config.insert_id_field:
@@ -302,9 +307,23 @@ def _resolve_insert_id(
     existing = record.get("insert_id")
     if _has_value(existing):
         return str(existing)
-    canonical = json.dumps(record, sort_keys=True, default=str)
+    stable_record = _without_metadata_columns(record, sync_options)
+    canonical = json.dumps(stable_record, sort_keys=True, default=str)
     digest = hashlib.sha256(f"{canonical}:{event_type}".encode()).hexdigest()
     return digest[:32]
+
+
+def _without_metadata_columns(record: dict[str, Any], sync_options: SyncOptions) -> dict[str, Any]:
+    """Recover the stable row identity from the destination-facing record."""
+    metadata = sync_options.metadata_columns
+    if metadata is None:
+        return record
+    excluded = {
+        column
+        for column in (metadata.synced_at, metadata.run_id, metadata.sync_name)
+        if column is not None
+    }
+    return {key: value for key, value in record.items() if key not in excluded}
 
 
 def _render_properties_template(template: str, record: dict[str, Any]) -> dict[str, Any]:
@@ -354,9 +373,9 @@ def _post_events(
         response.raise_for_status()
         return response
 
-    # KEYED: every event carries an ``insert_id`` (configured, or a deterministic hash of
-    # the row and event type) and the same body is re-sent, so Amplitude deduplicates a
-    # replay (ADR 0023).
+    # KEYED: every event carries an ``insert_id`` (configured, existing, or a stable hash
+    # of the pre-metadata row and event type) and the same body is re-sent, so Amplitude
+    # deduplicates a replay (ADR 0023).
     with_retry(do_post, retry_config, operation=OperationSafety.KEYED)
 
 

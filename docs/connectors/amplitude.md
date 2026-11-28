@@ -116,8 +116,10 @@ The limiter is shared per **project and region** (API key + `region`). The `iden
 ## Retry safety
 
 - **`endpoint: event` is keyed.** Each event carries `insert_id`: your
-  `insert_id_field` value, otherwise a SHA-256 of the row and event type, so the same
-  row always gets the same id. After a lost response drt re-sends the same body, which
+  `insert_id_field` value, an existing `insert_id`, or a SHA-256 of the stable row and
+  event type. The fallback hash excludes configured `metadata_columns` targets
+  (`synced_at`, `run_id`, and `sync_name`), so engine bookkeeping does not change the
+  derived id across runs. After a lost response drt re-sends the same body, which
   is what Amplitude's [batching and retry guide](https://amplitude.com/docs/apis/analytics/http-api-batching-retries)
   asks for, and Amplitude ignores a repeated `insert_id` seen within the past
   **7 days** ([HTTP V2 API](https://amplitude.com/docs/apis/analytics/http-v2)).
@@ -136,6 +138,7 @@ See [retry safety](../guides/retry-safety.md). Vendor contract rechecked 2026-11
 
 - Use separate sync YAMLs for identify vs events (one `endpoint` per destination config).
 - Amplitude requires `user_id` or `device_id` on each row; `user_id` defaults to minimum 5 characters unless `min_id_length` is set.
-- `insert_id` is auto-generated from row content when not provided, enabling safe retries without duplicate events.
+- `insert_id` is auto-generated from stable row content when not provided; configured
+  engine metadata targets are excluded from that fallback identity.
 - For large backfills, set `rate_limit.requests_per_second` conservatively (e.g. 10) to avoid 429 throttling.
 - See [HTTP V2 API](https://amplitude.com/docs/apis/analytics/http-v2) and [Identify API](https://amplitude.com/docs/apis/analytics/identify) for payload details.
