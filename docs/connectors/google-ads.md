@@ -32,6 +32,7 @@ destination:
 | `currency_code` | string | `"USD"` | Currency for the conversion value. |
 | `developer_token_env` | string | `"GOOGLE_ADS_DEVELOPER_TOKEN"` | Env var holding the Google Ads developer token. Sent when set; no longer required (Google's Cloud-project-based access model made this header optional and server-ignored). |
 | `auth` | AuthConfig \| null | null | Typically `oauth2_client_credentials` (client id/secret + refresh token). |
+| `retry_creates` | bool | `false` | Allow replay of a conversion upload without order IDs after delivery becomes unknown. This can import conversions twice; irrelevant to fully keyed uploads. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 | `native_idempotency_key` | string \| null | null | Jinja template rendered per row (`{{ row.<field> }}`, `{{ sync_name }}`) and sent as ClickConversion's `orderId` field. Makes retries of the same row safe: Google recognizes a reused `orderId` and returns `ORDER_ID_ALREADY_IN_USE` instead of reprocessing it, which drt counts as a successful delivery. |
 | `cloud_project_id` | string \| null | null | The Google Cloud project that owns this config's OAuth client credentials — the real API quota boundary under Google's Cloud-project-based access model. Optional: when set, `drt run --threads N` on two configs sharing one project shares one rate-limit bucket even with different developer tokens or OAuth clients; when unset, the bucket falls back to `developer_token_env`'s name instead, which is only correct if configs sharing a project also share that name (see Notes). |
@@ -45,6 +46,21 @@ export GOOGLE_ADS_DEVELOPER_TOKEN="..."
 ```
 
 See [rest-api.md](rest-api.md) for the `oauth2_client_credentials` auth block (client id / secret / refresh-token env vars).
+
+## Retry safety
+
+Classification applies to the whole `uploadClickConversions` request. When every
+conversion has a non-empty `orderId` rendered by `native_idempotency_key`, the
+request is **keyed**: every attempt reuses the identical payload, and Google Ads'
+`ORDER_ID_ALREADY_IN_USE` response remains a successful deduplication in drt.
+
+Without order IDs (including a request containing any empty rendered order ID),
+the upload is a **blind create**. A lost response or retryable 5xx after send is
+not automatically replayed; each conversion receives a delivery-unknown row
+error because the first attempt may already have imported it. A 429 and proven
+pre-send connection failure remain retryable. Set `retry_creates: true` only to
+restore legacy ambiguous replay with duplicate-conversion risk. The warehouse
+ledger can reduce later cross-run replay, but cannot settle an in-flight request.
 
 ## Notes
 

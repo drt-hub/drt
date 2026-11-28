@@ -216,10 +216,10 @@ class TestErrorHandling:
             [{"id": 1}, {"id": 2}], config, _options(on_error="fail")
         )
 
-        # First item failed → stop; second item in the same response is not
-        # counted as success (we broke out).
+        # The whole request was already accepted by the cluster, so every item
+        # in its response is accounted before on_error=fail stops later batches.
         assert result.failed == 1
-        assert result.success == 0
+        assert result.success == 1
 
     def test_whole_batch_http_error_fails_all_rows(self, httpserver: HTTPServer) -> None:
         httpserver.expect_request("/_bulk", method="POST").respond_with_data(
@@ -245,6 +245,8 @@ class TestErrorHandling:
         # First batch's 403 → stop; only one row recorded.
         assert result.failed == 1
         assert result.success == 0
+        assert result.skipped == 1
+        assert result.unattempted == [1]
 
     def test_transport_error_fails_all_rows(self) -> None:
         """A non-HTTP failure (connection refused / DNS) is captured per row
@@ -267,19 +269,59 @@ class TestErrorHandling:
         # First batch errors and stops → only one row recorded.
         assert result.failed == 1
         assert result.success == 0
+        assert result.skipped == 1
+        assert result.unattempted == [1]
 
-    def test_200_without_items_counts_chunk_success(self, httpserver: HTTPServer) -> None:
-        """Defensive: a 200 from _bulk that lacks an ``items`` array (shouldn't
-        happen in practice) treats the whole chunk as success rather than
-        silently dropping rows."""
+    @pytest.mark.parametrize(
+        "body",
+        [{"took": 5, "errors": False}, {"took": 5, "errors": False, "items": []}],
+        ids=["absent", "empty"],
+    )
+    def test_200_without_item_results_fails_every_row(
+        self, httpserver: HTTPServer, body: dict[str, Any]
+    ) -> None:
+        """An unverifiable _bulk response is never credited as delivery."""
+        httpserver.expect_request("/_bulk", method="POST").respond_with_json(body)
+        config = _config(httpserver.url_for(""))
+        result = ElasticsearchDestination().load([{"id": 1}, {"id": 2}], config, _options())
+
+        assert (result.success, result.failed) == (0, 2)
+        assert all("omitted" in e.error_message for e in result.row_errors)
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            {},
+            "ok",
+            {"index": {}},
+            {"index": "ok"},
+            {"index": {"status": "201"}},
+            {"index": {"status": None}},
+            {"index": {"status": True}},
+            {"index": {"status": 301}},
+        ],
+        ids=[
+            "empty",
+            "non-mapping",
+            "no-status",
+            "non-mapping-outcome",
+            "str-status",
+            "none-status",
+            "bool-status",
+            "3xx",
+        ],
+    )
+    def test_malformed_item_result_is_a_row_failure_not_success(
+        self, httpserver: HTTPServer, item: Any
+    ) -> None:
         httpserver.expect_request("/_bulk", method="POST").respond_with_json(
-            {"took": 5, "errors": False}  # no "items"
+            {"errors": False, "items": [{"index": {"status": 201}}, item]}
         )
         config = _config(httpserver.url_for(""))
         result = ElasticsearchDestination().load([{"id": 1}, {"id": 2}], config, _options())
 
-        assert result.success == 2
-        assert result.failed == 0
+        assert (result.success, result.failed) == (1, 1)
+        assert result.row_errors[0].batch_index == 1
 
 
 # ---------------------------------------------------------------------------

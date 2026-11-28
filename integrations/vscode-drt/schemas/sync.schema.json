@@ -73,6 +73,11 @@
           "default": null,
           "title": "Primary Key"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
@@ -1381,6 +1386,11 @@
           "title": "Verify Tls",
           "type": "boolean"
         },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
+        },
         "retry": {
           "anyOf": [
             {
@@ -1869,6 +1879,11 @@
           ],
           "default": null,
           "title": "Auth"
+        },
+        "retry_creates": {
+          "default": false,
+          "title": "Retry Creates",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [

@@ -22,6 +22,7 @@ destination:
 | `base_id` | string | — | Airtable base ID (`app…`). **Required** |
 | `table_name` | string | — | Target table name (URL-encoded automatically). **Required** |
 | `primary_key` | string \| null | null | When set, records are **upserted** by matching this field (Airtable `performUpsert.fieldsToMergeOn`). Omit for **append-only**. |
+| `retry_creates` | bool | `false` | Allow replay of an append (or of an upsert batch with a row lacking a usable `primary_key` value) after a delivery-unknown failure. This can create duplicate rows; irrelevant to fully keyed upserts. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 
 ## Authentication
@@ -38,6 +39,20 @@ export AIRTABLE_TOKEN="pat..."
 - **Upsert** (`primary_key` set) — `PATCH` with `performUpsert.fieldsToMergeOn: [<primary_key>]`; rows matched on that field are updated, the rest inserted.
 
 Airtable caps batch writes at **10 records per request**, so the sync batch is automatically chunked into groups of 10 (one HTTP request each). Use `sync.rate_limit` to stay within Airtable's 5 req/s per-base limit.
+
+## Retry safety
+
+An append request is a **blind create**. If Airtable may have accepted it but the
+response is lost, or a retryable 5xx is returned after delivery, drt sends the
+request once and records every row in that chunk as delivery-unknown. Automatic
+replay could append the entire chunk twice. A 429 or a proven pre-send connection
+failure remains retryable.
+
+Setting `primary_key` changes the request to Airtable's keyed `PATCH`
+`performUpsert` operation, so normal retries keep using the identical payload. This holds only when **every** row of the 10-row request has a non-null, non-blank `primary_key` value; a request containing a row without one can create a record, so it is treated like an append (sent once; `retry_creates: true` to replay).
+Set `retry_creates: true` only to restore legacy ambiguous append replay with
+duplicate-row risk. The optional warehouse ledger helps across later runs, but
+cannot resolve whether an in-flight append committed.
 
 ## Rate limiting
 

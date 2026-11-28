@@ -1,6 +1,9 @@
 # ADR 0023 — Retrying non-idempotent creates
 
-- **Status:** Accepted 2026-11-20 (owner approved every recommendation in the final section).
+- **Status:** Accepted 2026-11-20; rollout step 5's unkeyed half is implemented
+  for Airtable append, Elasticsearch/OpenSearch auto-id bulk requests, and Google
+  Ads uploads without order IDs (2026-11-28). Their keyed request variants retain
+  normal replay; the remaining step 5 event/queue destinations are still pending.
 - **Issue:** [#1307](https://github.com/drt-hub/drt/issues/1307)
 - **Relates to:** [ADR 0005](0005-state-location-and-write-grants.md) (durable
   state and the warehouse idempotency ledger),

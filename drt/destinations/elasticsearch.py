@@ -44,6 +44,8 @@ Requires only core ``httpx``. Example sync YAML:
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -52,8 +54,17 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, ElasticsearchDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    handle_blind_delivery_unknown,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
+
+logger = logging.getLogger(__name__)
 
 
 class ElasticsearchDestination:
@@ -75,8 +86,9 @@ class ElasticsearchDestination:
         rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         result = SyncResult()
 
+        chunks = _chunks(list(enumerate(records)), sync_options.batch_size)
         with httpx.Client(timeout=30.0, verify=config.verify_tls) as client:
-            for chunk in _chunks(list(enumerate(records)), sync_options.batch_size):
+            for chunk_number, chunk in enumerate(chunks):
                 body = _build_bulk_body(chunk, config)
                 try:
                     rate_limiter.acquire()
@@ -90,7 +102,22 @@ class ElasticsearchDestination:
                         resp.raise_for_status()
                         return resp
 
-                    response = with_retry(_send, retry_config)
+                    operation, on_delivery_unknown = _replay_policy(
+                        chunk, config, retry_config.max_attempts
+                    )
+                    response = with_retry(
+                        _send,
+                        retry_config,
+                        operation=operation,
+                        on_delivery_unknown=on_delivery_unknown,
+                    )
+                except DeliveryUnknownError as e:
+                    for index, record in chunk:
+                        _add_row_error(result, index, record, e.http_status, str(e))
+                    if sync_options.on_error == "fail":
+                        _mark_unattempted(result, chunks[chunk_number + 1 :])
+                        break
+                    continue
                 except httpx.HTTPStatusError as e:
                     # Whole-batch failure (auth, 5xx after retries, bad URL).
                     for index, record in chunk:
@@ -98,18 +125,21 @@ class ElasticsearchDestination:
                             result, index, record, e.response.status_code, e.response.text[:500]
                         )
                     if sync_options.on_error == "fail":
+                        _mark_unattempted(result, chunks[chunk_number + 1 :])
                         break
                     continue
                 except Exception as e:
                     for index, record in chunk:
                         _add_row_error(result, index, record, None, str(e))
                     if sync_options.on_error == "fail":
+                        _mark_unattempted(result, chunks[chunk_number + 1 :])
                         break
                     continue
 
                 # HTTP 200 — but individual docs may still have failed.
                 stop = self._record_item_results(response, chunk, result, sync_options)
                 if stop:
+                    _mark_unattempted(result, chunks[chunk_number + 1 :])
                     break
 
         return result
@@ -127,30 +157,52 @@ class ElasticsearchDestination:
         document was rejected).
         """
         payload = response.json()
-        items = payload.get("items", [])
+        items = payload.get("items") if isinstance(payload, dict) else None
+        # A _bulk 200 always carries one result per submitted document. A missing,
+        # non-list or short array is an unverifiable response, not success: rows are
+        # failed individually (and honour on_error) instead of silently advancing state.
+        if not isinstance(items, list):
+            items = []
 
-        # Defensive: if the cluster didn't return a per-item array (shouldn't
-        # happen on a 200 from _bulk), treat the whole chunk as success.
-        if not items:
-            result.success += len(chunk)
-            return False
-
-        for (index, record), item in zip(chunk, items):
+        any_failed = False
+        for item_number, (index, record) in enumerate(chunk):
             # Each item is keyed by the action ("index" / "create"); the value
             # carries status + optional error. Read the single value robustly.
-            outcome = next(iter(item.values())) if item else {}
-            status = outcome.get("status", 0)
-            error = outcome.get("error")
-            if error is not None or status >= 400:
-                reason = ""
-                if isinstance(error, dict):
-                    reason = error.get("reason") or error.get("type") or json.dumps(error)[:300]
-                _add_row_error(result, index, record, status or None, reason or "bulk item failed")
-                if sync_options.on_error == "fail":
-                    return True
-            else:
+            if item_number >= len(items):
+                _add_row_error(
+                    result,
+                    index,
+                    record,
+                    None,
+                    "bulk response omitted this item",
+                )
+                any_failed = True
+                continue
+            item = items[item_number]
+            outcome = next(iter(item.values()), None) if isinstance(item, dict) else None
+            status = outcome.get("status") if isinstance(outcome, dict) else None
+            error = outcome.get("error") if isinstance(outcome, dict) else None
+            # Success needs positive evidence: a mapping outcome with a numeric 2xx
+            # status and no error. Anything else is an unverifiable result, never a
+            # silent success that would let state advance past an unwritten document.
+            code = status if isinstance(status, int) and not isinstance(status, bool) else None
+            if error is None and code is not None and 200 <= code < 300:
                 result.success += 1
-        return False
+                continue
+            reason = ""
+            if isinstance(error, dict):
+                reason = error.get("reason") or error.get("type") or json.dumps(error)[:300]
+            elif error is None and not (code is not None and code >= 400):
+                reason = "bulk item result was malformed or had no 2xx status"
+            _add_row_error(
+                result,
+                index,
+                record,
+                code or None,
+                reason or "bulk item failed",
+            )
+            any_failed = True
+        return any_failed and sync_options.on_error == "fail"
 
     @staticmethod
     def _auth_headers(config: ElasticsearchDestinationConfig) -> dict[str, str]:
@@ -197,6 +249,40 @@ def _chunks(
     items: list[tuple[int, dict[str, Any]]], size: int
 ) -> list[list[tuple[int, dict[str, Any]]]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _replay_policy(
+    chunk: list[tuple[int, dict[str, Any]]],
+    config: ElasticsearchDestinationConfig,
+    max_attempts: int,
+) -> tuple[OperationSafety, Callable[[Exception, int], RetryDirective] | None]:
+    """Classify the whole bulk request; one auto-id makes the batch blind."""
+    if config.id_field is not None and all(
+        record.get(config.id_field) is not None for _, record in chunk
+    ):
+        return OperationSafety.KEYED, None
+
+    def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+        return handle_blind_delivery_unknown(
+            error,
+            attempt,
+            retry_creates=config.retry_creates,
+            max_attempts=max_attempts,
+            destination="Elasticsearch/OpenSearch",
+            operation="auto-id bulk request",
+            logger=logger,
+        )
+
+    return OperationSafety.BLIND_CREATE, on_delivery_unknown
+
+
+def _mark_unattempted(
+    result: SyncResult,
+    chunks: list[list[tuple[int, dict[str, Any]]]],
+) -> None:
+    indices = [index for chunk in chunks for index, _ in chunk]
+    result.skipped += len(indices)
+    result.unattempted.extend(indices)
 
 
 def _add_row_error(

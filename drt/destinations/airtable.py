@@ -28,6 +28,7 @@ Example sync YAML:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote
@@ -38,11 +39,32 @@ from drt.config.credentials import resolve_env
 from drt.config.models import AirtableDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    handle_blind_delivery_unknown,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
 
 _BASE_URL = "https://api.airtable.com/v0"
 _MAX_BATCH = 10  # Airtable API limit
+
+logger = logging.getLogger(__name__)
+
+
+def _has_merge_key(record: dict[str, Any], primary_key: str | None) -> bool:
+    """True when *record* has a non-null, non-blank value for the merge field."""
+    if primary_key is None:
+        return False
+    value = record.get(primary_key)
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return isinstance(value, (int, float))
 
 
 class AirtableDestination:
@@ -76,8 +98,9 @@ class AirtableDestination:
         rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         result = SyncResult()
 
+        chunks = list(_chunks(list(enumerate(records)), _MAX_BATCH))
         with httpx.Client(timeout=30.0) as client:
-            for chunk in _chunks(list(enumerate(records)), _MAX_BATCH):
+            for chunk_number, chunk in enumerate(chunks):
                 body: dict[str, Any] = {"records": [{"fields": rec} for _, rec in chunk]}
                 if upsert:
                     body["performUpsert"] = {"fieldsToMergeOn": [config.primary_key]}
@@ -90,17 +113,53 @@ class AirtableDestination:
                         resp.raise_for_status()
                         return resp
 
-                    with_retry(_send, retry_config)
+                    on_delivery_unknown = None
+                    operation = OperationSafety.KEYED
+                    # An upsert is replay-safe only when every row carries a usable merge
+                    # value: a missing, None or blank key lets Airtable create a record, so
+                    # a replay could create a second one (ADR 0023).
+                    if not upsert or not all(
+                        _has_merge_key(rec, config.primary_key) for _, rec in chunk
+                    ):
+
+                        def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+                            return handle_blind_delivery_unknown(
+                                error,
+                                attempt,
+                                retry_creates=config.retry_creates,
+                                max_attempts=retry_config.max_attempts,
+                                destination="Airtable",
+                                operation="append"
+                                if not upsert
+                                else "upsert with an incomplete merge key",
+                                logger=logger,
+                            )
+
+                        operation = OperationSafety.BLIND_CREATE
+
+                    with_retry(
+                        _send,
+                        retry_config,
+                        operation=operation,
+                        on_delivery_unknown=on_delivery_unknown,
+                    )
                     result.success += len(chunk)
+                except DeliveryUnknownError as e:
+                    self._record_chunk_failure(result, chunk, e.http_status, str(e))
+                    if sync_options.on_error == "fail":
+                        _mark_unattempted(result, chunks[chunk_number + 1 :])
+                        break
                 except httpx.HTTPStatusError as e:
                     self._record_chunk_failure(
                         result, chunk, e.response.status_code, e.response.text[:500]
                     )
                     if sync_options.on_error == "fail":
+                        _mark_unattempted(result, chunks[chunk_number + 1 :])
                         break
                 except Exception as e:
                     self._record_chunk_failure(result, chunk, None, str(e))
                     if sync_options.on_error == "fail":
+                        _mark_unattempted(result, chunks[chunk_number + 1 :])
                         break
 
         return result
@@ -144,3 +203,12 @@ def _chunks(
 ) -> Iterator[list[tuple[int, dict[str, Any]]]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
+
+
+def _mark_unattempted(
+    result: SyncResult,
+    chunks: list[list[tuple[int, dict[str, Any]]]],
+) -> None:
+    indices = [index for chunk in chunks for index, _ in chunk]
+    result.skipped += len(indices)
+    result.unattempted.extend(indices)

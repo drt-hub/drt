@@ -1,10 +1,11 @@
 """Shared HTTP fault injection for non-idempotent create tests (ADR 0023).
 
-The harness is deliberately blind by default: every POST creates a new remote
-object. Keyed vendor endpoints can opt into deduplication with ``replay_mode``
-and ``dedup_key``. It records the side effect before either dropping the response
-or returning a proxy-style 5xx, reproducing the ambiguous-success window that a
-mock which raises before recording cannot exercise.
+The harness is deliberately blind by default: every configured write request
+creates a new remote object. Keyed vendor endpoints can opt into deduplication
+with ``replay_mode`` and ``dedup_key``. It records the side effect before either
+dropping the response or returning a proxy-style 5xx, reproducing the
+ambiguous-success window that a mock which raises before recording cannot
+exercise.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ class BlindCreateFaultHarness:
         self,
         create_path: str,
         *,
+        create_method: str = "POST",
         mode: FaultMode,
         fallback: FallbackHandler,
         create_response: ResponseFactory,
@@ -59,6 +61,7 @@ class BlindCreateFaultHarness:
         decode_request: RequestDecoder = _decode_json_object,
     ) -> None:
         self.create_path = create_path
+        self.create_method = create_method
         self.mode = mode
         self.replay_mode = replay_mode
         self.fallback = fallback
@@ -72,7 +75,7 @@ class BlindCreateFaultHarness:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        if request.method != "POST" or request.url.path != self.create_path:
+        if request.method != self.create_method or request.url.path != self.create_path:
             return self.fallback(request, self)
 
         self.create_attempts += 1
