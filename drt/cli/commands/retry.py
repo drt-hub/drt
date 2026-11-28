@@ -375,17 +375,25 @@ def _replay_dead_letters(
                     for e in result.row_errors
                     if 0 <= e.batch_index < len(retry_group)
                 }
-                pinpointed = len(failed_idx) == result.failed
+                pinpointed = len(failed_idx) == result.failed and result.total == len(retry_group)
                 # A destination that stops after a failure (``on_error: fail``)
-                # reports the records it never attempted as ``skipped`` without
-                # naming them, so a skip that ``skipped_no_match`` does not
-                # explain cannot be told apart from a delivered record by
-                # position. Re-queue the whole group rather than delete a record
-                # that was never sent (a re-send beats a silent drop, as for an
-                # un-attributable group below).
-                unattempted_skips = result.skipped > result.skipped_no_match
-                if unattempted_skips:
+                # can name never-attempted records through ``unattempted``. Trust
+                # that attribution only when it exactly accounts for every skip
+                # not explained by ``skipped_no_match``; otherwise retain the
+                # whole group, preserving the legacy fail-closed behavior.
+                unattempted_skip_count = result.skipped - result.skipped_no_match
+                unattempted_skips = unattempted_skip_count > 0
+                unattempted_idx = set(result.unattempted)
+                attributed_unattempted = (
+                    unattempted_skips
+                    and len(unattempted_idx) == len(result.unattempted)
+                    and len(unattempted_idx) == unattempted_skip_count
+                    and all(0 <= i < len(retry_group) for i in unattempted_idx)
+                    and unattempted_idx.isdisjoint(failed_idx)
+                )
+                if unattempted_skips and not attributed_unattempted:
                     pinpointed = False
+                    unattempted_idx.clear()
                 if isinstance(dest, StagedDestination):
                     if len(retry_group) > sync.sync.batch_size:
                         # StagedDestination's Protocol (drt/destinations/base.py)
@@ -415,7 +423,7 @@ def _replay_dead_letters(
                 err_by_idx = {e.batch_index: e for e in result.row_errors}
 
                 for i, entry in enumerate(retry_group):
-                    if pinpointed and i not in failed_idx:
+                    if pinpointed and i not in failed_idx and i not in unattempted_idx:
                         succeeded += 1
                         remove_ids.add(entry.id)
                         if i in confirmed_idx:
@@ -430,13 +438,20 @@ def _replay_dead_letters(
                             if err is not None
                             else (
                                 "not attempted: the destination stopped after a failure"
-                                if unattempted_skips
+                                if i in unattempted_idx
+                                or (unattempted_skips and not attributed_unattempted)
                                 else (result.errors[0] if result.errors else "retry failed")
                             )
                         ),
                         http_status=err.http_status if err is not None else None,
                         timestamp=entry.timestamp,  # preserve first-seen time
-                        attempts=entry.attempts + 1,
+                        # A row the destination never reached (attributed unattempted)
+                        # was not retried, so it must not look closer to "unrecoverable".
+                        attempts=(
+                            entry.attempts
+                            if pinpointed and err is None and i in unattempted_idx
+                            else entry.attempts + 1
+                        ),
                         # Preserve the *original* failure's run correlation, not
                         # this retry's (there isn't one — retry has no
                         # sync_run_id of its own) — matches metadata_columns'

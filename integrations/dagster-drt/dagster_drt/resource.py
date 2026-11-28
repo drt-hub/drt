@@ -22,6 +22,7 @@ from dagster import (
     OpExecutionContext,
 )
 
+from dagster_drt._secrets import project_secrets_scope
 from dagster_drt.event_iterator import DrtEventIterator, DrtEventType
 from dagster_drt.specs import META_KEY_PROJECT_DIR, META_KEY_SYNC_NAME
 from dagster_drt.translator import DagsterDrtTranslator, DrtTranslatorData
@@ -112,29 +113,32 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
             )
             from drt.engine.resolver import resolve_model_ref
 
-            query = resolve_model_ref(
-                row_count_input.sync_config.model,
-                row_count_input.project_path,
-                row_count_input.profile,
-                last_cursor_value=row_count_input.cursor_value_used,
-            )
-            query_tags: dict[str, str] | None = None
-            if row_count_input.query_tagging is None or row_count_input.query_tagging.enabled:
-                extra = row_count_input.query_tagging.extra if row_count_input.query_tagging else {}
-                query_tags = build_query_tags(
-                    row_count_input.sync_config.name,
-                    new_run_id(),
-                    extra,
-                )
-                query = f"{render_comment_header(query_tags)}\n{query}"
-            return sum(
-                1
-                for _ in row_count_input.source.extract(
-                    query,
+            with project_secrets_scope(row_count_input.project_path):
+                query = resolve_model_ref(
+                    row_count_input.sync_config.model,
+                    row_count_input.project_path,
                     row_count_input.profile,
-                    query_tags=query_tags,
+                    last_cursor_value=row_count_input.cursor_value_used,
                 )
-            )
+                query_tags: dict[str, str] | None = None
+                if row_count_input.query_tagging is None or row_count_input.query_tagging.enabled:
+                    extra = (
+                        row_count_input.query_tagging.extra if row_count_input.query_tagging else {}
+                    )
+                    query_tags = build_query_tags(
+                        row_count_input.sync_config.name,
+                        new_run_id(),
+                        extra,
+                    )
+                    query = f"{render_comment_header(query_tags)}\n{query}"
+                return sum(
+                    1
+                    for _ in row_count_input.source.extract(
+                        query,
+                        row_count_input.profile,
+                        query_tags=query_tags,
+                    )
+                )
 
         return DrtEventIterator(
             self._run(
@@ -169,10 +173,11 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
         effective_dry_run = dry_run if dry_run is not None else self.dry_run
         project_path = self._resolve_project_dir(context)
 
-        project = load_project(project_path)
-        profile = load_profile(project.profile)
-        source = _get_source(profile)
-        bundle = build_state_bundle(project, project_path)
+        with project_secrets_scope(project_path):
+            project = load_project(project_path)
+            profile = load_profile(project.profile)
+            source = _get_source(profile)
+            bundle = build_state_bundle(project, project_path)
         state_mgr = bundle.state
 
         # Build a mapping from sync_name -> SyncConfig.
@@ -218,8 +223,9 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
 
         for key, sync_config in selected_syncs:
             sync_name = sync_config.name
-            destination = _get_destination(sync_config)
-            wm_storage = _get_watermark_storage(sync_config, project_path)
+            with project_secrets_scope(project_path):
+                destination = _get_destination(sync_config)
+                wm_storage = _get_watermark_storage(sync_config, project_path)
 
             # The engine only persists state/watermark/DLQ through an
             # observer (AGENTS.md: "state persistence... MUST flow through
@@ -237,29 +243,30 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                     DlqObserver(bundle.dlq, max_records=sync_config.sync.dlq.max_records)
                 )
 
-            result = run_sync(
-                sync_config,
-                source,
-                destination,
-                profile,
-                project_path,
-                dry_run=effective_dry_run,
-                state_manager=state_mgr,
-                watermark_storage=wm_storage,
-                observer=CompositeObserver(observers),
-                history_manager=bundle.history if project.history.enabled else None,
-                history_retention_days=project.history.retention_days,
-                query_tagging=project.query_tagging,
-                # #1118: dagster-drt previously never passed these two
-                # through, so a project with state.idempotency: true /
-                # state.audit_trail.enabled: true silently got neither
-                # feature for syncs run through this resource — same class
-                # of gap already fixed for history_manager above.
-                idempotency_ledger=bundle.ledger,
-                audit_trail=bundle.audit_trail,
-                audit_fields=project.state.audit_trail.fields,
-                audit_retain_days=project.state.audit_trail.retain_days or 30,
-            )
+            with project_secrets_scope(project_path):
+                result = run_sync(
+                    sync_config,
+                    source,
+                    destination,
+                    profile,
+                    project_path,
+                    dry_run=effective_dry_run,
+                    state_manager=state_mgr,
+                    watermark_storage=wm_storage,
+                    observer=CompositeObserver(observers),
+                    history_manager=bundle.history if project.history.enabled else None,
+                    history_retention_days=project.history.retention_days,
+                    query_tagging=project.query_tagging,
+                    # #1118: dagster-drt previously never passed these two
+                    # through, so a project with state.idempotency: true /
+                    # state.audit_trail.enabled: true silently got neither
+                    # feature for syncs run through this resource — same class
+                    # of gap already fixed for history_manager above.
+                    idempotency_ledger=bundle.ledger,
+                    audit_trail=bundle.audit_trail,
+                    audit_fields=project.state.audit_trail.fields,
+                    audit_retain_days=project.state.audit_trail.retain_days or 30,
+                )
 
             context.log.info(
                 f"drt sync '{sync_name}': "

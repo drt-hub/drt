@@ -102,6 +102,12 @@ class SyncResult:
     # ordinary runs so existing result serialization remains unchanged.
     backfill: dict[str, Any] | None = None
     windows: list[dict[str, Any]] = field(default_factory=list)
+    # Batch-local indices of rows counted in ``skipped`` that the destination
+    # did not attempt because ``on_error: fail`` stopped processing early.
+    # Empty by default for backwards compatibility; destinations that can
+    # attribute these skips let DLQ replay distinguish them from confirmed
+    # successes without changing the frozen Destination Protocol (ADR 0007).
+    unattempted: list[int] = field(default_factory=list)
     # Internal signal used by the sequential window driver.  It distinguishes
     # a fully consumed stream from an on_error=fail/contract/interruption break.
     _stream_consumed: bool = field(default=True, init=False, repr=False, compare=False)

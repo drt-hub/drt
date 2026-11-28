@@ -392,6 +392,8 @@ class ZendeskDestinationConfig(DescribableConfig):
     object: Literal["user", "organization"] = "user"
     id_field: str | None = None
     custom_fields_template: str | None = None
+    # Rows without an identity (id / external_id / user email) are blind creates (ADR 0023).
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 

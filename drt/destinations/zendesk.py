@@ -31,7 +31,8 @@ Example sync YAML — organizations:
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+import logging
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import httpx
@@ -40,9 +41,18 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, RetryConfig, SyncOptions, ZendeskDestinationConfig
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, RateLimiterBackend, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    handle_blind_delivery_unknown,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
+
+logger = logging.getLogger(__name__)
 
 _ZENDESK_API_TEMPLATE = "https://{subdomain}.zendesk.com/api/v2"
 _ZENDESK_MAX_USER_BATCH_SIZE = 100
@@ -134,11 +144,21 @@ class ZendeskDestination:
             except Exception as exc:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - 1
+                    result.unattempted.extend(i for i in range(len(records)) if i != index)
                     return
 
         url = f"{base_url}/users/create_or_update_many.json"
-        for chunk in _chunks(indexed_payloads, _ZENDESK_MAX_USER_BATCH_SIZE):
+        for chunk_start, chunk in enumerate(
+            _chunks(indexed_payloads, _ZENDESK_MAX_USER_BATCH_SIZE)
+        ):
             users = [payload for _, _, payload in chunk]
+            remaining = len(indexed_payloads) - (
+                chunk_start * _ZENDESK_MAX_USER_BATCH_SIZE + len(chunk)
+            )
+            remaining_payloads = indexed_payloads[
+                chunk_start * _ZENDESK_MAX_USER_BATCH_SIZE + len(chunk) :
+            ]
 
             def do_post(_users: list[dict[str, Any]] = users) -> httpx.Response:
                 response = client.post(
@@ -150,10 +170,30 @@ class ZendeskDestination:
                 response.raise_for_status()
                 return response
 
+            operation, on_unknown = _replay_policy(
+                users,
+                _has_user_identity,
+                config,
+                retry_config,
+                "user create-or-update",
+                "email or external_id",
+            )
             try:
                 rate_limiter.acquire()
-                with_retry(do_post, retry_config)
+                with_retry(
+                    do_post,
+                    retry_config,
+                    operation=operation,
+                    on_delivery_unknown=on_unknown,
+                )
                 result.success += len(chunk)
+            except DeliveryUnknownError as exc:
+                for index, record, _ in chunk:
+                    _add_row_error(result, index, record, exc.http_status, str(exc))
+                if sync_options.on_error == "fail":
+                    result.skipped += remaining
+                    result.unattempted.extend(index for index, _, _ in remaining_payloads)
+                    break
             except httpx.HTTPStatusError as exc:
                 for index, record, _ in chunk:
                     _add_row_error(
@@ -164,11 +204,15 @@ class ZendeskDestination:
                         exc.response.text[:500],
                     )
                 if sync_options.on_error == "fail":
+                    result.skipped += remaining
+                    result.unattempted.extend(index for index, _, _ in remaining_payloads)
                     break
             except Exception as exc:
                 for index, record, _ in chunk:
                     _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += remaining
+                    result.unattempted.extend(index for index, _, _ in remaining_payloads)
                     break
 
     def _load_organizations(
@@ -196,6 +240,8 @@ class ZendeskDestination:
             except Exception as exc:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - index - 1
+                    result.unattempted.extend(range(index + 1, len(records)))
                     break
                 continue
 
@@ -209,10 +255,29 @@ class ZendeskDestination:
                 response.raise_for_status()
                 return response
 
+            operation, on_unknown = _replay_policy(
+                [organization],
+                _has_organization_identity,
+                config,
+                retry_config,
+                "organization create-or-update",
+                "id or external_id",
+            )
             try:
                 rate_limiter.acquire()
-                with_retry(do_post, retry_config)
+                with_retry(
+                    do_post,
+                    retry_config,
+                    operation=operation,
+                    on_delivery_unknown=on_unknown,
+                )
                 result.success += 1
+            except DeliveryUnknownError as exc:
+                _add_row_error(result, index, record, exc.http_status, str(exc))
+                if sync_options.on_error == "fail":
+                    result.skipped += len(records) - index - 1
+                    result.unattempted.extend(range(index + 1, len(records)))
+                    break
             except httpx.HTTPStatusError as exc:
                 _add_row_error(
                     result,
@@ -222,10 +287,14 @@ class ZendeskDestination:
                     exc.response.text[:500],
                 )
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - index - 1
+                    result.unattempted.extend(range(index + 1, len(records)))
                     break
             except Exception as exc:
                 _add_row_error(result, index, record, None, str(exc))
                 if sync_options.on_error == "fail":
+                    result.skipped += len(records) - index - 1
+                    result.unattempted.extend(range(index + 1, len(records)))
                     break
 
 
@@ -268,7 +337,7 @@ def _build_zendesk_object(
     if config.id_field:
         id_value = record.get(config.id_field)
         should_copy_to_id = (
-            _has_value(id_value)
+            _is_zendesk_id(id_value)
             and "id" not in payload
             and config.id_field not in _CANONICAL_ID_FIELDS
         )
@@ -302,8 +371,57 @@ def _render_custom_fields(
     return data
 
 
-def _has_value(value: Any) -> bool:
-    return value is not None and str(value).strip() != ""
+def _replay_policy(
+    payloads: list[dict[str, Any]],
+    has_identity: Callable[[dict[str, Any]], bool],
+    config: ZendeskDestinationConfig,
+    retry_config: RetryConfig,
+    operation_label: str,
+    identity_label: str,
+) -> tuple[OperationSafety, Callable[[Exception, int], RetryDirective] | None]:
+    """Keyed when every payload carries an identity Zendesk matches on, else blind."""
+    if all(has_identity(payload) for payload in payloads):
+        return OperationSafety.KEYED, None
+
+    def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+        return handle_blind_delivery_unknown(
+            error,
+            attempt,
+            retry_creates=config.retry_creates,
+            max_attempts=retry_config.max_attempts,
+            destination="Zendesk",
+            operation=f"{operation_label} without valid {identity_label}",
+            logger=logger,
+        )
+
+    return OperationSafety.BLIND_CREATE, on_delivery_unknown
+
+
+def _has_non_blank_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_zendesk_id(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value > 0
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped.isdecimal() and int(stripped) > 0
+    return False
+
+
+def _has_user_identity(payload: dict[str, Any]) -> bool:
+    # create_or_update_many documents only email and external_id as match keys.
+    return _has_non_blank_string(payload.get("email")) or _has_non_blank_string(
+        payload.get("external_id")
+    )
+
+
+def _has_organization_identity(payload: dict[str, Any]) -> bool:
+    # create_or_update documents id and external_id, but explicitly not name.
+    return _is_zendesk_id(payload.get("id")) or _has_non_blank_string(payload.get("external_id"))
 
 
 def _chunks(

@@ -75,6 +75,20 @@ drt does **not** retry on:
 
 If all `max_attempts` are exhausted, the original exception propagates and the row is recorded as a failure (subject to `sync.on_error`).
 
+## DLQ replay after fail-fast writes
+
+`drt retry` removes a dead letter only when the destination result can attribute
+the record as successful. A destination that stops partway through a batch with
+`sync.on_error: fail` may report later rows as skipped and identify their batch
+indices as unattempted. In that case, replay retains only the failed and
+unattempted rows and removes earlier confirmed successes.
+
+For compatibility with destinations that report only a scalar skipped count,
+an unexplained skip keeps the whole replay group queued. This conservative
+fallback can resend a confirmed success on a later retry, but it will not
+silently delete a row that was never sent. Zendesk users and organizations
+provide per-record unattempted attribution.
+
 ## Backoff timing
 
 For `initial_backoff: 1.0`, `backoff_multiplier: 2.0`, `max_backoff: 60.0`:
