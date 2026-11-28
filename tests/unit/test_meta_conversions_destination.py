@@ -559,7 +559,7 @@ def test_exactly_one_event_name_source_is_required(values: dict[str, str | None]
         _config(**values)
 
 
-def test_event_id_field_is_required_for_retry_deduplication() -> None:
+def test_event_id_field_is_required_for_pixel_server_deduplication() -> None:
     with pytest.raises(ValidationError, match="event_id_field is required"):
         _config(event_id_field=None)
 

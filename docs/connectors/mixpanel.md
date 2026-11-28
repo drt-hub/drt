@@ -72,12 +72,41 @@ export MIXPANEL_SA_USERNAME="your-service-account.mp-service-account"
 export MIXPANEL_SA_SECRET="your-service-account-secret"
 ```
 
+## Retry safety
+
+- **`endpoint: import_events` is keyed only when the final deduplication tuple is
+  proven usable.** Mixpanel deduplicates on event name, `distinct_id`, `time` and
+  `$insert_id` together
+  ([event deduplication](https://docs.mixpanel.com/reference/event-deduplication)).
+  drt classifies a batch as keyed only when every final event has non-empty string
+  identity components, an integer timestamp that is not in the future (Mixpanel may
+  rewrite future timestamps), and a non-empty string `$insert_id`. After a lost
+  response drt re-sends the *same* batch. A source column or `properties_template`
+  may overwrite the generated properties; if the resulting tuple cannot be proven,
+  the batch is left unclassified without changing its retry behavior or local
+  validation.
+- **Set `time_field` if you rely on deduplication across runs or DLQ replays.**
+  Without it the event time is the time drt built the payload, so a later run builds
+  a different `time` and Mixpanel treats it as a different event. Within one run's
+  retry the payload is reused, so the retry is safe either way.
+- **`endpoint: people_set` is idempotent:** `$set` writes the same property values on
+  a replay.
+
+See [retry safety](../guides/retry-safety.md). Vendor contract rechecked 2026-11-26.
+
 ## Notes
 
 - Both endpoints batch up to **2000 records** per request.
-- For `import_events`, each event gets a deterministic `$insert_id`
-  (derived from the row contents when `insert_id_field` is unset), so
-  re-running the same sync does **not** double-count events in Mixpanel.
+- For `import_events`, each event gets a deterministic `$insert_id`. When
+  `insert_id_field` is unset, the hash uses the row and event name but excludes the
+  configured `metadata_columns` targets (`synced_at`, `run_id`, and `sync_name`), so
+  engine bookkeeping does not change the derived identity across runs. Deduplicating
+  a later **run** still needs a stable `time` (set `time_field`), because Mixpanel keys
+  on event name, `distinct_id`, `time` and `$insert_id` together.
+- Source columns or `properties_template` can overwrite `distinct_id`, `time`, or the
+  derived `$insert_id`. Those values are sent exactly as before (Mixpanel validates
+  them), but a batch with an unproven final deduplication tuple is not classified as
+  keyed and keeps the previous retry behavior.
 - EU data residency: set `region: eu` to route to
   `api-eu.mixpanel.com`.
 

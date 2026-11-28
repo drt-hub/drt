@@ -25,6 +25,19 @@ DedupKey = Callable[[dict[str, Any]], object]
 RequestDecoder = Callable[[httpx.Request], dict[str, Any]]
 
 
+def mixpanel_event_dedup_key(payload: dict[str, Any]) -> object:
+    """Model Mixpanel's full event deduplication tuple for each imported event."""
+    return tuple(
+        (
+            item["event"],
+            item["properties"]["distinct_id"],
+            item["properties"]["time"],
+            item["properties"]["$insert_id"],
+        )
+        for item in payload["items"]
+    )
+
+
 def _decode_json_object(request: httpx.Request) -> dict[str, Any]:
     decoded = json.loads(request.content)
     if not isinstance(decoded, dict):

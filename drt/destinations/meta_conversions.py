@@ -11,7 +11,7 @@ Example::
       pixel_id: "123456789012345"
       event_name: Purchase
       event_time_field: occurred_at  # Required — the row's real transaction time.
-      event_id_field: event_id  # Required so retries can be deduplicated.
+      event_id_field: event_id  # Required; pair with the browser Pixel event id.
       event_source_url_field: page_url  # Required for website events.
       client_user_agent_field: user_agent  # Required for website events.
       email_field: email        # At least one customer identifier is required.
@@ -102,6 +102,10 @@ class MetaConversionsDestination:
                     return response
 
                 try:
+                    # Not classified under ADR 0023: Meta documents event_id + event_name
+                    # deduplication between the browser Pixel and the server API, not between
+                    # two server submissions, so a replay is not proven safe. Behaviour is
+                    # unchanged until that is confirmed.
                     response = with_retry(
                         _post,
                         retry_config,
@@ -180,7 +184,8 @@ def _build_event(
             f"Row event id field {event_id_field!r} is NaN or infinite — a common "
             "missing-value sentinel in tabular data, not a usable id. Distinct rows "
             "with a NaN id would all stringify to the same 'nan' event_id, and Meta "
-            "deduplicates matching event name + event_id pairs, silently discarding "
+            "deduplicates matching event name + event_id pairs (documented between "
+            "the browser Pixel and the server API), which could silently discard "
             "all but one."
         )
     event_id = str(event_id)
