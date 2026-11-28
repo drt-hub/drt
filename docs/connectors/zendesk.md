@@ -31,8 +31,9 @@ destination:
 | `api_token` | string \| null | null | Zendesk API token |
 | `api_token_env` | string \| null | null | Env var containing the API token |
 | `object` | `user\|organization` | `user` | Zendesk object type to upsert |
-| `id_field` | string \| null | null | Source row field containing a Zendesk `id` |
+| `id_field` | string \| null | null | Source row field containing a positive numeric Zendesk `id`; copied to `id` |
 | `custom_fields_template` | string \| null | null | Jinja2 template that renders a JSON object of custom fields |
+| `retry_creates` | bool | `false` | `true` restores replay of a create-or-update that carries no identity; see [Retry safety](#retry-safety) |
 | `retry` | RetryConfig \| null | null | Destination-level retry override |
 
 ## Authentication
@@ -72,7 +73,10 @@ destination:
   id_field: zendesk_organization_id
 ```
 
-The source-only `zendesk_organization_id` column is copied to Zendesk `id` and removed from the outgoing payload.
+The source-only `zendesk_organization_id` column is copied to Zendesk `id` and
+removed from the outgoing payload. Zendesk documents `id` matching for the
+organization endpoint, but not for the bulk user endpoint, so a user row needs
+`email` or `external_id` for safe replay even when `id_field` is configured.
 
 **Custom user fields:**
 
@@ -91,6 +95,28 @@ destination:
 ```
 
 For users, custom fields are attached as `user_fields`. For organizations, they are attached as `organization_fields`.
+
+## Retry safety
+
+Zendesk's [Create Or Update Many Users](https://developer.zendesk.com/api-reference/ticketing/users/users/#create-or-update-many-users)
+endpoint documents only `email` and `external_id` as match keys. drt therefore
+treats a user row as keyed only when at least one is a non-blank string; `id`,
+including an `id_field` copied to `id`, is not enough. Zendesk's
+[Create Or Update Organization](https://developer.zendesk.com/api-reference/ticketing/organizations/organizations/#create-or-update-organization)
+endpoint documents `id` or `external_id` matching and explicitly excludes `name`.
+For organizations, drt accepts a positive integer or decimal string `id`, or a
+non-blank string `external_id`.
+
+A row without a valid endpoint-specific identity is a **blind create**: after a
+dropped response or a retryable 5xx, drt returns a delivery-unknown `RowError`
+after one request. Values such as `0`, `false`, whitespace, null, objects and
+arrays do not establish identity. For users, one unidentified row makes its whole
+100-row batch blind. HTTP 429 and proven pre-send connection failures stay
+retryable.
+
+`retry_creates: true` restores the legacy replay and logs a duplicate-risk
+warning. See [retry safety](../guides/retry-safety.md). Vendor contract rechecked
+2026-11-27.
 
 ## Rate limiting
 
@@ -114,6 +140,7 @@ destination:
 ## Notes
 
 - User upserts use Zendesk's `users/create_or_update_many` endpoint in batches of 100.
+- **Known limitation:** `users/create_or_update_many` is an asynchronous bulk job. Zendesk acknowledges the request with a job status, and drt counts the batch as successful when that request is accepted. It does not poll the job, so a row Zendesk later rejects inside the job is not reported as a failed row. Verify the result in Zendesk if you need row-level confirmation. Organization upserts are synchronous and are not affected.
 - Organization upserts use Zendesk's `organizations/create_or_update` endpoint per row.
 - drt caps the default request rate at 11 requests per second, below Zendesk's common 700 requests/minute account limit.
 - `custom_fields_template` must render a JSON object.
