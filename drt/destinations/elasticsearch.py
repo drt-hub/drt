@@ -157,13 +157,12 @@ class ElasticsearchDestination:
         document was rejected).
         """
         payload = response.json()
-        items = payload.get("items", [])
-
-        # Defensive: if the cluster didn't return a per-item array (shouldn't
-        # happen on a 200 from _bulk), treat the whole chunk as success.
-        if not items:
-            result.success += len(chunk)
-            return False
+        items = payload.get("items") if isinstance(payload, dict) else None
+        # A _bulk 200 always carries one result per submitted document. A missing,
+        # non-list or short array is an unverifiable response, not success: rows are
+        # failed individually (and honour on_error) instead of silently advancing state.
+        if not isinstance(items, list):
+            items = []
 
         any_failed = False
         for item_number, (index, record) in enumerate(chunk):

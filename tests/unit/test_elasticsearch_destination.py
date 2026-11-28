@@ -272,18 +272,21 @@ class TestErrorHandling:
         assert result.skipped == 1
         assert result.unattempted == [1]
 
-    def test_200_without_items_counts_chunk_success(self, httpserver: HTTPServer) -> None:
-        """Defensive: a 200 from _bulk that lacks an ``items`` array (shouldn't
-        happen in practice) treats the whole chunk as success rather than
-        silently dropping rows."""
-        httpserver.expect_request("/_bulk", method="POST").respond_with_json(
-            {"took": 5, "errors": False}  # no "items"
-        )
+    @pytest.mark.parametrize(
+        "body",
+        [{"took": 5, "errors": False}, {"took": 5, "errors": False, "items": []}],
+        ids=["absent", "empty"],
+    )
+    def test_200_without_item_results_fails_every_row(
+        self, httpserver: HTTPServer, body: dict[str, Any]
+    ) -> None:
+        """An unverifiable _bulk response is never credited as delivery."""
+        httpserver.expect_request("/_bulk", method="POST").respond_with_json(body)
         config = _config(httpserver.url_for(""))
         result = ElasticsearchDestination().load([{"id": 1}, {"id": 2}], config, _options())
 
-        assert result.success == 2
-        assert result.failed == 0
+        assert (result.success, result.failed) == (0, 2)
+        assert all("omitted" in e.error_message for e in result.row_errors)
 
 
 # ---------------------------------------------------------------------------
