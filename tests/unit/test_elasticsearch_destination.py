@@ -288,6 +288,41 @@ class TestErrorHandling:
         assert (result.success, result.failed) == (0, 2)
         assert all("omitted" in e.error_message for e in result.row_errors)
 
+    @pytest.mark.parametrize(
+        "item",
+        [
+            {},
+            "ok",
+            {"index": {}},
+            {"index": "ok"},
+            {"index": {"status": "201"}},
+            {"index": {"status": None}},
+            {"index": {"status": True}},
+            {"index": {"status": 301}},
+        ],
+        ids=[
+            "empty",
+            "non-mapping",
+            "no-status",
+            "non-mapping-outcome",
+            "str-status",
+            "none-status",
+            "bool-status",
+            "3xx",
+        ],
+    )
+    def test_malformed_item_result_is_a_row_failure_not_success(
+        self, httpserver: HTTPServer, item: Any
+    ) -> None:
+        httpserver.expect_request("/_bulk", method="POST").respond_with_json(
+            {"errors": False, "items": [{"index": {"status": 201}}, item]}
+        )
+        config = _config(httpserver.url_for(""))
+        result = ElasticsearchDestination().load([{"id": 1}, {"id": 2}], config, _options())
+
+        assert (result.success, result.failed) == (1, 1)
+        assert result.row_errors[0].batch_index == 1
+
 
 # ---------------------------------------------------------------------------
 # Batching

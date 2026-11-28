@@ -179,17 +179,29 @@ class ElasticsearchDestination:
                 any_failed = True
                 continue
             item = items[item_number]
-            outcome = next(iter(item.values())) if item else {}
-            status = outcome.get("status", 0)
-            error = outcome.get("error")
-            if error is not None or status >= 400:
-                reason = ""
-                if isinstance(error, dict):
-                    reason = error.get("reason") or error.get("type") or json.dumps(error)[:300]
-                _add_row_error(result, index, record, status or None, reason or "bulk item failed")
-                any_failed = True
-            else:
+            outcome = next(iter(item.values()), None) if isinstance(item, dict) else None
+            status = outcome.get("status") if isinstance(outcome, dict) else None
+            error = outcome.get("error") if isinstance(outcome, dict) else None
+            # Success needs positive evidence: a mapping outcome with a numeric 2xx
+            # status and no error. Anything else is an unverifiable result, never a
+            # silent success that would let state advance past an unwritten document.
+            code = status if isinstance(status, int) and not isinstance(status, bool) else None
+            if error is None and code is not None and 200 <= code < 300:
                 result.success += 1
+                continue
+            reason = ""
+            if isinstance(error, dict):
+                reason = error.get("reason") or error.get("type") or json.dumps(error)[:300]
+            elif error is None and not (code is not None and code >= 400):
+                reason = "bulk item result was malformed or had no 2xx status"
+            _add_row_error(
+                result,
+                index,
+                record,
+                code or None,
+                reason or "bulk item failed",
+            )
+            any_failed = True
         return any_failed and sync_options.on_error == "fail"
 
     @staticmethod
