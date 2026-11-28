@@ -59,7 +59,7 @@ from drt.config.models import (
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, RateLimiterBackend, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import OperationSafety, resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
@@ -135,7 +135,13 @@ class MixpanelDestination:
                     result,
                     sync_options,
                     rate_limiter,
-                    lambda: _post_json(client, url, payloads, retry_config),
+                    lambda: _post_json(
+                        client,
+                        url,
+                        payloads,
+                        retry_config,
+                        operation=OperationSafety.IDEMPOTENT,
+                    ),
                 )
 
     # -- /import -------------------------------------------------------------
@@ -162,7 +168,11 @@ class MixpanelDestination:
         params = {"project_id": str(config.project_id)}
 
         indexed = self._build_payloads(
-            records, config, result, sync_options, lambda r: _build_event(r, config)
+            records,
+            config,
+            result,
+            sync_options,
+            lambda r: _build_event(r, config, sync_options),
         )
         if not indexed:
             return
@@ -176,7 +186,17 @@ class MixpanelDestination:
                     sync_options,
                     rate_limiter,
                     lambda: _post_json(
-                        client, url, payloads, retry_config, auth=auth, params=params
+                        client,
+                        url,
+                        payloads,
+                        retry_config,
+                        auth=auth,
+                        params=params,
+                        operation=(
+                            OperationSafety.KEYED
+                            if all(_event_is_keyed(p) for p in payloads)
+                            else None
+                        ),
                     ),
                 )
 
@@ -249,7 +269,11 @@ def _build_profile(
     }
 
 
-def _build_event(record: dict[str, Any], config: MixpanelDestinationConfig) -> dict[str, Any]:
+def _build_event(
+    record: dict[str, Any],
+    config: MixpanelDestinationConfig,
+    sync_options: SyncOptions,
+) -> dict[str, Any]:
     distinct_id = record.get(config.distinct_id_field)
     if not _has_value(distinct_id):
         raise ValueError(f"Row must include distinct_id field {config.distinct_id_field!r}.")
@@ -269,13 +293,43 @@ def _build_event(record: dict[str, Any], config: MixpanelDestinationConfig) -> d
     properties: dict[str, Any] = {
         "distinct_id": str(distinct_id),
         "time": event_time,
-        "$insert_id": _resolve_insert_id(record, config, str(event_name)),
+        "$insert_id": _resolve_insert_id(record, config, sync_options, str(event_name)),
     }
     properties.update(_row_properties(record, config, reserved=frozenset()))
     if config.properties_template:
         properties.update(_render_properties_template(config.properties_template, record))
 
     return {"event": str(event_name), "properties": properties}
+
+
+def _event_is_keyed(event: dict[str, Any]) -> bool:
+    """Whether the final event carries a stable Mixpanel deduplication tuple.
+
+    Mixpanel keys on event name, ``distinct_id``, ``time`` and ``$insert_id``. Source
+    columns and ``properties_template`` may overwrite the latter three after drt builds
+    them. The payload is still sent unchanged for vendor-side validation, but drt calls
+    the operation KEYED only when every final component is usable and the timestamp is
+    not in the future (which Mixpanel may rewrite).
+    """
+    properties = event.get("properties")
+    if not isinstance(properties, dict):
+        return False
+
+    event_name = event.get("event")
+    distinct_id = properties.get("distinct_id")
+    insert_id = properties.get("$insert_id")
+    event_time = properties.get("time")
+    return (
+        isinstance(event_name, str)
+        and bool(event_name.strip())
+        and isinstance(distinct_id, str)
+        and bool(distinct_id.strip())
+        and isinstance(insert_id, str)
+        and bool(insert_id.strip())
+        and isinstance(event_time, int)
+        and not isinstance(event_time, bool)
+        and event_time <= int(time.time())
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -303,15 +357,32 @@ def _has_value(value: Any) -> bool:
 
 
 def _resolve_insert_id(
-    record: dict[str, Any], config: MixpanelDestinationConfig, event_name: str
+    record: dict[str, Any],
+    config: MixpanelDestinationConfig,
+    sync_options: SyncOptions,
+    event_name: str,
 ) -> str:
     if config.insert_id_field:
         value = record.get(config.insert_id_field)
         if _has_value(value):
             return str(value)
-    # Deterministic so a re-run of the same sync does not double-count events.
-    canonical = json.dumps(record, sort_keys=True, default=str)
+    # Engine metadata changes on each run and is not part of the source event's identity.
+    # Excluding configured metadata targets recovers the stable, pre-metadata row identity.
+    stable_record = _without_metadata_columns(record, sync_options)
+    canonical = json.dumps(stable_record, sort_keys=True, default=str)
     return hashlib.sha256(f"{canonical}:{event_name}".encode()).hexdigest()[:32]
+
+
+def _without_metadata_columns(record: dict[str, Any], sync_options: SyncOptions) -> dict[str, Any]:
+    metadata = sync_options.metadata_columns
+    if metadata is None:
+        return record
+    excluded = {
+        column
+        for column in (metadata.synced_at, metadata.run_id, metadata.sync_name)
+        if column is not None
+    }
+    return {key: value for key, value in record.items() if key not in excluded}
 
 
 def _render_properties_template(template: str, record: dict[str, Any]) -> dict[str, Any]:
@@ -329,7 +400,18 @@ def _post_json(
     retry_config: RetryConfig,
     auth: tuple[str, str] | None = None,
     params: dict[str, str] | None = None,
+    *,
+    operation: OperationSafety | None = None,
 ) -> None:
+    """POST one batch. Callers state why replaying it is safe (ADR 0023).
+
+    ``/import`` events are KEYED only when every event's final event name,
+    ``distinct_id``, ``time`` and ``$insert_id`` form a usable tuple and the timestamp is
+    not one Mixpanel may rewrite. The same payload object is re-sent on retry. Otherwise
+    the batch keeps the legacy, unclassified behaviour (``operation=None``). ``/engage``
+    profile ``$set`` is IDEMPOTENT: replaying it writes the same values.
+    """
+
     def do_post() -> httpx.Response:
         kwargs: dict[str, Any] = {"json": payload}
         if auth is not None:
@@ -340,7 +422,7 @@ def _post_json(
         response.raise_for_status()
         return response
 
-    with_retry(do_post, retry_config)
+    with_retry(do_post, retry_config, operation=operation)
 
 
 def _chunks(

@@ -1010,7 +1010,10 @@ class MetaConversionsDestinationConfig(BaseModel):
     @model_validator(mode="after")
     def _check_event_id_field(self) -> MetaConversionsDestinationConfig:
         if self.event_id_field is None:
-            raise ValueError("event_id_field is required to deduplicate retried conversions.")
+            raise ValueError(
+                "event_id_field is required: Meta deduplicates events by event_name + event_id "
+                "(documented between the browser Pixel and the server API)."
+            )
         return self
 
     @field_validator("event_time_field", mode="before")

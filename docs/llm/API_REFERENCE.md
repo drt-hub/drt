@@ -1641,7 +1641,7 @@ destination:
   event_name: Purchase                  # exactly one of fixed/field name
   # event_name_field: event_name
   event_time_field: occurred_at         # required: Unix-seconds row field, real transaction time
-  event_id_field: event_id              # required: stable retry dedup id
+  event_id_field: event_id              # required: pair with the browser Pixel event id (Pixel<->server dedup; server<->server retry dedup is not documented)
   event_source_url_field: page_url
   email_field: email                    # normalized + SHA-256 → user_data.em[]
   phone_field: phone                    # digits only + SHA-256 → user_data.ph[]
