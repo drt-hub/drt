@@ -13,6 +13,8 @@ import pytest
 from typer.testing import CliRunner
 
 from drt.cli.main import app
+from drt.state.manager import StateManager, SyncState
+from tests.unit._state_cli_helpers import write_state_baseline
 
 runner = CliRunner()
 
@@ -39,6 +41,11 @@ _SYNC = textwrap.dedent(
 )
 
 
+_PLAIN_SYNC = _SYNC.replace("name: b", "name: p").replace(
+    "  backfill:\n    window: 10\n    start: 0\n    end: 100\n", ""
+)
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Never read or write the developer's real ~/.drt: point HOME at the sandbox.
@@ -50,6 +57,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (tmp_path / "syncs").mkdir()
     (tmp_path / "drt_project.yml").write_text('name: p\nversion: "0.1"\nprofile: dev\n')
     (tmp_path / "syncs" / "b.yml").write_text(_SYNC)
+    (tmp_path / "syncs" / "p.yml").write_text(_PLAIN_SYNC)
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -72,8 +80,148 @@ def test_flags_that_would_fake_window_completion_are_refused(
     assert "b" in result.output
 
 
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (["--backfill-start", "5", "--cursor-value", "3"], "--cursor-value"),
+        (["--backfill-end", "50", "--full-refresh"], "--full-refresh"),
+        (["--backfill-start", "5", "--limit", "5"], "--limit"),
+    ],
+)
+def test_range_flags_are_exclusive_with_the_other_overrides(
+    project: Path, flags: list[str], message: str
+) -> None:
+    result = runner.invoke(app, ["run", "--select", "b", *flags])
+
+    text = " ".join(result.output.split())
+    assert result.exit_code == 1
+    assert message in text
+    # Either the range-flag exclusion or the older per-flag refusal fires first; both
+    # stop the run before anything is extracted.
+    assert "mutually exclusive" in text or "not allowed with sync.backfill" in text
+
+
+@pytest.mark.parametrize(
+    "other",
+    [["--cursor-value", "3"], ["--full-refresh"], ["--limit", "5"]],
+    ids=["cursor-value", "full-refresh", "limit"],
+)
+def test_range_flags_exclusion_applies_even_when_the_sync_has_no_backfill(
+    project: Path, other: list[str]
+) -> None:
+    """The ordinary overrides stay valid for a plain sync, so the combination must still fail."""
+    result = runner.invoke(app, ["run", "--select", "p", "--backfill-start", "5", *other])
+
+    assert result.exit_code == 1
+    assert "mutually exclusive" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [["--select", "p"], ["--select", "b", "--select", "p"], []],
+    ids=["plain-sync-only", "backfill-plus-plain", "all-syncs"],
+)
+def test_range_flags_need_exactly_one_selected_backfill_sync(
+    project: Path, selection: list[str]
+) -> None:
+    result = runner.invoke(app, ["run", *selection, "--backfill-start", "5"])
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (["--backfill-start", "yesterday"], "must be an integer"),
+        (["--backfill-end", "2026-01-01T00:00:00Z"], "must be an integer"),
+        (["--backfill-start", "50", "--backfill-end", "50"], "must be before"),
+        (["--backfill-start", "60", "--backfill-end", "10"], "must be before"),
+    ],
+)
+def test_malformed_range_values_are_refused_before_any_extraction(
+    project: Path, flags: list[str], message: str
+) -> None:
+    result = runner.invoke(app, ["run", "--select", "b", *flags])
+
+    assert result.exit_code == 1
+    assert message in " ".join(result.output.split())
+
+
+def test_cursor_value_message_points_at_the_new_flags(project: Path) -> None:
+    result = runner.invoke(app, ["run", "--select", "b", "--cursor-value", "3"])
+
+    assert result.exit_code == 1
+    assert "--backfill-start" in " ".join(result.output.split())
+
+
 def test_conflicting_full_refresh_and_cursor_value_are_refused_first(project: Path) -> None:
     result = runner.invoke(app, ["run", "--select", "b", "--full-refresh", "--cursor-value", "3"])
 
     assert result.exit_code == 1
     assert "mutually exclusive" in " ".join(result.output.split())
+
+
+def test_range_is_validated_after_failed_filter_produces_no_syncs(project: Path) -> None:
+    StateManager(project).save_sync(SyncState("b", "now", 1, "success", last_cursor_value="3"))
+
+    result = runner.invoke(
+        app,
+        ["run", "--select", "b", "--failed", "--backfill-start", "0", "--backfill-end", "3"],
+    )
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+    assert "Nothing failed" not in result.output
+
+
+def test_range_is_validated_before_state_modified_noop(project: Path) -> None:
+    baseline = write_state_baseline(project)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--select",
+            "state:modified",
+            "--state",
+            str(baseline),
+            "--backfill-start",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+    assert "nothing to run" not in result.output
+
+
+def test_range_is_validated_after_exclude_empties_selection(project: Path) -> None:
+    result = runner.invoke(app, ["run", "--exclude", "*", "--backfill-start", "0"])
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+
+
+def test_range_is_validated_after_failed_filter_leaves_multiple_syncs(project: Path) -> None:
+    manager = StateManager(project)
+    for name in ("b", "p"):
+        manager.save_sync(SyncState(name, "now", 0, "failed", error="boom"))
+
+    result = runner.invoke(app, ["run", "--failed", "--backfill-start", "0"])
+
+    assert result.exit_code == 1
+    assert "need exactly one selected sync" in " ".join(result.output.split())
+    assert "selected: b, p" in " ".join(result.output.split())
+
+
+def test_range_mutual_exclusion_wins_even_when_failed_filter_is_empty(project: Path) -> None:
+    StateManager(project).save_sync(SyncState("b", "now", 1, "success"))
+
+    result = runner.invoke(
+        app,
+        ["run", "--select", "b", "--failed", "--backfill-start", "0", "--limit", "1"],
+    )
+
+    assert result.exit_code == 1
+    assert "--limit are mutually exclusive" in " ".join(result.output.split())

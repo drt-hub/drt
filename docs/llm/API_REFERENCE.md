@@ -411,6 +411,7 @@ finalized, DLQ-flushed, destination-acknowledged window. Empty windows advance.
 Missing/null/out-of-range source cursors always fail the window; `on_error:
 skip` applies only to destination row failures. Slice 3 execution is limited to
 `drt run` and MCP `drt_run_sync`. Dry-run/diff, `--limit`, `--cursor-value`,
+`drt run --backfill-start/--backfill-end` (MCP `backfill_start`/`backfill_end`) override the range of exactly one selected `sync.backfill` sync: integers for a numeric backfill, ISO-8601 instants for a timestamp one; a start below the checkpoint is a bounded replay that never moves the checkpoint back; mutually exclusive with `--cursor-value`, `--full-refresh` and `--limit`.
 `--full-refresh`, build, serve, library default, Airflow/Prefect/Dagster,
 test, plan/apply, exact replay, and retry are refused. Same-sync concurrent runs
 and downgrading drt against backfill-written state are unsupported. Use `drt

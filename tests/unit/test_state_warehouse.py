@@ -654,6 +654,39 @@ class TestPostgresWarehouseIdempotencyLedger:
         with patch("drt.state.warehouse._connect", side_effect=RuntimeError("boom")):
             PostgresWarehouseIdempotencyLedger(_profile()).mark_delivered("s", ["k1"], "t")
 
+    def test_renew_delivered_upserts_and_refreshes_conflicting_keys(self) -> None:
+        conn = _mock_conn()
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=False),
+        ):
+            PostgresWarehouseIdempotencyLedger(_profile()).renew_delivered(
+                "s", ["old", "new"], "2026-11-27T00:00:00+00:00"
+            )
+
+        executemany = conn.cursor.return_value.executemany.call_args
+        assert executemany.args[1] == [
+            ("s", "old", "2026-11-27T00:00:00+00:00"),
+            ("s", "new", "2026-11-27T00:00:00+00:00"),
+        ]
+        sql = str(executemany.args[0])
+        assert "ON CONFLICT (sync_name, idempotency_key) DO UPDATE" in sql
+        assert "SET delivered_at = EXCLUDED.delivered_at" in sql
+        assert conn.commit.call_count >= 1
+
+    def test_renew_delivered_is_a_noop_for_empty_keys(self) -> None:
+        with patch("drt.state.warehouse._connect") as connect:
+            PostgresWarehouseIdempotencyLedger(_profile()).renew_delivered("s", [], "t")
+        connect.assert_not_called()
+
+    def test_renew_delivered_propagates_connection_failure(self) -> None:
+        with (
+            patch("drt.state.warehouse._connect", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            PostgresWarehouseIdempotencyLedger(_profile()).renew_delivered("s", ["k1"], "t")
+
     def test_prune_returns_zero_before_any_table_exists(self) -> None:
         conn = _undefined_table_conn()
         with patch("drt.state.warehouse._connect", return_value=conn):

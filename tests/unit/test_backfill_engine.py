@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from collections.abc import Collection, Iterator
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ from drt.config.models import (
     SnowflakeDestinationConfig,
     SyncConfig,
     SyncOptions,
+    WatermarkConfig,
 )
 from drt.connectors.registry import get_destination, windowed_backfill_destination_types
 from drt.destinations.base import SyncResult
@@ -381,6 +382,163 @@ def test_every_backfill_destination_rejects_duplicate_composite_key_before_write
     load.assert_not_called()
     assert checkpoint.checkpoints == 0
     assert state.value is None
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
+def test_duplicate_keyless_rows_are_refused_before_write_for_strict_dlq_backends(
+    backend: str,
+    tmp_path: Path,
+) -> None:
+    sync = _sync(end=3, on_error="skip")
+    destination = RecordingDestination()
+    state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    observer = CompositeObserver(
+        [checkpoint, DlqObserver(_strict_dlq_backend(backend, tmp_path))],
+        checkpoint_observer=checkpoint,
+    )
+    duplicate = {"cursor": 1, "payload": "same"}
+
+    with pytest.raises(ValueError, match="unique destination.upsert_key or deduplicate"):
+        run_sync(
+            sync,
+            WindowSource([duplicate, dict(duplicate)]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+    assert destination.calls == []
+    assert checkpoint.checkpoints == 0
+    assert state.value is None
+
+
+def test_duplicate_keyless_identity_is_tracked_across_window_batches(
+    tmp_path: Path,
+) -> None:
+    sync = _sync(end=3, on_error="skip")
+    sync.sync.batch_size = 1
+    destination = RecordingDestination()
+    state = MemoryState()
+    duplicate = {"cursor": 1, "payload": "same"}
+
+    with pytest.raises(ValueError, match="row ordinal 2"):
+        run_sync(
+            sync,
+            WindowSource([duplicate, dict(duplicate)]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(state),
+        )
+
+    assert destination.calls == [[duplicate]]
+    assert state.value is None
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
+@pytest.mark.parametrize(
+    "invalid_row",
+    [{"payload": "same"}, {"cursor": 999, "payload": "same"}],
+    ids=["missing-cursor", "out-of-range-cursor"],
+)
+def test_duplicate_source_contract_rows_are_refused_before_strict_dlq_append(
+    backend: str,
+    invalid_row: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    class BrokenSource(WindowSource):
+        def extract_window(
+            self,
+            query: str,
+            profile: RestApiProfile,
+            low: str | int,
+            high: str | int,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            yield dict(invalid_row)
+            yield dict(invalid_row)
+
+    sync = _sync(end=3, on_error="skip")
+    destination = RecordingDestination()
+    state = MemoryState()
+    checkpoint = CountingCheckpoint(state)
+    store = _strict_dlq_backend(backend, tmp_path)
+    strict_append = MagicMock()
+    setattr(store, "_append_strict", strict_append)
+    observer = CompositeObserver(
+        [checkpoint, DlqObserver(store)],
+        checkpoint_observer=checkpoint,
+    )
+
+    with pytest.raises(ValueError, match="unique destination.upsert_key or deduplicate"):
+        run_sync(
+            sync,
+            BrokenSource([]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+    assert destination.calls == []
+    strict_append.assert_not_called()
+    assert checkpoint.checkpoints == 0
+    assert state.value is None
+
+
+def test_uncanonicalizable_keyless_identity_is_refused_before_write(
+    tmp_path: Path,
+) -> None:
+    class UnsupportedValue:
+        pass
+
+    destination = RecordingDestination()
+
+    with pytest.raises(TypeError, match="cannot canonically serialize"):
+        run_sync(
+            _sync(end=3),
+            WindowSource([{"cursor": 1, "payload": UnsupportedValue()}]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(MemoryState()),
+        )
+
+    assert destination.calls == []
+
+
+def test_keyed_rows_with_same_cursor_and_payload_keep_distinct_dlq_identity(
+    tmp_path: Path,
+) -> None:
+    config = _capable_destination_config("postgres").model_copy(update={"upsert_key": ["id"]})
+    sync = _sync_for_destination(config)
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=2))
+    destination.load = load
+    rows = [
+        {"cursor": 1, "id": 1, "payload": "same"},
+        {"cursor": 1, "id": 2, "payload": "same"},
+    ]
+
+    run_sync(
+        sync,
+        WindowSource(rows),
+        destination,
+        _profile(),
+        tmp_path,
+        observer=_observer(MemoryState()),
+    )
+
+    load.assert_called_once_with(rows, config, sync.sync)
 
 
 def test_duplicate_key_across_batches_fails_before_second_batch_write(tmp_path: Path) -> None:
@@ -1719,6 +1877,98 @@ def test_metadata_retry_replaces_same_keyed_dead_letter_across_strict_backends(
     "backend",
     ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
 )
+def test_shifted_operator_replay_replaces_same_dead_letter_across_strict_backends(
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RowFailingDestination(RecordingDestination):
+        def load(
+            self,
+            records: list[dict[str, Any]],
+            config: DestinationConfig,
+            sync_options: SyncOptions,
+        ) -> SyncResult:
+            return SyncResult(
+                failed=len(records),
+                row_errors=[RowError(0, "row", None, "rejected")],
+            )
+
+    sync = _sync_for_destination(
+        _capable_destination_config("postgres").model_copy(update={"upsert_key": ["cursor"]}),
+        sync_options={"on_error": "skip"},
+    )
+    store = _strict_dlq_backend(backend, tmp_path)
+    queue: list[DeadLetter] = []
+
+    def append(
+        sync_name: str,
+        entries: list[DeadLetter],
+        *,
+        max_records: int = 10_000,
+        incoming_ids: Collection[str] | None = None,
+    ) -> int:
+        strict_entries = prepare_strict_dlq_append(
+            sync_name,
+            {entry.id for entry in queue},
+            len(queue),
+            entries,
+            max_records=max_records,
+            incoming_ids=incoming_ids,
+        )
+        positions = {entry.id: index for index, entry in enumerate(queue)}
+        for entry in strict_entries:
+            index = positions.get(entry.id)
+            if index is None:
+                positions[entry.id] = len(queue)
+                queue.append(entry)
+            else:
+                queue[index] = entry
+        return len(queue)
+
+    monkeypatch.setattr(store, "_append_strict", append)
+    state = MemoryState()
+
+    def observer() -> CompositeObserver:
+        checkpoint = StatePersistingObserver(state, None)
+        return CompositeObserver(
+            [checkpoint, DlqObserver(store, max_records=1)],
+            checkpoint_observer=checkpoint,
+        )
+
+    run_sync(
+        sync,
+        WindowSource([{"cursor": 1, "payload": "original"}]),
+        RowFailingDestination(),
+        _profile(),
+        tmp_path,
+        observer=observer(),
+        run_id="original-window",
+    )
+    [first] = queue
+
+    replay = run_sync(
+        sync,
+        WindowSource([{"cursor": 1, "payload": "replayed"}]),
+        RowFailingDestination(),
+        _profile(),
+        tmp_path,
+        observer=observer(),
+        run_id="shifted-window",
+        backfill_start=1,
+        backfill_end=2,
+    )
+
+    assert len(queue) == 1
+    assert queue[0].id == first.id
+    assert queue[0].record["payload"] == "replayed"
+    assert replay.backfill is not None and replay.backfill["ledger_bypassed"] is True
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["local", "gcs", "s3", "postgres", "snowflake", "databricks", "bigquery"],
+)
 @pytest.mark.parametrize(
     ("existing_values", "current_values"),
     [([], [0, 1]), ([99], [0])],
@@ -2328,3 +2578,691 @@ def test_lag_beyond_ledger_retention_warns_at_start(
             idempotency_ledger=Ledger(),
         )
     assert "exceeds the 7-day idempotency-ledger retention" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ADR 0021 section 5: --backfill-start / --backfill-end range overrides
+# ---------------------------------------------------------------------------
+
+
+def _run_range(
+    tmp_path: Path,
+    state: MemoryState,
+    source: WindowSource,
+    *,
+    sync: SyncConfig | None = None,
+    destination: RecordingDestination | None = None,
+    **kwargs: Any,
+) -> SyncResult:
+    return run_sync(
+        sync or _sync(),
+        source,
+        destination or RecordingDestination(),
+        _profile(),
+        tmp_path,
+        state_manager=state,
+        observer=_observer(state),
+        **kwargs,
+    )
+
+
+def test_cli_end_replaces_the_configured_end(tmp_path: Path) -> None:
+    state = MemoryState()
+    source = WindowSource([{"cursor": value} for value in range(9)])
+
+    result = _run_range(tmp_path, state, source, backfill_end=6)
+
+    assert source.windows == [(0, 3), (3, 6)]
+    assert state.value is not None and state.value.last_cursor_value == "6"
+    assert result.backfill is not None and result.backfill["ceiling"] == 6
+
+
+def test_cli_end_may_extend_past_the_configured_end(tmp_path: Path) -> None:
+    state = MemoryState()
+    source = WindowSource([])
+
+    _run_range(tmp_path, state, source, backfill_end="12")
+
+    assert source.windows == [(0, 3), (3, 6), (6, 9), (9, 12)]
+
+
+def test_cli_end_replaces_the_automatic_numeric_ceiling_snapshot(tmp_path: Path) -> None:
+    class CountingSource(WindowSource):
+        max_queries = 0
+
+        def extract(
+            self, query: str, config: RestApiProfile, *, query_tags: dict[str, str] | None = None
+        ) -> Iterator[dict[str, Any]]:
+            if "MAX(" in query:
+                self.max_queries += 1
+            yield from ()
+
+    sync = _sync()
+    assert sync.sync.backfill is not None
+    sync.sync.backfill.end = None
+    state = MemoryState()
+    source = CountingSource([])
+
+    _run_range(tmp_path, state, source, sync=sync, backfill_end=6)
+
+    assert source.max_queries == 0
+    assert source.windows == [(0, 3), (3, 6)]
+
+
+def test_cli_start_below_the_checkpoint_replays_without_moving_it_back(tmp_path: Path) -> None:
+    state = MemoryState()
+    source = WindowSource([{"cursor": value} for value in range(9)])
+    first = _run_range(tmp_path, state, source)
+    assert first.backfill is not None and first.backfill["final_checkpoint"] == "9"
+
+    destination = RecordingDestination()
+    result = _run_range(
+        tmp_path,
+        state,
+        WindowSource([{"cursor": value} for value in range(9)]),
+        destination=destination,
+        backfill_start=3,
+        backfill_end=6,
+    )
+
+    assert [row["cursor"] for call in destination.calls for row in call] == [3, 4, 5]
+    assert state.value is not None and state.value.last_cursor_value == "9"
+    assert state.value.cursor_boundary == "exclusive"
+    assert result.watermark_source == "cli"
+    assert result.backfill is not None and result.backfill["effective_start"] == 3
+
+
+def test_operator_replay_bypasses_ledger_filter_but_normal_resume_keeps_it(
+    tmp_path: Path,
+) -> None:
+    class Ledger:
+        def __init__(self, delivered: set[str]) -> None:
+            self.delivered = set(delivered)
+            self.lookups: list[set[str]] = []
+            self.marked: list[str] = []
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            self.lookups.append(set(keys))
+            return keys & self.delivered
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            self.marked.extend(keys)
+            self.delivered.update(keys)
+
+        def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            self.marked.extend(keys)
+            self.delivered.update(keys)
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            return 0
+
+    sync = _sync(end=9)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    replay_state = MemoryState(
+        SyncState(
+            "events",
+            "old",
+            1,
+            "partial",
+            last_cursor_value="9",
+            cursor_boundary="exclusive",
+        )
+    )
+    replay_ledger = Ledger({"3"})
+    replay_destination = RecordingDestination()
+
+    replay = _run_range(
+        tmp_path,
+        replay_state,
+        WindowSource([{"cursor": 3}]),
+        sync=sync,
+        destination=replay_destination,
+        idempotency_ledger=replay_ledger,
+        backfill_start=3,
+        backfill_end=6,
+    )
+
+    assert replay_destination.calls == [[{"cursor": 3}]]
+    assert replay_ledger.lookups == []
+    assert replay_ledger.marked == ["3"]
+    assert replay.backfill is not None and replay.backfill["ledger_bypassed"] is True
+    assert replay_state.value is not None and replay_state.value.last_cursor_value == "9"
+
+    normal_sync = _sync(end=3)
+    normal_sync.sync.idempotency_key = "{{ row.cursor }}"
+    normal_ledger = Ledger({"1"})
+    normal_destination = RecordingDestination()
+    normal = _run_range(
+        tmp_path,
+        MemoryState(),
+        WindowSource([{"cursor": 1}]),
+        sync=normal_sync,
+        destination=normal_destination,
+        idempotency_ledger=normal_ledger,
+    )
+
+    assert normal_destination.calls == []
+    assert normal_ledger.lookups == [{"1"}]
+    assert normal_ledger.marked == []
+    assert normal.skipped_duplicate == 1
+    assert normal.backfill is not None and normal.backfill["ledger_bypassed"] is False
+
+
+def test_operator_replay_refuses_ledger_without_renewal_before_extraction(
+    tmp_path: Path,
+) -> None:
+    class LegacyLedger:
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return set()
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            return None
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            return 0
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    source = WindowSource([{"cursor": 1}])
+    destination = RecordingDestination()
+
+    with pytest.raises(RuntimeError, match="renew_delivered capability"):
+        _run_range(
+            tmp_path,
+            MemoryState(),
+            source,
+            sync=sync,
+            destination=destination,
+            idempotency_ledger=LegacyLedger(),
+            backfill_start=0,
+            backfill_end=3,
+        )
+
+    assert source.windows == []
+    assert destination.calls == []
+
+
+def test_failed_operator_replay_renewal_propagates_without_pruning(
+    tmp_path: Path,
+) -> None:
+    renewal_error = RuntimeError("renewal unavailable")
+    events: list[str] = []
+
+    class FailingRenewalLedger:
+        def __init__(self) -> None:
+            self.prune_calls = 0
+            self.delivered_at: str | None = None
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return set()
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            return None
+
+        def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            events.append("renew")
+            self.delivered_at = delivered_at
+            raise renewal_error
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            self.prune_calls += 1
+            return 0
+
+    class Audit:
+        def __init__(self) -> None:
+            self.logged: list[tuple[list[Any], str]] = []
+
+        def log_delivered(
+            self,
+            sync_name: str,
+            run_id: str | None,
+            sync_run_id: str | None,
+            destination_type: str,
+            entries: list[Any],
+            delivered_at: str,
+        ) -> None:
+            events.append("audit")
+            self.logged.append((entries, delivered_at))
+
+        def prune(self, sync_name: str, retain_days: int) -> int:
+            return 0
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    ledger = FailingRenewalLedger()
+    audit = Audit()
+    destination = RecordingDestination()
+    state = MemoryState()
+
+    with pytest.raises(RuntimeError, match="renewal unavailable") as exc_info:
+        _run_range(
+            tmp_path,
+            state,
+            WindowSource([{"cursor": 1}]),
+            sync=sync,
+            destination=destination,
+            idempotency_ledger=ledger,
+            audit_trail=audit,
+            audit_fields=["cursor"],
+            backfill_start=0,
+            backfill_end=3,
+        )
+
+    assert exc_info.value is renewal_error
+    assert destination.calls == [[{"cursor": 1}]]
+    assert events == ["renew", "audit"]
+    assert len(audit.logged) == 1
+    assert len(audit.logged[0][0]) == 1
+    assert audit.logged[0][0][0].record_key == "1"
+    assert audit.logged[0][1] == ledger.delivered_at
+    assert state.value is None
+    assert ledger.prune_calls == 0
+
+
+def test_pending_flush_replay_audits_before_reraising_renewal_failure(
+    tmp_path: Path,
+) -> None:
+    renewal_error = RuntimeError("deferred renewal unavailable")
+    events: list[str] = []
+
+    class PendingDestination(RecordingDestination):
+        def __init__(self) -> None:
+            super().__init__()
+            self.flush_calls = 0
+
+        def flush_pending(self) -> None:
+            self.flush_calls += 1
+            events.append("flush")
+
+    class FailingRenewalLedger:
+        def __init__(self) -> None:
+            self.delivered_at: str | None = None
+            self.prune_calls = 0
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return set()
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            return None
+
+        def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            events.append("renew")
+            self.delivered_at = delivered_at
+            raise renewal_error
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            self.prune_calls += 1
+            return 0
+
+    class Audit:
+        def __init__(self) -> None:
+            self.logged: list[tuple[list[Any], str]] = []
+
+        def log_delivered(
+            self,
+            sync_name: str,
+            run_id: str | None,
+            sync_run_id: str | None,
+            destination_type: str,
+            entries: list[Any],
+            delivered_at: str,
+        ) -> None:
+            events.append("audit")
+            self.logged.append((entries, delivered_at))
+
+        def prune(self, sync_name: str, retain_days: int) -> int:
+            return 0
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    destination = PendingDestination()
+    ledger = FailingRenewalLedger()
+    audit = Audit()
+    state = MemoryState()
+
+    with pytest.raises(RuntimeError, match="deferred renewal unavailable") as exc_info:
+        _run_range(
+            tmp_path,
+            state,
+            WindowSource([{"cursor": 1}]),
+            sync=sync,
+            destination=destination,
+            idempotency_ledger=ledger,
+            audit_trail=audit,
+            audit_fields=["cursor"],
+            backfill_start=0,
+            backfill_end=3,
+        )
+
+    assert exc_info.value is renewal_error
+    assert destination.calls == [[{"cursor": 1}]]
+    assert destination.flush_calls == 1
+    assert events == ["flush", "renew", "audit"]
+    assert len(audit.logged) == 1
+    assert len(audit.logged[0][0]) == 1
+    assert audit.logged[0][0][0].record_key == "1"
+    assert audit.logged[0][1] == ledger.delivered_at
+    assert state.value is None
+    assert ledger.prune_calls == 0
+
+
+def test_operator_replay_renews_expired_key_before_prune_and_lagged_resume(
+    tmp_path: Path,
+) -> None:
+    class ExpiringLedger:
+        def __init__(self) -> None:
+            self.delivered_at = {
+                "1": datetime.now(timezone.utc) - timedelta(days=10),
+            }
+            self.renewed: list[str] = []
+
+        def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+            return keys & self.delivered_at.keys()
+
+        def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            for key in keys:
+                self.delivered_at.setdefault(key, datetime.fromisoformat(delivered_at))
+
+        def renew_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+            self.renewed.extend(keys)
+            for key in keys:
+                self.delivered_at[key] = datetime.fromisoformat(delivered_at)
+
+        def prune(self, sync_name: str, retention_days: int) -> int:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            expired = [
+                key for key, delivered_at in self.delivered_at.items() if delivered_at < cutoff
+            ]
+            for key in expired:
+                del self.delivered_at[key]
+            return len(expired)
+
+    sync = _sync(end=3)
+    sync.sync.idempotency_key = "{{ row.cursor }}"
+    sync.sync.watermark = WatermarkConfig(lag=3)
+    state = MemoryState(
+        SyncState(
+            "events",
+            "old",
+            1,
+            "partial",
+            last_cursor_value="3",
+            cursor_boundary="exclusive",
+        )
+    )
+    ledger = ExpiringLedger()
+    replay_destination = RecordingDestination()
+
+    _run_range(
+        tmp_path,
+        state,
+        WindowSource([{"cursor": 1}]),
+        sync=sync,
+        destination=replay_destination,
+        idempotency_ledger=ledger,
+        backfill_start=0,
+        backfill_end=3,
+    )
+
+    assert replay_destination.calls == [[{"cursor": 1}]]
+    assert ledger.renewed == ["1"]
+    assert "1" in ledger.delivered_at
+
+    resume_destination = RecordingDestination()
+    result = _run_range(
+        tmp_path,
+        state,
+        WindowSource([{"cursor": 1}]),
+        sync=sync,
+        destination=resume_destination,
+        idempotency_ledger=ledger,
+    )
+
+    assert resume_destination.calls == []
+    assert result.skipped_duplicate == 1
+    assert "1" in ledger.delivered_at
+
+
+def test_cli_start_above_the_checkpoint_advances_it(tmp_path: Path) -> None:
+    state = MemoryState()
+    _run_range(tmp_path, state, WindowSource([]), backfill_end=3)
+    assert state.value is not None and state.value.last_cursor_value == "3"
+
+    source = WindowSource([])
+    _run_range(tmp_path, state, source, backfill_start=6, backfill_end=9)
+
+    assert source.windows == [(6, 9)]
+    assert state.value is not None and state.value.last_cursor_value == "9"
+
+
+def test_cli_start_beats_the_configured_start_without_a_checkpoint(tmp_path: Path) -> None:
+    source = WindowSource([])
+    result = _run_range(tmp_path, MemoryState(), source, backfill_start="3")
+
+    assert source.windows == [(3, 6), (6, 9)]
+    assert result.backfill is not None and result.backfill["requested_start"] == 0
+
+
+def test_empty_cli_range_below_the_start_plans_no_windows(tmp_path: Path) -> None:
+    source = WindowSource([])
+    result = _run_range(tmp_path, MemoryState(), source, backfill_start=9)
+
+    assert source.windows == []
+    assert result.backfill is not None and result.backfill["windows_planned"] == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"backfill_start": 6, "backfill_end": 6}, "must be before"),
+        ({"backfill_start": 9, "backfill_end": 3}, "must be before"),
+        ({"backfill_start": "yesterday"}, "must be an integer"),
+        ({"backfill_end": "2026-01-01T00:00:00Z"}, "must be an integer"),
+        ({"backfill_start": True}, "must not be a boolean"),
+    ],
+)
+def test_invalid_numeric_range_is_refused_before_extraction(
+    tmp_path: Path, kwargs: dict[str, Any], message: str
+) -> None:
+    source = WindowSource([])
+    with pytest.raises(ValueError, match=message):
+        _run_range(tmp_path, MemoryState(), source, **kwargs)
+    assert source.windows == [] and source.extract_calls == 0
+
+
+def test_timestamp_backfill_takes_canonicalized_instants_and_rejects_integers(
+    tmp_path: Path,
+) -> None:
+    sync = SyncConfig.model_validate(
+        {
+            "name": "events",
+            "model": "events",
+            "destination": {"type": "rest_api", "url": "https://example.test"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "cursor",
+                "batch_size": 100,
+                "on_error": "fail",
+                "backfill": {
+                    "window": "1d",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-10T00:00:00Z",
+                },
+            },
+        }
+    )
+    source = WindowSource([])
+    _run_range(
+        tmp_path,
+        MemoryState(),
+        source,
+        sync=sync,
+        backfill_start="2026-01-02T09:00:00+09:00",
+        backfill_end="2026-01-04T00:00:00Z",
+    )
+    # 2026-01-02 09:00 JST is 2026-01-02 00:00 UTC; instants are stored as naive UTC text.
+    assert source.windows == [
+        ("2026-01-02 00:00:00", "2026-01-03 00:00:00"),
+        ("2026-01-03 00:00:00", "2026-01-04 00:00:00"),
+    ]
+
+    refused = WindowSource([])
+    with pytest.raises(ValueError, match="must be an ISO-8601 timestamp"):
+        _run_range(tmp_path, MemoryState(), refused, sync=sync, backfill_start=5)
+    assert refused.windows == []
+
+
+def test_range_flags_require_a_sync_with_backfill(tmp_path: Path) -> None:
+    sync = SyncConfig.model_validate(
+        {
+            "name": "plain",
+            "model": "events",
+            "destination": {"type": "rest_api", "url": "https://example.test"},
+            "sync": {"mode": "incremental", "cursor_field": "cursor"},
+        }
+    )
+    with pytest.raises(ValueError, match="only valid for a sync with sync.backfill"):
+        _run_range(tmp_path, MemoryState(), WindowSource([]), sync=sync, backfill_start=1)
+    with pytest.raises(ValueError, match="only valid for a sync with sync.backfill"):
+        _run_range(tmp_path, MemoryState(), WindowSource([]), sync=sync, backfill_end=1)
+
+
+def test_library_default_still_refuses_before_the_range_is_considered(tmp_path: Path) -> None:
+    source = WindowSource([])
+    with pytest.raises(ValueError, match="disabled for this entry point"):
+        engine_run_sync(
+            _sync(),
+            source,
+            RecordingDestination(),
+            _profile(),
+            tmp_path,
+            backfill_start=0,
+            backfill_end=3,
+        )
+    assert source.windows == []
+
+
+def test_cli_end_at_or_below_the_checkpoint_is_a_noop_that_keeps_it(tmp_path: Path) -> None:
+    state = MemoryState()
+    _run_range(tmp_path, state, WindowSource([]))
+    assert state.value is not None and state.value.last_cursor_value == "9"
+
+    source = WindowSource([])
+    result = _run_range(tmp_path, state, source, backfill_end=3)
+
+    assert source.windows == []
+    assert result.backfill is not None and result.backfill["windows_planned"] == 0
+    assert state.value is not None and state.value.last_cursor_value == "9"
+
+
+class _RaisingLedger:
+    def __init__(self, error: BaseException | None) -> None:
+        self.error = error
+
+    def already_delivered(self, sync_name: str, keys: set[str]) -> set[str]:
+        return set()
+
+    def mark_delivered(self, sync_name: str, keys: list[str], delivered_at: str) -> None:
+        if self.error is not None:
+            raise self.error
+
+    def prune(self, sync_name: str, retention_days: int) -> int:
+        return 0
+
+
+class _RaisingAudit:
+    def __init__(self, error: BaseException | None) -> None:
+        self.error = error
+        self.calls = 0
+
+    def log_delivered(self, *args: Any, **kwargs: Any) -> None:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+
+
+def _confirm(ledger: Any, audit: Any) -> None:
+    from drt.engine.sync import _record_confirmed_delivery
+
+    _record_confirmed_delivery(
+        idempotency_ledger=ledger,
+        audit_trail=audit,
+        sync_name="events",
+        run_id="r",
+        sync_run_id="s",
+        destination_type="rest_api",
+        delivered_keys=["1"],
+        audit_entries=[object()],  # type: ignore[list-item]
+        delivered_at="2026-01-01T00:00:00+00:00",
+        renew_idempotency_marks=False,
+    )
+
+
+@pytest.mark.parametrize("cancel", [KeyboardInterrupt, SystemExit])
+def test_cancellation_from_ledger_propagates_immediately_without_audit(
+    cancel: type[BaseException],
+) -> None:
+    audit = _RaisingAudit(None)
+    with pytest.raises(cancel):
+        _confirm(_RaisingLedger(cancel()), audit)
+    assert audit.calls == 0
+
+
+@pytest.mark.parametrize("cancel", [KeyboardInterrupt, SystemExit])
+def test_cancellation_from_audit_is_not_replaced_by_deferred_ledger_error(
+    cancel: type[BaseException],
+) -> None:
+    audit = _RaisingAudit(cancel())
+    with pytest.raises(cancel):
+        _confirm(_RaisingLedger(RuntimeError("ledger down")), audit)
+    assert audit.calls == 1
+
+
+def test_ordinary_ledger_error_still_audits_then_raises() -> None:
+    audit = _RaisingAudit(None)
+    with pytest.raises(RuntimeError, match="ledger down"):
+        _confirm(_RaisingLedger(RuntimeError("ledger down")), audit)
+    assert audit.calls == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_row",
+    [{"payload": "same"}, {"cursor": 999, "payload": "same"}],
+    ids=["missing-cursor", "out-of-range-cursor"],
+)
+def test_duplicate_source_contract_rows_are_refused_on_keyed_destination(
+    invalid_row: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    class BrokenSource(WindowSource):
+        def extract_window(
+            self,
+            query: str,
+            profile: RestApiProfile,
+            low: str | int,
+            high: str | int,
+            *,
+            query_tags: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            yield dict(invalid_row)
+            yield dict(invalid_row)
+
+    config = _capable_destination_config("postgres")
+    sync = _sync_for_destination(config, sync_options={"on_error": "skip"})
+    destination = get_destination(config)
+    load = MagicMock(return_value=SyncResult(success=0))
+    destination.load = load
+    state = MemoryState()
+
+    with pytest.raises(ValueError, match="unique destination.upsert_key or deduplicate"):
+        run_sync(
+            sync,
+            BrokenSource([]),
+            destination,
+            _profile(),
+            tmp_path,
+            observer=_observer(state),
+        )
+
+    load.assert_not_called()
+    assert state.value is None

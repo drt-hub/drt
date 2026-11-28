@@ -120,7 +120,7 @@ def successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -
 class IdempotencyLedger(Protocol):
     """Optional warehouse capability: dedup records by a caller-computed key.
 
-    Stability: New in #1099 — not yet frozen (see ADR 0007).
+    Stability: Stable (frozen at v1.0, see ADR 0007).
 
     All three methods key on ``sync_name`` — two projects sharing one
     connection profile and managed schema (and a matching sync name) would
@@ -159,5 +159,27 @@ class IdempotencyLedger(Protocol):
         history does (unlike history, an unbounded ledger isn't just noisy,
         it's a per-row-forever table), so the engine calls this alongside
         ``history_manager.prune`` at the end of every non-dry-run sync.
+        """
+        ...
+
+
+@runtime_checkable
+class RenewingIdempotencyLedger(Protocol):
+    """Additive capability for refreshing an existing delivery mark.
+
+    ``IdempotencyLedger`` is frozen under ADR 0007, so operator replay renewal
+    cannot add a parameter to ``mark_delivered``. Implementations that expose
+    this capability insert missing keys and update ``delivered_at`` for keys
+    already present. The engine uses it only after an acknowledged explicit
+    backfill range replay; ordinary delivery keeps the base Protocol's
+    duplicate-mark-is-a-no-op contract.
+    """
+
+    def renew_delivered(self, sync_name: str, keys: Collection[str], delivered_at: str) -> None:
+        """Insert missing keys and refresh existing keys' delivery time.
+
+        Unlike ordinary best-effort marks, renewal must propagate a failure:
+        the engine cannot safely prune or complete an operator replay after an
+        old key failed to receive a new retention timestamp.
         """
         ...

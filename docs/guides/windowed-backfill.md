@@ -41,13 +41,30 @@ profiles must configure distinct `incremental.start_param` and
 Each query covers one half-open range: `cursor >= low AND cursor < high`.
 Windows run sequentially. The existing transforms, destination lookups,
 idempotency ledger, batching, DLQ behavior, and destination finalizer apply to
-every window.
+every window. Ordinary resume runs use the ledger's already-delivered filter.
+An explicit operator range replay bypasses that filter so it can restore rows
+the destination lost. After acknowledged success, drt renews each existing
+ledger key's `delivered_at` through an additive ledger capability (or inserts a
+missing key) before retention pruning. This prevents an old replayed key from
+being pruned immediately and then re-delivered by the next ordinary lagged
+resume. A configured ledger without renewal support refuses the replay before
+extraction. If renewal fails after the destination has accepted a row, drt still
+attempts the compliance audit entry with that delivery timestamp, then propagates
+the renewal error without checkpointing or pruning the replay window. This also
+applies when delivery is acknowledged through `flush_pending()`.
 
 After a window is fully consumed and finalized, drt writes a provisional
 `partial` StateStore record with `cursor_boundary: exclusive`, then writes a
 separate configured watermark store. A failure of either write stops the run.
 Completed windows are never rolled back. Empty windows also checkpoint, which
 allows sparse histories to make progress.
+
+Before writing either checkpoint store, drt parses the proposed high and every
+stored cursor in the same exact family (signed integer, or UTC instant), takes
+one maximum, and writes that canonical maximum to both stores. This comparison
+does not pass integers through floating point and does not compare timestamp
+text lexicographically. An unparseable stored cursor fails closed before either
+store is changed.
 
 `on_error: fail` leaves a window uncheckpointed. `on_error: skip` checkpoints a
 fully consumed window when the *destination* reports pinpointed failed/DLQ rows,
@@ -147,14 +164,22 @@ extraction, interruption, or contract failure remains the primary failure and
 the capacity error is reported with it. Raise the cap or drain the queue with
 `drt retry NAME`. Backfill cleanup never uses the ordinary capped append.
 
-Backfill DLQ IDs are derived from the sync name, canonical window low boundary,
-and validated destination upsert key, not from the run-specific high ceiling or
-final payload. Thus a later open-ended retry replaces the existing entry even
-when its ceiling moved. A key appearing in a later completed window still has a
-different low boundary. Keyless plugin capabilities use the same low-boundary
-scheme with the record captured before metadata injection. This ID scheme
-replaces only IDs from earlier unreleased slice-3 commits: mainline has not
-enabled backfill execution, so no compatibility migration is needed.
+Backfill DLQ IDs are derived from the sync name, the row's own cursor value
+canonicalized in the backfill family, and the validated destination upsert key,
+not from either window boundary or the final payload. Thus an open-ended retry
+or an explicit replay with shifted window alignment replaces the existing entry
+for the same row. Keyless plugin capabilities use the same row-cursor scheme
+with the record captured before metadata injection. The fallback is serialized
+canonically with explicit type tags, so values such as `1`, `"1"`, `1.0`,
+`true`, `null`, and a datetime never collapse through string coercion. If two
+keyless rows in one window would still produce the same deterministic ID, drt
+refuses before that batch's destination write and checkpoint; configure a
+unique destination key or deduplicate the model. The same window-wide check runs
+before missing, null, or out-of-range cursor failures reach the DLQ, so strict
+DLQ storage never silently coalesces two source-contract failures into one
+retryable entry. This ID scheme replaces only
+IDs from earlier unreleased slice commits: mainline has not enabled backfill
+execution, so no compatibility migration is needed.
 
 ## Recovery and state safety
 
@@ -178,6 +203,64 @@ triggers). Do not downgrade and run an older drt against state written by a
 backfill: older behavior is backend-dependent and may discard or reinterpret
 the exclusive marker.
 
+## Range overrides: `--backfill-start` and `--backfill-end`
+
+For a one-off replay or a bounded catch-up you can override the range for a single
+run without editing YAML:
+
+```bash
+# Re-send one day that a destination lost, without touching the checkpoint
+drt run --select events_to_crm \
+  --backfill-start 2026-03-01T00:00:00Z --backfill-end 2026-03-02T00:00:00Z
+
+# Numeric cursor: integers
+drt run --select orders_to_crm --backfill-start 1000000 --backfill-end 2000000
+```
+
+- **Start precedence:** `--backfill-start`, then the durable checkpoint, then
+  `sync.backfill.start`. `--backfill-end` replaces the configured or automatic
+  (run-time) ceiling and is exclusive, like every window high.
+- **Format follows the sync:** integers for a numeric backfill, ISO-8601 instants
+  for a timestamp backfill (offsets are converted to UTC). A value of the wrong
+  kind is refused instead of reinterpreted, and the start must be before the end.
+- **A start below the checkpoint is a replay, not a rewind.** The windows run and
+  write again, but the checkpoint stays where it was until a completed window's
+  high exceeds it, so a later scheduled run still resumes from the real progress.
+  A start above the checkpoint skips the gap and the checkpoint advances normally.
+- **Either range flag makes this an operator replay.** drt does not apply the
+  idempotency ledger's already-delivered filter, because the explicit purpose may
+  be to restore rows missing from the destination. It renews successful keys'
+  delivery timestamps before pruning; a ledger that lacks the additive renewal
+  capability is refused before extraction. The run summary reports
+  `ledger_bypassed: true`; ordinary resume runs report `false` and retain the
+  normal duplicate filter.
+- `watermark.lag` is not applied to a CLI start (it applies only when the start
+  came from durable storage).
+- **Exactly one selected sync, and it must declare `sync.backfill`.** The two flags
+  carry one range, so selecting several syncs, or a sync without `sync.backfill`,
+  is an error rather than applying the same text to unrelated syncs. Validation
+  uses the final selection after `--exclude`, state selectors, and `--failed`; an
+  empty healthy selector result is still an error when either range flag is set.
+- They are mutually exclusive with `--cursor-value`, `--full-refresh` and `--limit`.
+- MCP `drt_run_sync` takes the same range as `backfill_start` / `backfill_end`.
+
+## What a run reports
+
+A backfill run adds two keys to its entry in `target/drt/run_results.json`, to
+`--output json`'s `syncs[]`, and to the MCP `drt_run_sync` response:
+
+- `backfill`: the plan summary — `requested_start`, `effective_start`, `ceiling`,
+  `window`, `windows_planned`, `windows_completed`, `failed_window` (index or
+  `null`), `final_checkpoint`, and `ledger_bypassed`.
+- `windows`: one object per attempted window — `index`, `low`, `high` (half-open),
+  `rows_extracted`, `rows_synced`/`rows_failed`/`rows_skipped`, `status`
+  (`success`/`failed`), `checkpoint` (`written`, `not_written` or `failed`) and
+  `duration_seconds`.
+
+Both carry counts and bounds only, never row data or error text. If a window raises,
+the run is reported as a failed sync without these keys (the exception, not a result,
+reaches the CLI); use the checkpoint and `drt status` to see how far it got.
+
 ## Current limits
 
 - Backfill requires `mode: incremental`, cursor strategy, and a top-level
@@ -195,14 +278,13 @@ the exclusive marker.
 - Dry-run is not a backfill preview in slice 3: `drt run --dry-run`, MCP
   `dry_run`, `drt build --dry-run`, `--diff`, and plan/apply do not query any
   window. Dry-run/diff arrives with slice 4.
-- CLI `--backfill-start` and `--backfill-end` range overrides arrive in the next
-  operational-surfaces slice. For now, configure `start` and optional `end` in
-  YAML.
+- Range overrides are available as `--backfill-start` / `--backfill-end` (see
+  above). Dry-run/diff previews, window OTel spans and aggregate alert/history
+  wording remain later slices.
 - Windows are deliberately sequential. `--threads` can run different syncs in
   parallel but never parallelizes windows inside one sync.
 - Calendar windows, adaptive sizing, split-on-timeout, and distributed leases
   are not v1 features. Keep runner clocks synchronized and use lag for late
   arrivals.
-- `run_results.json` window arrays, window OTel spans, backfill-specific alert
-  text, history summaries, and `--backfill-start`/`--backfill-end` remain slice
-  4 work.
+- Window OTel spans, backfill-specific alert text and history summaries remain
+  slice 4 work.

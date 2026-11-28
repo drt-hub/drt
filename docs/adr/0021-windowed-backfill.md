@@ -776,8 +776,8 @@ necessary.
    `read_window_checkpoint()`. An `exclusive` marker still refuses legacy `>`
    execution before extraction.
 6. **Backfill DLQ identity is deterministic and append is idempotent.** A
-   backfill dead letter id hashes the sync name, canonical window low boundary,
-   and stable row identity. Local, object-store, and warehouse DLQ appends
+   backfill dead letter id hashes the sync name, canonical row cursor, and
+   stable row identity. Local, object-store, and warehouse DLQ appends
    replace/upsert an existing id rather than append a duplicate. A checkpoint
    failure followed by a window retry therefore leaves one retryable entry.
    Non-backfill dead letters keep their legacy random UUID identity.
@@ -914,12 +914,13 @@ template remains stable across extraction retries. Computed field names are
 resolved through the one-pass `field_mappings` rename before comparison.
 
 **Backfill DLQ IDs use stable identity, not the delivered payload.** For keyed
-rows the hash input is only the sync name, canonical window low boundary, and
-validated, destination-facing, type-tagged upsert key. A keyless capability
-uses the destination-shaped record captured before engine metadata injection.
-The DLQ continues to persist the final delivered payload, but changing `run_id`
-or `synced_at` on retry now replaces the prior ID across local, object-store,
-and warehouse strict-append implementations instead of consuming capacity.
+rows the hash input is only the sync name, canonical row cursor, and validated,
+destination-facing, type-tagged upsert key. A keyless capability uses the row
+cursor plus destination-shaped record captured before engine metadata
+injection. The DLQ continues to persist the final delivered payload, but
+changing `run_id` or `synced_at` on retry now replaces the prior ID across
+local, object-store, and warehouse strict-append implementations instead of
+consuming capacity.
 
 This changes deterministic IDs produced by earlier commits on this unreleased
 slice only. Mainline accepts backfill configuration but keeps execution
@@ -928,18 +929,131 @@ is required.
 
 ## Amendment 2026-11-23 (slice 3 round 14)
 
-**Backfill DLQ identity excludes the run ceiling.** An open-ended backfill
-snapshots its ceiling per run, so retrying an uncheckpointed final partial
-window can keep the same canonical low boundary while receiving a later high
-boundary. The deterministic ID therefore hashes the sync name, the canonical
-low boundary under the exclusive-checkpoint contract, and either the validated
-type-tagged destination upsert key or the pre-metadata record fallback. It does
-not hash the high boundary.
+**Backfill DLQ identity excludes both window bounds.** An open-ended backfill
+snapshots its ceiling per run, and an operator replay may deliberately shift
+the low/high alignment. The deterministic ID therefore hashes the sync name,
+the row's own cursor canonicalized in the backfill family, and either the
+validated type-tagged destination upsert key or the pre-metadata record
+fallback. A key that legitimately reappears after its cursor changes remains
+distinct, while the same row is stable across checkpoint retries, later
+open-ended ceilings, and shifted operator ranges. As with round 13, this
+replaces only deterministic IDs from unreleased slice-3 commits and requires no
+migration.
 
-Persisting a pending ceiling is unnecessary: windows execute sequentially,
-destination keys are unique within a window, and a later completed window has a
-different durable low boundary. Thus low plus row identity distinguishes a key
-that legitimately reappears after its cursor moves into another window while
-remaining stable across a retry whose open-ended ceiling changes. Fixed-range
-retry behavior is unchanged. As with round 13, this replaces only deterministic
-IDs from unreleased slice-3 commits and requires no migration.
+## Amendment 2026-11-26 (slice 4, part 1: CLI range overrides)
+
+The CLI/MCP range flags from section 5 are implemented ahead of the rest of
+slice 4 (window OTel spans, aggregate history/alerts, per-window run results and
+dry-run previews stay open).
+
+1. **Names and inputs.** `drt run --backfill-start/--backfill-end` and MCP
+   `drt_run_sync(backfill_start, backfill_end)`. Values are text; a numeric
+   backfill parses integers, a timestamp backfill canonicalizes ISO-8601 instants
+   to naive UTC. A value of the other kind is refused, as is a start that is not
+   strictly before the end.
+2. **Stricter than the ADR text on selection.** Section 5 says the flags are
+   accepted when exactly one selected sync has `sync.backfill`. The
+   implementation requires **exactly one selected sync in total**, and it must
+   declare `sync.backfill`. A second, non-backfill sync in the selection would
+   otherwise silently ignore the flags, which is the same hazard the rule exists
+   to prevent.
+3. **Precedence and safety are unchanged.** CLI start, then the durable checkpoint
+   (with lag), then configured start; lag does not apply to a CLI start. A start
+   below the checkpoint is a bounded replay and the checkpoint is never moved
+   backwards (pinned by tests that replay below a completed checkpoint). A CLI end
+   replaces the configured/automatic ceiling, including the numeric ceiling
+   snapshot query.
+4. **Mutual exclusions.** `--cursor-value`, `--full-refresh` and `--limit` are
+   refused together with either flag, in the CLI and in MCP, before any connector
+   or state store is created. The engine independently refuses the flags for a sync
+   without `sync.backfill` and for callers that did not opt in to backfill
+   execution.
+5. **Reporting.** A run started from a CLI start reports
+   `watermark_source: "cli"` and the effective start in `result.backfill`.
+
+### Slice 4, part 2: run results
+
+`run_results.json` (and `--output json`) entries for a backfill sync carry `backfill`
+(the plan summary) and `windows[]` (one object per attempted window with bounds, row
+counts, outcome and checkpoint state). A run that raises reports no window detail,
+because the CLI receives the exception rather than the result; the durable checkpoint
+remains the source of truth for progress. Window OTel spans, aggregate history/alert
+wording and dry-run previews are still open.
+
+## Amendment 2026-11-27 (slice 4 adversarial review)
+
+Four fail-closed refinements supersede the affected earlier wording:
+
+1. **One typed checkpoint maximum is written to both stores.** Before mutating
+   StateStore or WatermarkStorage, `checkpoint_window` canonicalizes the proposed
+   high and both stored values in the high bound's family. Integer comparison is
+   exact (including values above `2^53`); timestamp comparison parses naive values
+   as UTC and offset-bearing values as instants. The canonical maximum is the
+   checkpoint in both stores. A stored value that cannot be parsed in that family
+   aborts before either write.
+2. **An explicit range is an operator replay, not a deduplicated resume.** If
+   either CLI/MCP range bound is supplied, the engine bypasses the idempotency
+   ledger's `already_delivered` filter for every selected window. It still calls
+   `mark_delivered` after acknowledged success. Ordinary resumes, including a
+   retry after checkpoint failure, retain the filter. The backfill summary exposes
+   this as `ledger_bypassed`; CLI/run-results and MCP return the same summary.
+3. **Range validation sees the final CLI selection.** `--select`, state selectors,
+   `--exclude`, and `--failed` are all applied before range cardinality is checked,
+   and the check occurs before every healthy zero-selection exit. Zero or multiple
+   final syncs are errors. The exclusions with `--cursor-value`, `--full-refresh`,
+   and `--limit` are checked even when the final selection is empty or multiple.
+   MCP names one sync directly and already performs these exclusions before
+   connector/state construction, so no selection-order change is applicable there.
+4. **DLQ identity follows the row, not the window plan.** The deterministic hash
+   now contains the sync name, canonical destination key (or the existing
+   pre-metadata keyless fallback), and the row's own cursor canonicalized in the
+   backfill family. Neither low nor high is included. The same failed key therefore
+   replaces one entry across checkpoint retries, later open-ended ceilings, and
+   explicitly shifted replay windows, while distinct cursor occurrences remain
+   distinct. As in rounds 13/14, this changes only unreleased backfill IDs and needs
+   no migration.
+
+## Amendment 2026-11-27 (slice 4 round-2 review)
+
+Two fail-closed refinements supersede the affected round-1 wording:
+
+1. **Operator replay renews ledger retention time.** The frozen
+   `IdempotencyLedger` Protocol keeps `mark_delivered` unchanged. A separate
+   additive `RenewingIdempotencyLedger` capability inserts a missing key or
+   updates an existing key's `delivered_at` after acknowledged operator-replay
+   delivery. PostgreSQL implements this with `ON CONFLICT ... DO UPDATE`; it is
+   the only ledger backend currently exposed by `drt/state` (the other state
+   dialects reject `state.idempotency`). Ordinary runs retain `mark_delivered`'s
+   duplicate no-op. An explicit range with a configured ledger and resolvable
+   key refuses before extraction if renewal is unavailable. Renewal errors
+   propagate and a failed operator replay skips ledger pruning, so an old key
+   cannot be deleted on the failure path. A successful renewal precedes the
+   normal seven-day prune, preventing the next lagged resume from redelivering
+   the replayed row.
+2. **Keyless DLQ fallback identity is typed and collision-intolerant.** The hash
+   input now uses a canonical recursive encoding with explicit tags for null,
+   boolean, integer, float, string, datetime/date/time, duration, decimal, UUID,
+   bytes, mappings, and collection shapes; `default=str` is no longer part of
+   deterministic identity. Unsupported fallback values refuse rather than being
+   stringified. For a keyless backfill capability, the engine tracks these IDs
+   across streamed batches in one window and rejects the first repeat before its
+   batch reaches the destination. The operator must configure a unique
+   destination key or deduplicate the model. Keyed destinations retain their
+   existing destination-upsert-key validation and identity path.
+
+## Amendment 2026-11-27 (slice 4 round-3 review)
+
+Two further fail-closed refinements supersede the affected round-2 wording:
+
+1. **Delivery audit is independent of strict ledger renewal.** After a target
+   acknowledges delivery, drt captures a renewal failure, still attempts the
+   compliance audit write with the same `delivered_at`, and then re-raises the
+   original renewal error. The window remains uncheckpointed and operator-replay
+   ledger pruning remains suppressed. The same ordering applies after a
+   `PendingFlushCapable` destination acknowledges its deferred writes.
+2. **Source-contract rows share the window-wide keyless collision guard.** Before
+   missing, null, or out-of-range cursor failures can emit deterministic fallback
+   dead letters, drt checks their IDs against the same per-window set used by
+   destination failures, including IDs seen in earlier streamed batches. A repeat
+   raises the existing unique-key/deduplication error before any DLQ append, so a
+   strict backend cannot coalesce two reported failures into one retryable row.
