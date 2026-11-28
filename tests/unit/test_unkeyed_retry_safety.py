@@ -490,15 +490,223 @@ def test_elasticsearch_partial_bulk_failure_accounts_for_the_whole_request(
     assert responses == 1
 
 
-def test_google_ads_fail_fast_marks_later_unbuilt_rows_unattempted() -> None:
+@pytest.mark.parametrize(
+    ("on_error", "expected_counts", "expected_unattempted", "expected_requests"),
+    [
+        ("fail", (1, 1, 1), [2], 1),
+        ("skip", (2, 1, 0), [], 2),
+    ],
+)
+def test_elasticsearch_omitted_bulk_item_is_a_row_error_and_controls_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+    on_error: str,
+    expected_counts: tuple[int, int, int],
+    expected_unattempted: list[int],
+    expected_requests: int,
+) -> None:
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "errors": False,
+                    "items": [{"index": {"status": 201}}],
+                },
+                request=request,
+            )
+        return _bulk_response(request, 1)
+
+    install_mock_transport(monkeypatch, handler)
+    result = ElasticsearchDestination().load(
+        [{"id": 1}, {"id": 2}, {"id": 3}],
+        _elasticsearch_config(id_field="id"),
+        _options(on_error=on_error, batch_size=2),
+    )
+
+    assert (result.success, result.failed, result.skipped) == expected_counts
+    assert result.unattempted == expected_unattempted
+    assert requests == expected_requests
+    assert len(result.row_errors) == 1
+    assert result.row_errors[0].batch_index == 1
+    assert result.row_errors[0].http_status is None
+    assert result.row_errors[0].error_message == "bulk response omitted this item"
+
+
+@pytest.mark.parametrize(
+    ("on_error", "expected_counts", "expected_unattempted", "expected_requests"),
+    [
+        ("fail", (0, 1, 1), [1], 0),
+        ("skip", (1, 1, 0), [], 1),
+    ],
+)
+def test_google_ads_missing_conversion_time_controls_later_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    on_error: str,
+    expected_counts: tuple[int, int, int],
+    expected_unattempted: list[int],
+    expected_requests: int,
+) -> None:
+    _patch_google_ads_base(monkeypatch)
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return _google_ads_response(request, 1)
+
+    install_mock_transport(monkeypatch, handler)
     result = GoogleAdsDestination().load(
         [
-            {"gclid": "", "conversion_time": "2026-01-01 12:00:00"},
+            {"gclid": "click-1", "conversion_time": ""},
             {"gclid": "click-2", "conversion_time": "2026-01-01 12:00:00"},
         ],
         _google_ads_config(),
-        _options(on_error="fail"),
+        _options(on_error=on_error),
     )
 
-    assert (result.success, result.failed, result.skipped) == (0, 1, 1)
-    assert result.unattempted == [1]
+    assert (result.success, result.failed, result.skipped) == expected_counts
+    assert result.unattempted == expected_unattempted
+    assert requests == expected_requests
+    assert result.row_errors[0].batch_index == 0
+    assert "conversion_time" in result.row_errors[0].error_message
+
+
+@pytest.mark.parametrize(
+    ("on_error", "expected_counts", "expected_unattempted", "expected_requests"),
+    [
+        ("fail", (0, 1, 1), [1], 0),
+        ("skip", (1, 1, 0), [], 1),
+    ],
+)
+def test_google_ads_template_error_controls_later_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    on_error: str,
+    expected_counts: tuple[int, int, int],
+    expected_unattempted: list[int],
+    expected_requests: int,
+) -> None:
+    _patch_google_ads_base(monkeypatch)
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return _google_ads_response(request, 1)
+
+    install_mock_transport(monkeypatch, handler)
+    result = GoogleAdsDestination().load(
+        [
+            {"gclid": "click-1", "conversion_time": "2026-01-01 12:00:00"},
+            {
+                "gclid": "click-2",
+                "conversion_time": "2026-01-01 12:00:00",
+                "order_id": "order-2",
+            },
+        ],
+        _google_ads_config(native_idempotency_key="{{ row.order_id }}"),
+        _options(on_error=on_error),
+    )
+
+    assert (result.success, result.failed, result.skipped) == expected_counts
+    assert result.unattempted == expected_unattempted
+    assert requests == expected_requests
+    assert result.row_errors[0].batch_index == 0
+    assert "Template error" in result.row_errors[0].error_message
+
+
+@pytest.mark.parametrize("on_error", ["fail", "skip"])
+def test_google_ads_http_upload_failure_is_attributed_to_every_requested_row(
+    monkeypatch: pytest.MonkeyPatch, on_error: str
+) -> None:
+    _patch_google_ads_base(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="account access denied", request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    records = [
+        {"gclid": "click-1", "conversion_time": "2026-01-01 12:00:00"},
+        {"gclid": "click-2", "conversion_time": "2026-01-01 12:00:00"},
+    ]
+
+    result = GoogleAdsDestination().load(
+        records,
+        _google_ads_config(),
+        _options(on_error=on_error),
+    )
+
+    assert (result.success, result.failed, result.skipped) == (0, 2, 0)
+    assert result.unattempted == []
+    assert result.errors == ["Google Ads API error: 403 account access denied"]
+    assert [error.batch_index for error in result.row_errors] == [0, 1]
+    assert [error.http_status for error in result.row_errors] == [403, 403]
+    assert [error.error_message for error in result.row_errors] == [
+        "account access denied",
+        "account access denied",
+    ]
+
+
+@pytest.mark.parametrize("on_error", ["fail", "skip"])
+def test_google_ads_malformed_upload_response_is_attributed_to_every_requested_row(
+    monkeypatch: pytest.MonkeyPatch, on_error: str
+) -> None:
+    _patch_google_ads_base(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not-json", request=request)
+
+    install_mock_transport(monkeypatch, handler)
+    records = [
+        {"gclid": "click-1", "conversion_time": "2026-01-01 12:00:00"},
+        {"gclid": "click-2", "conversion_time": "2026-01-01 12:00:00"},
+    ]
+
+    result = GoogleAdsDestination().load(
+        records,
+        _google_ads_config(),
+        _options(on_error=on_error),
+    )
+
+    assert (result.success, result.failed, result.skipped) == (0, 2, 0)
+    assert result.unattempted == []
+    assert len(result.errors) == 1
+    assert result.errors[0].startswith("Google Ads error:")
+    assert [error.batch_index for error in result.row_errors] == [0, 1]
+    assert [error.http_status for error in result.row_errors] == [None, None]
+    assert all(error.error_message in result.errors[0] for error in result.row_errors)
+
+
+@pytest.mark.parametrize(
+    "missing_key_row",
+    [
+        {"name": "no key"},
+        {"warehouse_id": None, "name": "None"},
+        {"warehouse_id": "  ", "name": "blank"},
+    ],
+    ids=["missing", "none", "blank"],
+)
+def test_airtable_upsert_batch_with_an_unusable_merge_key_is_not_replayed(
+    monkeypatch: pytest.MonkeyPatch, missing_key_row: dict[str, Any]
+) -> None:
+    harness = BlindCreateFaultHarness(
+        "/v0/app123/Customers",
+        create_method="PATCH",
+        mode="commit-then-drop",
+        fallback=_unexpected,
+        create_response=_airtable_response,
+    )
+    install_mock_transport(monkeypatch, harness)
+
+    result = AirtableDestination().load(
+        [{"warehouse_id": "customer-1", "name": "Ada"}, missing_key_row],
+        _airtable_config(primary_key="warehouse_id"),
+        _options(),
+    )
+
+    assert harness.create_attempts == 1
+    assert (result.success, result.failed) == (0, 2)
+    assert "delivery is unknown" in result.row_errors[0].error_message

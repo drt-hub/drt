@@ -22,7 +22,7 @@ destination:
 | `base_id` | string | — | Airtable base ID (`app…`). **Required** |
 | `table_name` | string | — | Target table name (URL-encoded automatically). **Required** |
 | `primary_key` | string \| null | null | When set, records are **upserted** by matching this field (Airtable `performUpsert.fieldsToMergeOn`). Omit for **append-only**. |
-| `retry_creates` | bool | `false` | Allow replay of an append after a delivery-unknown failure. This can create duplicate rows; irrelevant to keyed upserts. |
+| `retry_creates` | bool | `false` | Allow replay of an append (or of an upsert batch with a row lacking a usable `primary_key` value) after a delivery-unknown failure. This can create duplicate rows; irrelevant to fully keyed upserts. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 
 ## Authentication
@@ -49,7 +49,7 @@ replay could append the entire chunk twice. A 429 or a proven pre-send connectio
 failure remains retryable.
 
 Setting `primary_key` changes the request to Airtable's keyed `PATCH`
-`performUpsert` operation, so normal retries keep using the identical payload.
+`performUpsert` operation, so normal retries keep using the identical payload. This holds only when **every** row of the 10-row request has a non-null, non-blank `primary_key` value; a request containing a row without one can create a record, so it is treated like an append (sent once; `retry_creates: true` to replay).
 Set `retry_creates: true` only to restore legacy ambiguous append replay with
 duplicate-row risk. The optional warehouse ledger helps across later runs, but
 cannot resolve whether an in-flight append committed.

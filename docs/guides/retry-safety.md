@@ -60,7 +60,7 @@ duplicate the object or message; the planned ADR step is noted.
 
 | Type | Write kind | What drt retries | Status |
 |---|---|---|---|
-| `airtable` | Record create / upsert | Append is blind; `primary_key` / `performUpsert` is keyed (see above) | Classified |
+| `airtable` | Record create / upsert | Append is blind; `primary_key` / `performUpsert` is keyed only when every row in the request has a non-blank key value, otherwise blind (see above) | Classified |
 | `amplitude` | Event ingestion | One HTTP attempt loop around each request | Not yet classified; stable-key verification planned (ADR 0023 item 3) |
 | `azure_blob` | Object upload | Nothing: no drt retry; the SDK's own retries are not verified here | Documented only (ADR 0023 item 4) |
 | `bigquery` | Warehouse write | Nothing: drt does not wrap warehouse writes in retries; replay safety follows `sync.mode` and `upsert_key` | Documented only; see the connector page |

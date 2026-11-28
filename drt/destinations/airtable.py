@@ -55,6 +55,18 @@ _MAX_BATCH = 10  # Airtable API limit
 logger = logging.getLogger(__name__)
 
 
+def _has_merge_key(record: dict[str, Any], primary_key: str | None) -> bool:
+    """True when *record* has a non-null, non-blank value for the merge field."""
+    if primary_key is None:
+        return False
+    value = record.get(primary_key)
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return isinstance(value, (int, float))
+
+
 class AirtableDestination:
     """Write records into an Airtable table (append or upsert)."""
 
@@ -103,7 +115,12 @@ class AirtableDestination:
 
                     on_delivery_unknown = None
                     operation = OperationSafety.KEYED
-                    if not upsert:
+                    # An upsert is replay-safe only when every row carries a usable merge
+                    # value: a missing, None or blank key lets Airtable create a record, so
+                    # a replay could create a second one (ADR 0023).
+                    if not upsert or not all(
+                        _has_merge_key(rec, config.primary_key) for _, rec in chunk
+                    ):
 
                         def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
                             return handle_blind_delivery_unknown(
@@ -112,7 +129,9 @@ class AirtableDestination:
                                 retry_creates=config.retry_creates,
                                 max_attempts=retry_config.max_attempts,
                                 destination="Airtable",
-                                operation="append",
+                                operation="append"
+                                if not upsert
+                                else "upsert with an incomplete merge key",
                                 logger=logger,
                             )
 
