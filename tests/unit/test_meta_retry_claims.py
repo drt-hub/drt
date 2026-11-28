@@ -74,3 +74,27 @@ def test_historical_changelog_describes_meta_dedup_scope_inline() -> None:
     assert "event_id_field so ambiguous retries can be deduplicated" not in entry
     assert "support documented Pixel-to-server deduplication" in entry
     assert "does not make an ambiguous server-to-server retry proven safe" in entry
+
+
+def test_every_changelog_entry_mentioning_meta_retry_safety_carries_the_correction() -> None:
+    """No release entry may call Meta server retries safe without the amendment note."""
+    changelog = (_ROOT / "CHANGELOG.md").read_text()
+    correction_markers = (
+        "superseded for `meta_conversions`",
+        "unclassified",
+        "not proven safe",
+        "does not make an ambiguous server-to-server retry proven safe",
+        "Pixel-to-server",
+    )
+    offenders = []
+    for line in changelog.splitlines():
+        lowered = line.lower()
+        mentions_meta = "meta_conversions" in lowered or "meta (facebook) conversions" in lowered
+        claims_safety = any(
+            phrase in lowered
+            for phrase in ("already safe", "deduplicat", "dedup mechanism", "event-dedup")
+        )
+        if mentions_meta and claims_safety and not any(m in line for m in correction_markers):
+            offenders.append(line[:120])
+
+    assert offenders == []
