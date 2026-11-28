@@ -22,6 +22,7 @@ from dagster import (
     multi_asset,
 )
 
+from dagster_drt._secrets import project_secrets_scope
 from dagster_drt.specs import build_drt_asset_specs
 from dagster_drt.translator import DagsterDrtTranslator
 
@@ -197,36 +198,37 @@ def drt_assets_legacy(
 
                 effective_dry_run = config.dry_run or _default_dry_run
 
-                project = load_project(project_path)
-                profile = load_profile(project.profile)
-                source = _get_source(profile)
-                destination = _get_destination(_sync_cfg)
-                bundle = build_state_bundle(project, project_path)
-                state_mgr = bundle.state
+                with project_secrets_scope(project_path):
+                    project = load_project(project_path)
+                    profile = load_profile(project.profile)
+                    source = _get_source(profile)
+                    destination = _get_destination(_sync_cfg)
+                    bundle = build_state_bundle(project, project_path)
+                    state_mgr = bundle.state
 
-                # The engine only persists state through an observer
-                # (AGENTS.md: "state persistence... MUST flow through
-                # SyncObserver") — state_manager= alone gets cursor *reads*
-                # but no post-run save. This legacy path has never resolved
-                # a per-sync watermark_storage override (pre-existing, not
-                # part of this fix), so it's None here, matching run_sync()'s
-                # own fallback to state_manager.get_last_sync().
-                result = run_sync(
-                    _sync_cfg,
-                    source,
-                    destination,
-                    profile,
-                    project_path,
-                    dry_run=effective_dry_run,
-                    state_manager=state_mgr,
-                    observer=StatePersistingObserver(state_mgr, None),
-                    # #1118: this legacy path never passed these two through
-                    # either — same gap as resource.py's op/asset path above.
-                    idempotency_ledger=bundle.ledger,
-                    audit_trail=bundle.audit_trail,
-                    audit_fields=project.state.audit_trail.fields,
-                    audit_retain_days=project.state.audit_trail.retain_days or 30,
-                )
+                    # The engine only persists state through an observer
+                    # (AGENTS.md: "state persistence... MUST flow through
+                    # SyncObserver") — state_manager= alone gets cursor *reads*
+                    # but no post-run save. This legacy path has never resolved
+                    # a per-sync watermark_storage override (pre-existing, not
+                    # part of this fix), so it's None here, matching run_sync()'s
+                    # own fallback to state_manager.get_last_sync().
+                    result = run_sync(
+                        _sync_cfg,
+                        source,
+                        destination,
+                        profile,
+                        project_path,
+                        dry_run=effective_dry_run,
+                        state_manager=state_mgr,
+                        observer=StatePersistingObserver(state_mgr, None),
+                        # #1118: this legacy path never passed these two through
+                        # either — same gap as resource.py's op/asset path above.
+                        idempotency_ledger=bundle.ledger,
+                        audit_trail=bundle.audit_trail,
+                        audit_fields=project.state.audit_trail.fields,
+                        audit_retain_days=project.state.audit_trail.retain_days or 30,
+                    )
 
                 context.log.info(
                     f"drt sync '{_sync_cfg.name}': "

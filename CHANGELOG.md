@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > `dagster-drt` is published as a separate PyPI package with its own version.
 
+### [Unreleased] (dagster-drt)
+
+- **Project-scoped `secrets.toml` for every execution boundary** ([#1372](https://github.com/drt-hub/drt/issues/1372), follow-up to [#1357](https://github.com/drt-hub/drt/pull/1357)): `DagsterDrtResource` (profile load, source/destination construction, `run_sync`, and the deferred row-count fetch), `drt_assets_legacy` and the change sensors now resolve `<project_dir>/.drt/secrets.toml` instead of the code location's working directory. The scope is entered per operation and never held across a `yield`. **Compatibility:** the declared `drt-core>=1.0.0` minimum is unchanged; on a drt-core without `secrets_project_dir` (older than the release containing #1357) the previous working-directory lookup is kept rather than failing, so the fix takes effect once drt-core is upgraded.
+
 ### [0.5.0] - 2026-08-31 (dagster-drt)
 
 - **⚠️ Breaking: SQL Server's change sensor now requires `minimum_interval_seconds=`, matching Snowflake's existing requirement** ([#1051](https://github.com/drt-hub/drt/issues/1051)): both `snowflake.connector.connect()` and `pymssql.connect()` open a fresh, full-auth-handshake connection on every poll — a documented, self-acknowledged asymmetry in this module's own docstring and [ADR 0004](https://github.com/drt-hub/drt/blob/main/docs/adr/0004-streaming-and-event-triggered-syncs.md)'s 2026-08-17 amendment, never actually enforced in code until now. **Upgrading:** a SQL Server sensor definition (`build_drt_change_sensor(...)`) that didn't already pass `minimum_interval_seconds=` will start raising `ValueError` at evaluation time — add the argument, there is no compatibility default (matches how Snowflake's own requirement works — the interval is a deliberate choice about your database's tolerance for poll-connection overhead, not something dagster-drt can safely guess). See [`docs/guides/event-driven-syncs.md`](https://github.com/drt-hub/drt/blob/main/docs/guides/event-driven-syncs.md) and this package's README for the updated example.
