@@ -142,6 +142,8 @@ def create_server(project_dir: Path | None = None) -> Any:
         vars: dict[str, Any] | None = None,
         force_guards: bool = False,
         approved_by: str | None = None,
+        backfill_start: str | None = None,
+        backfill_end: str | None = None,
     ) -> dict[str, Any]:
         """Run a specific drt sync.
 
@@ -189,6 +191,16 @@ def create_server(project_dir: Path | None = None) -> Any:
                 ``approved_by``.
             approved_by: Person who approved a forced guard override. Required
                 when ``force_guards=True`` and recorded in the result.
+            backfill_start: For a sync with ``sync.backfill`` only: start the
+                windows here instead of at the durable checkpoint or the
+                configured start (mirrors ``drt run --backfill-start``). An
+                integer for a numeric backfill, an ISO-8601 timestamp for a
+                timestamp one. A start below the checkpoint is a bounded
+                replay; the checkpoint never moves backwards. Mutually
+                exclusive with ``cursor_value``, ``full_refresh`` and ``limit``.
+            backfill_end: Exclusive ceiling override for the same sync
+                (mirrors ``drt run --backfill-end``); same format and
+                exclusions as ``backfill_start``.
 
         Returns:
             Result summary with success count, failed count, errors, and
@@ -209,6 +221,8 @@ def create_server(project_dir: Path | None = None) -> Any:
             vars=vars,
             force_guards=force_guards,
             approved_by=approved_by,
+            backfill_start=backfill_start,
+            backfill_end=backfill_end,
         )
 
     @scoped_tool(annotations={"readOnlyHint": False, "destructiveHint": False})

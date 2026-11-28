@@ -1049,6 +1049,30 @@ class PostgresWarehouseIdempotencyLedger:
         except Exception as exc:  # noqa: BLE001 - best-effort, see Protocol docstring
             logger.warning("idempotency ledger mark failed for sync=%s: %s", sync_name, exc)
 
+    def renew_delivered(self, sync_name: str, keys: Collection[str], delivered_at: str) -> None:
+        """Refresh replay keys strictly; a failed renewal must fail the replay."""
+        from psycopg2 import sql as _pgsql
+
+        keys = list(keys)
+        if not keys:
+            return
+        conn = _connect(self._profile)
+        try:
+            self._ensure_table(conn)
+            cur = conn.cursor()
+            cur.executemany(
+                _pgsql.SQL(
+                    "INSERT INTO {} (sync_name, idempotency_key, delivered_at) "
+                    "VALUES (%s, %s, %s) "
+                    "ON CONFLICT (sync_name, idempotency_key) DO UPDATE "
+                    "SET delivered_at = EXCLUDED.delivered_at"
+                ).format(_qualified(self._profile, _IDEMPOTENCY_TABLE)),
+                [(sync_name, key, delivered_at) for key in keys],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def prune(self, sync_name: str, retention_days: int) -> int:
         from psycopg2 import sql as _pgsql
 

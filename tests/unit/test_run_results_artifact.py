@@ -486,3 +486,110 @@ def test_write_is_atomic_no_partial_file_on_write_failure(
     assert not final_path.exists()
     leftover_tmp_files = list((project / "target" / "drt").glob(".run_results.json.*.tmp"))
     assert leftover_tmp_files == []
+
+
+def test_backfill_summary_and_windows_are_in_the_artifact_and_json_output(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0021 slice 4: per-window results land in run_results.json and --output json."""
+    from drt.engine import sync as sync_module
+
+    window_rows = [
+        {
+            "index": 0,
+            "low": 0,
+            "high": 3,
+            "rows_extracted": 3,
+            "rows_synced": 3,
+            "rows_failed": 0,
+            "rows_skipped": 0,
+            "status": "success",
+            "checkpoint": "written",
+            "duration_seconds": 0.1,
+        },
+        {
+            "index": 1,
+            "low": 3,
+            "high": 6,
+            "rows_extracted": 3,
+            "status": "failed",
+            "checkpoint": "not_written",
+            "duration_seconds": 0.2,
+        },
+    ]
+    plan_summary = {
+        "requested_start": 0,
+        "effective_start": 0,
+        "ceiling": 6,
+        "window": 3,
+        "windows_planned": 2,
+        "windows_completed": 1,
+        "failed_window": 1,
+        "final_checkpoint": "3",
+    }
+
+    class _FakeResult:
+        success = 3
+        failed = 0
+        skipped = 0
+        skipped_no_match = 0
+        rows_extracted = 6
+        row_errors: list[Any] = []
+        errors: list[str] = []
+        watermark_source: str | None = "cli"
+        cursor_value_used: str | None = "0"
+        watermark_lag: str | None = None
+        limit_applied: int | None = None
+        duration_seconds = 0.3
+        interrupted = False
+        run_id: str | None = None
+        sync_run_id: str | None = "fake-sync-run-id"
+        diff: Any = None
+        backfill: Any = plan_summary
+        windows: Any = window_rows
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _FakeResult(), raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users", "--output", "json"])
+    assert result.exit_code == 0, result.output
+
+    artifact = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    entry = artifact["results"][0]
+    assert entry["backfill"] == plan_summary
+    assert entry["windows"] == window_rows
+    assert [w["checkpoint"] for w in entry["windows"]] == ["written", "not_written"]
+    assert entry["watermark_source"] == "cli"
+    printed = json.loads(result.output)
+    assert printed["syncs"][0]["windows"] == window_rows
+
+
+def test_non_backfill_entry_has_no_backfill_keys(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.engine import sync as sync_module
+
+    class _FakeResult:
+        success = 1
+        failed = 0
+        skipped = 0
+        skipped_no_match = 0
+        rows_extracted = 1
+        row_errors: list[Any] = []
+        errors: list[str] = []
+        watermark_source: str | None = None
+        cursor_value_used: str | None = None
+        watermark_lag: str | None = None
+        limit_applied: int | None = None
+        duration_seconds = 0.01
+        interrupted = False
+        run_id: str | None = None
+        sync_run_id: str | None = "fake-sync-run-id"
+        diff: Any = None
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _FakeResult(), raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users", "--output", "json"])
+    assert result.exit_code == 0, result.output
+
+    entry = json.loads((project / "target" / "drt" / "run_results.json").read_text())["results"][0]
+    assert "backfill" not in entry and "windows" not in entry

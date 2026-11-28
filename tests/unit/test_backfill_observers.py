@@ -40,7 +40,10 @@ class _Watermarks:
 
 
 def _checkpoint(
-    observer: StatePersistingObserver, high: int, *, result: SyncResult | None = None
+    observer: StatePersistingObserver,
+    high: int | str,
+    *,
+    result: SyncResult | None = None,
 ) -> str:
     return observer.checkpoint_window(
         "s", "2026-11-24T00:00:00+00:00", result or SyncResult(), "id", high
@@ -88,6 +91,24 @@ class TestCheckpointWindow:
         assert state is not None and state.last_cursor_value == "50"
         assert state.cursor_boundary == "exclusive"
 
+    def test_large_integer_checkpoint_comparison_is_exact(self, tmp_path: Path) -> None:
+        manager = StateManager(tmp_path)
+        manager.save_sync(
+            SyncState(
+                "s",
+                "old",
+                1,
+                "success",
+                last_cursor_value="9007199254740993",
+            )
+        )
+
+        assert _checkpoint(StatePersistingObserver(manager, None), 9007199254740992) == (
+            "9007199254740993"
+        )
+        state = manager.get_last_sync("s")
+        assert state is not None and state.last_cursor_value == "9007199254740993"
+
     def test_a_watermark_that_is_already_ahead_is_kept_and_not_overwritten(
         self, tmp_path: Path
     ) -> None:
@@ -97,6 +118,97 @@ class TestCheckpointWindow:
         durable = _checkpoint(observer, 10)
 
         assert durable == "99"
+        assert watermarks.saved == []
+
+        state = observer._state_manager.get_last_sync("s")
+        assert state is not None and state.last_cursor_value == "99"
+
+    def test_state_max_is_copied_to_a_lagging_watermark_store(self, tmp_path: Path) -> None:
+        manager = StateManager(tmp_path)
+        manager.save_sync(SyncState("s", "old", 1, "success", last_cursor_value="50"))
+        watermarks = _Watermarks({"s": "3"})
+
+        durable = _checkpoint(StatePersistingObserver(manager, watermarks), 10)
+
+        assert durable == "50"
+        state = manager.get_last_sync("s")
+        assert state is not None and state.last_cursor_value == "50"
+        assert watermarks.saved == [("s", "50")]
+
+    def test_offset_watermark_max_is_canonicalized_into_both_stores(self, tmp_path: Path) -> None:
+        manager = StateManager(tmp_path)
+        watermarks = _Watermarks({"s": "2026-01-02T23:00:00-05:00"})
+        observer = StatePersistingObserver(manager, watermarks)
+
+        durable = _checkpoint(observer, "2026-01-03 02:00:00")
+
+        assert durable == "2026-01-03 04:00:00"
+        state = manager.get_last_sync("s")
+        assert state is not None and state.last_cursor_value == durable
+        assert watermarks.saved == [("s", durable)]
+
+    def test_naive_timestamp_is_utc_when_compared_with_an_offset_high(self, tmp_path: Path) -> None:
+        manager = StateManager(tmp_path)
+        manager.save_sync(
+            SyncState(
+                "s",
+                "old",
+                1,
+                "success",
+                last_cursor_value="2026-01-03T03:00:00",
+            )
+        )
+        watermarks = _Watermarks({"s": "2026-01-03 03:00:00"})
+
+        durable = _checkpoint(
+            StatePersistingObserver(manager, watermarks),
+            "2026-01-02T23:00:00-05:00",
+        )
+
+        assert durable == "2026-01-03 04:00:00"
+        state = manager.get_last_sync("s")
+        assert state is not None and state.last_cursor_value == durable
+        assert watermarks.values["s"] == durable
+
+    def test_equal_values_remain_equal_in_both_stores(self, tmp_path: Path) -> None:
+        manager = StateManager(tmp_path)
+        manager.save_sync(SyncState("s", "old", 1, "success", last_cursor_value="10"))
+        watermarks = _Watermarks({"s": "10"})
+
+        assert _checkpoint(StatePersistingObserver(manager, watermarks), 10) == "10"
+        state = manager.get_last_sync("s")
+        assert state is not None and state.last_cursor_value == "10"
+        assert watermarks.saved == []
+
+    @pytest.mark.parametrize(
+        ("state_value", "watermark_value", "high", "message"),
+        [
+            ("not-an-int", "10", 11, "StateStore"),
+            (
+                "2026-01-02 00:00:00",
+                "not-a-timestamp",
+                "2026-01-03 00:00:00",
+                "WatermarkStorage",
+            ),
+        ],
+    )
+    def test_unparseable_stored_checkpoint_fails_before_either_store_is_written(
+        self,
+        tmp_path: Path,
+        state_value: str,
+        watermark_value: str,
+        high: int | str,
+        message: str,
+    ) -> None:
+        manager = StateManager(tmp_path)
+        manager.save_sync(SyncState("s", "old", 1, "success", last_cursor_value=state_value))
+        watermarks = _Watermarks({"s": watermark_value})
+        with pytest.raises(ValueError, match=message):
+            _checkpoint(StatePersistingObserver(manager, watermarks), high)
+
+        state = manager.get_last_sync("s")
+        assert state is not None and state.last_run_at == "old"
+        assert state.last_cursor_value == state_value
         assert watermarks.saved == []
 
     def test_a_lower_or_equal_watermark_is_advanced(self, tmp_path: Path) -> None:
