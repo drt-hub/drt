@@ -87,6 +87,56 @@ def canonicalize_bound(
     return stringify_cursor_value(_parse_timestamp(value, field_name=field_name))
 
 
+def parse_cli_range(
+    configured_start: BackfillBound,
+    backfill_start: BackfillBound | None,
+    backfill_end: BackfillBound | None,
+) -> tuple[BackfillBound | None, BackfillBound | None]:
+    """Canonicalize ``--backfill-start/--backfill-end`` in the sync's own family.
+
+    The flags arrive as text from the CLI or MCP. A numeric backfill needs
+    integers and a timestamp backfill needs ISO-8601 instants, so a value of the
+    wrong family is refused rather than reinterpreted (ADR 0021 section 5).
+    """
+    numeric = isinstance(configured_start, int)
+
+    def one(value: BackfillBound | None, flag: str) -> BackfillBound | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError(f"{flag} must not be a boolean.")
+        if numeric:
+            if isinstance(value, str):
+                try:
+                    value = int(value.strip())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{flag} must be an integer for a numeric sync.backfill, got {value!r}."
+                    ) from exc
+            return canonicalize_bound(value, field_name=flag)
+        if isinstance(value, int):
+            raise ValueError(
+                f"{flag} must be an ISO-8601 timestamp for a timestamp sync.backfill, "
+                f"got the integer {value}."
+            )
+        return canonicalize_bound(value, field_name=flag)
+
+    start = one(backfill_start, "--backfill-start")
+    end = one(backfill_end, "--backfill-end")
+    if start is not None and end is not None and not _bound_lt(start, end):
+        raise ValueError(
+            f"--backfill-start ({start}) must be before --backfill-end ({end}): "
+            "windows are half-open [start, end)."
+        )
+    return start, end
+
+
+def _bound_lt(low: BackfillBound, high: BackfillBound) -> bool:
+    if isinstance(low, int) and isinstance(high, int):
+        return low < high
+    return _parse_timestamp(low, field_name="bound") < _parse_timestamp(high, field_name="bound")
+
+
 @overload
 def _window_count(delta: int, step: int) -> int: ...
 
@@ -211,7 +261,7 @@ def plan_windows(
         low_dt = high_dt
 
 
-def _canonicalize_row_cursor(value: Any, low: BackfillBound) -> BackfillBound:
+def canonicalize_row_cursor(value: Any, low: BackfillBound) -> BackfillBound:
     """Canonicalize a source row cursor using the window's arithmetic family."""
     if isinstance(low, int) and not isinstance(low, bool):
         if isinstance(value, bool) or not isinstance(value, int):
@@ -231,6 +281,28 @@ def _canonicalize_row_cursor(value: Any, low: BackfillBound) -> BackfillBound:
         return canonicalize_bound(value, field_name="source row cursor")
     except ValueError as exc:
         raise WindowCursorRangeError(str(exc)) from exc
+
+
+def canonicalize_record_cursor(
+    record: Mapping[str, Any], cursor_field: str, low: BackfillBound
+) -> BackfillBound:
+    """Read and canonicalize a non-null row cursor in the window's family."""
+    value = _record_cursor_value(record, cursor_field)
+    if value is None:
+        raise WindowCursorRangeError(
+            f"sync.backfill row has null or missing cursor_field {cursor_field!r}."
+        )
+    return canonicalize_row_cursor(value, low)
+
+
+def _record_cursor_value(record: Mapping[str, Any], cursor_field: str) -> Any:
+    """Read a possibly nested cursor, returning ``None`` when absent or null."""
+    value: Any = record
+    for segment in cursor_field.split("."):
+        if not isinstance(value, Mapping) or segment not in value:
+            return None
+        value = value[segment]
+    return value
 
 
 def validate_window_row(
@@ -261,12 +333,7 @@ def validate_window_row(
         if canonical_low >= canonical_high:
             raise ValueError("sync.backfill window low must be less than high.")
 
-    value: Any = record
-    for segment in cursor_field.split("."):
-        if not isinstance(value, Mapping) or segment not in value:
-            value = None
-            break
-        value = value[segment]
+    value = _record_cursor_value(record, cursor_field)
     if value is None:
         return RowError(
             batch_index=batch_index,
@@ -278,7 +345,7 @@ def validate_window_row(
             ),
         )
 
-    canonical_value = _canonicalize_row_cursor(value, canonical_low)
+    canonical_value = canonicalize_row_cursor(value, canonical_low)
     if isinstance(canonical_low, int):
         assert isinstance(canonical_high, int)
         assert isinstance(canonical_value, int)

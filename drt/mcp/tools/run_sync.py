@@ -30,6 +30,8 @@ def run_sync(
     vars: dict[str, Any] | None = None,
     force_guards: bool = False,
     approved_by: str | None = None,
+    backfill_start: str | None = None,
+    backfill_end: str | None = None,
 ) -> dict[str, Any]:
     from drt.cli._helpers import get_watermark_storage, resolve_profile_name
     from drt.cli.main import _get_destination, _get_source
@@ -63,6 +65,14 @@ def run_sync(
     if limit is not None and limit < 1:
         return {"error": "limit must be a positive integer."}
 
+    range_override = backfill_start is not None or backfill_end is not None
+    if range_override and cursor_value is not None:
+        return {"error": "backfill_start/backfill_end and cursor_value are mutually exclusive."}
+    if range_override and full_refresh:
+        return {"error": "backfill_start/backfill_end and full_refresh are mutually exclusive."}
+    if range_override and limit is not None:
+        return {"error": "backfill_start/backfill_end and limit are mutually exclusive."}
+
     project = ctx.load_project()
 
     # vars: `vars:` block < DRT_VAR_* < this call's `vars` (#870/#783) — same
@@ -72,6 +82,13 @@ def run_sync(
     sync = ctx.find_sync(sync_name, vars=resolved_vars, manifest_path=manifest_path)
     if sync is None:
         return {"error": f"No sync named '{sync_name}' found."}
+    if range_override and sync.sync.backfill is None:
+        return {
+            "error": (
+                "backfill_start/backfill_end are only valid for a sync with sync.backfill; "
+                f"'{sync_name}' has none."
+            )
+        }
     if sync.sync.backfill is not None:
         if dry_run:
             return {
@@ -90,8 +107,8 @@ def run_sync(
         if cursor_value is not None:
             return {
                 "error": (
-                    "cursor_value is not allowed with sync.backfill; it is only a "
-                    "legacy/ad-hoc one-bound recovery override."
+                    "cursor_value is not allowed with sync.backfill; use backfill_start "
+                    "and backfill_end to override the range."
                 )
             }
         if full_refresh:
@@ -159,6 +176,8 @@ def run_sync(
             force_guards=force_guards,
             full_refresh=full_refresh,
             allow_backfill_execution=True,
+            backfill_start=backfill_start,
+            backfill_end=backfill_end,
         )
     except Exception as exc:
         from drt.engine.guards import GuardTripped, guards_outcome_of
@@ -188,6 +207,9 @@ def run_sync(
     guards_outcome = getattr(result, "guards", None)
     if guards_outcome is not None:
         response["guards"] = guards_outcome
+    if result.backfill is not None:
+        response["backfill"] = dict(result.backfill)
+        response["windows"] = [dict(window) for window in result.windows]
     if force_guards:
         response["approved_by"] = approver
     diff_value = getattr(result, "diff", None)
