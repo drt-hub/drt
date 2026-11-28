@@ -466,6 +466,8 @@ class AirtableDestinationConfig(BaseModel):
     # When set, records are upserted by matching this field (Airtable
     # performUpsert / fieldsToMergeOn). Omit for append-only.
     primary_key: str | None = None
+    # Append POSTs have no replay key; allow ambiguous retries only by explicit opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
@@ -893,6 +895,8 @@ class GoogleAdsDestinationConfig(BaseModel):
     currency_code: str = "USD"
     developer_token_env: str = "GOOGLE_ADS_DEVELOPER_TOKEN"
     auth: AuthConfig | None = None  # typically oauth2_client_credentials
+    # Uploads without an orderId are blind creates; ambiguous replay is opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # (#897) Rendered per record and sent as ClickConversion's `orderId`

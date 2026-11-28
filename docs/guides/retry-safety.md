@@ -42,6 +42,9 @@ transport failures are delivery-unknown for blind and reconciled creates.
 | Klaviyo profile upsert | Keyed | Native email-keyed profile-import operation | Normal retries address one logical profile. |
 | Klaviyo `create_only` profile and list membership | Reconciled | Exact email/profile membership lookup | A miss fails closed; duplicate profiles or relationship writes are the risk. |
 | Klaviyo event | Keyed | Required stable `unique_id_field` with the same profile and metric | Normal retries address one logical event within Klaviyo's documented dedup scope. |
+| Airtable append | Blind | None | A replay can append a duplicate for every row in the ten-row request. `primary_key` switches the request to Airtable's keyed `performUpsert` operation. |
+| Elasticsearch / OpenSearch bulk request | Keyed only when every document has an explicit `_id`; otherwise the whole request is blind | Configured `id_field`, rendered into each action's `_id` | An auto-id replay creates another document for every committed item. An `op_type: create` keyed replay can still return the normal per-item 409 and is handled as a row error. |
+| Google Ads conversion upload | Keyed only when every conversion has a non-empty rendered `orderId`; otherwise the whole request is blind | `native_idempotency_key`, rendered once per row and reused byte-for-byte | An unkeyed replay can import conversions twice. Google deduplicates reused order IDs; drt keeps treating `ORDER_ID_ALREADY_IN_USE` as successful delivery. |
 
 Vendor claims and endpoints above were rechecked on 2026-11-23. An absent field
 or a similarly named feature on another endpoint is not enough to promote a
@@ -57,19 +60,19 @@ duplicate the object or message; the planned ADR step is noted.
 
 | Type | Write kind | What drt retries | Status |
 |---|---|---|---|
-| `airtable` | Record create / upsert | One HTTP attempt loop around each request | Not yet classified (ADR 0023 item 3) |
+| `airtable` | Record create / upsert | Append is blind; `primary_key` / `performUpsert` is keyed (see above) | Classified |
 | `amplitude` | Event ingestion | One HTTP attempt loop around each request | Not yet classified; stable-key verification planned (ADR 0023 item 3) |
 | `azure_blob` | Object upload | Nothing: no drt retry; the SDK's own retries are not verified here | Documented only (ADR 0023 item 4) |
 | `bigquery` | Warehouse write | Nothing: drt does not wrap warehouse writes in retries; replay safety follows `sync.mode` and `upsert_key` | Documented only; see the connector page |
 | `clickhouse` | Warehouse insert | One retry with the same `insert_deduplication_token`; best effort, only effective when the table's deduplication window is enabled | Documented (ADR 0023 item 5) |
 | `databricks` | Warehouse write | Nothing: as for `bigquery` | Documented only |
 | `discord` | Webhook message | Blind (see above) | Classified |
-| `elasticsearch` | Document index | One HTTP attempt loop around each request | Not yet classified; auto-generated IDs are blind (ADR 0023 item 3) |
+| `elasticsearch` | Document index | A bulk request is keyed only when every item has an explicit `_id`; otherwise the whole request is blind (see above) | Classified |
 | `email_smtp` | Email send | Nothing: drt does not retry SMTP sends | Documented only (ADR 0023 item 4) |
 | `file` | Local file write | Nothing | Not applicable: no remote side effect |
 | `gcs` | Object upload | Nothing: no drt retry; the SDK's own retries are not verified here | Documented only (ADR 0023 item 4) |
 | `github_actions` | Workflow dispatch | Blind (see above) | Classified |
-| `google_ads` | Conversion / offline upload | One HTTP attempt loop around each request | Not yet classified (ADR 0023 item 3) |
+| `google_ads` | Conversion / offline upload | A request is keyed only when every conversion has a non-empty `orderId`; otherwise it is blind (see above) | Classified |
 | `google_sheets` | Sheet append | Nothing: drt does not retry the append | Documented only (ADR 0023 item 4) |
 | `hubspot` | CRM object create / update | Reconciled when `id_property` is set (see above) | Classified |
 | `intercom` | Contact create / update | Reconciled when a key exists (see above) | Classified |

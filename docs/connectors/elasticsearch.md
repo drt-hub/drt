@@ -31,6 +31,7 @@ destination:
 | `username_env` | string \| null | null | Env var holding the HTTP Basic username |
 | `password_env` | string \| null | null | Env var holding the HTTP Basic password |
 | `verify_tls` | bool | `true` | Set `false` for self-signed dev clusters |
+| `retry_creates` | bool | `false` | Allow replay of an auto-id bulk request after delivery becomes unknown. This can duplicate the entire batch; irrelevant when every item has an explicit `_id`. |
 | `retry` | object \| null | null | Per-destination retry override (see `sync.retry`) |
 
 ## Authentication
@@ -74,6 +75,22 @@ without it, the cluster assigns a random id.
 | `index` (default) | Upsert — replaces the document if `_id` already exists | Keeping an index in sync with a source table |
 | `create` | Insert-only — a row whose `_id` already exists fails with 409 | Append-only event/log indices where duplicates are errors |
 
+## Retry safety
+
+Retry classification is per `_bulk` request. When every item has an explicit
+`_id` from `id_field`, the request is **keyed** and normal retries reuse the exact
+NDJSON body. This covers both `index` and `create`; an insert-only retry may return
+the usual per-item 409 after the first attempt committed, and drt keeps recording
+that 409 as a row error.
+
+If `id_field` is omitted, or any row in the batch has no value for it, the whole
+request uses auto-generated IDs and is a **blind create**. A lost response or
+post-send retryable 5xx is sent once and every row in the request gets a
+delivery-unknown error, because replay could create a second document for every
+committed item. A 429 and proven pre-send connection failure remain retryable.
+`retry_creates: true` restores legacy ambiguous replay with whole-batch duplicate
+risk.
+
 ## Per-document error handling
 
 The `_bulk` API returns **HTTP 200 even when individual documents
@@ -87,7 +104,8 @@ the `items` array and maps each failure back to its source row, so:
   in the batch is recorded as failed.
 
 `on_error: skip` (the typical choice here) keeps the sync going past
-per-row failures; `on_error: fail` stops at the first rejected document.
+per-row failures. With `on_error: fail`, drt still accounts for every item in the
+already-completed bulk response, then stops before sending the next batch.
 
 ## OpenSearch
 

@@ -52,7 +52,14 @@ from drt.config.models import (
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
-from drt.destinations.retry import resolve_retry, with_retry
+from drt.destinations.retry import (
+    DeliveryUnknownError,
+    OperationSafety,
+    RetryDirective,
+    handle_blind_delivery_unknown,
+    resolve_retry,
+    with_retry,
+)
 from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
@@ -222,6 +229,7 @@ class GoogleAdsDestination:
                     ),
                 )
                 if sync_options.on_error == "fail":
+                    _mark_unattempted_after(result, i, len(records))
                     break
                 continue
 
@@ -258,6 +266,7 @@ class GoogleAdsDestination:
                         error_message=f"Template error: {e}",
                     )
                     if sync_options.on_error == "fail":
+                        _mark_unattempted_after(result, i, len(records))
                         break
                     continue
 
@@ -282,7 +291,29 @@ class GoogleAdsDestination:
                     resp.raise_for_status()
                     return resp
 
-                response = with_retry(do_upload, retry_config)
+                keyed = all(
+                    isinstance(conversion.get("orderId"), str)
+                    and bool(conversion["orderId"].strip())
+                    for conversion in conversions
+                )
+
+                def on_delivery_unknown(error: Exception, attempt: int) -> RetryDirective:
+                    return handle_blind_delivery_unknown(
+                        error,
+                        attempt,
+                        retry_creates=config.retry_creates,
+                        max_attempts=retry_config.max_attempts,
+                        destination="Google Ads",
+                        operation="conversion upload without orderId",
+                        logger=logger,
+                    )
+
+                response = with_retry(
+                    do_upload,
+                    retry_config,
+                    operation=(OperationSafety.KEYED if keyed else OperationSafety.BLIND_CREATE),
+                    on_delivery_unknown=None if keyed else on_delivery_unknown,
+                )
 
             resp_data = response.json()
             partial_errors = resp_data.get("partialFailureError")
@@ -359,14 +390,37 @@ class GoogleAdsDestination:
             else:
                 result.success += len(conversions)
 
+        except DeliveryUnknownError as e:
+            _record_request_failure(
+                result,
+                records,
+                conversion_record_indices,
+                e,
+                http_status=e.http_status,
+                message=str(e),
+            )
         except httpx.HTTPStatusError as e:
-            result.failed += len(conversions)
-            result.errors.append(
-                f"Google Ads API error: {e.response.status_code} {e.response.text[:500]}"
+            message = f"Google Ads API error: {e.response.status_code} {e.response.text[:500]}"
+            result.errors.append(message)
+            _record_request_failure(
+                result,
+                records,
+                conversion_record_indices,
+                e,
+                http_status=e.response.status_code,
+                message=e.response.text[:500],
             )
         except Exception as e:
-            result.failed += len(conversions)
-            result.errors.append(f"Google Ads error: {e}")
+            message = f"Google Ads error: {e}"
+            result.errors.append(message)
+            _record_request_failure(
+                result,
+                records,
+                conversion_record_indices,
+                e,
+                http_status=None,
+                message=str(e),
+            )
 
         return result
 
@@ -375,3 +429,29 @@ class GoogleAdsDestination:
         documented ``orderId`` dedup field -- see ``load()``'s per-record
         rendering and ``_is_order_id_already_in_use`` above."""
         return True
+
+
+def _record_request_failure(
+    result: SyncResult,
+    records: list[dict[str, Any]],
+    record_indices: list[int],
+    error: Exception,
+    *,
+    http_status: int | None,
+    message: str,
+) -> None:
+    for record_index in record_indices:
+        record_row_error(
+            result,
+            record_index,
+            json.dumps(records[record_index], default=str)[:200],
+            error,
+            http_status=http_status,
+            error_message=message,
+        )
+
+
+def _mark_unattempted_after(result: SyncResult, failed_index: int, record_count: int) -> None:
+    indices = list(range(failed_index + 1, record_count))
+    result.skipped += len(indices)
+    result.unattempted.extend(indices)

@@ -216,10 +216,10 @@ class TestErrorHandling:
             [{"id": 1}, {"id": 2}], config, _options(on_error="fail")
         )
 
-        # First item failed → stop; second item in the same response is not
-        # counted as success (we broke out).
+        # The whole request was already accepted by the cluster, so every item
+        # in its response is accounted before on_error=fail stops later batches.
         assert result.failed == 1
-        assert result.success == 0
+        assert result.success == 1
 
     def test_whole_batch_http_error_fails_all_rows(self, httpserver: HTTPServer) -> None:
         httpserver.expect_request("/_bulk", method="POST").respond_with_data(
@@ -245,6 +245,8 @@ class TestErrorHandling:
         # First batch's 403 → stop; only one row recorded.
         assert result.failed == 1
         assert result.success == 0
+        assert result.skipped == 1
+        assert result.unattempted == [1]
 
     def test_transport_error_fails_all_rows(self) -> None:
         """A non-HTTP failure (connection refused / DNS) is captured per row
@@ -267,6 +269,8 @@ class TestErrorHandling:
         # First batch errors and stops → only one row recorded.
         assert result.failed == 1
         assert result.success == 0
+        assert result.skipped == 1
+        assert result.unattempted == [1]
 
     def test_200_without_items_counts_chunk_success(self, httpserver: HTTPServer) -> None:
         """Defensive: a 200 from _bulk that lacks an ``items`` array (shouldn't

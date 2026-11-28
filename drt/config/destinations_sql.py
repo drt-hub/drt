@@ -171,6 +171,8 @@ class ElasticsearchDestinationConfig(DescribableConfig):
     # TLS verification. Set False for self-signed dev clusters (local
     # OpenSearch / Elasticsearch with the bundled cert).
     verify_tls: bool = True
+    # Auto-id bulk writes are blind creates; ambiguous replay is opt-in.
+    retry_creates: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 

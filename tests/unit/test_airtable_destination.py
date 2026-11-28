@@ -145,6 +145,8 @@ class TestAirtableLoad:
         with _patch_client(client):
             result = AirtableDestination().load(records, _config(), _options(on_error="fail"))
         assert result.failed == 10  # first chunk failed
+        assert result.skipped == 5
+        assert result.unattempted == list(range(10, 15))
         assert client.request.call_count == 1  # stopped before the second chunk
 
     def test_non_http_error_recorded(self) -> None:
@@ -164,6 +166,8 @@ class TestAirtableLoad:
         with _patch_client(client):
             result = AirtableDestination().load(records, _config(), _options(on_error="fail"))
         assert result.failed == 10
+        assert result.skipped == 5
+        assert result.unattempted == list(range(10, 15))
         assert client.request.call_count == 1  # stopped before the second chunk
 
     def test_load_missing_token_raises(
