@@ -8,7 +8,10 @@ against reintroducing the claim.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SURFACES = [
@@ -76,25 +79,60 @@ def test_historical_changelog_describes_meta_dedup_scope_inline() -> None:
     assert "does not make an ambiguous server-to-server retry proven safe" in entry
 
 
+_META_NAMES = re.compile(r"meta[ _]conversions|meta \(facebook\) conversions", re.IGNORECASE)
+_SAFETY_CLAIMS = ("already safe", "deduplicat", "dedup mechanism", "event-dedup")
+_CORRECTION_MARKERS = (
+    "superseded for `meta_conversions`",
+    "unclassified",
+    "not proven safe",
+    "does not make an ambiguous server-to-server retry proven safe",
+    "pixel-to-server",
+)
+
+
+def _changelog_entries(text: str) -> list[str]:
+    """Whole Markdown entries: a bullet plus its continuation lines."""
+    entries: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if line.startswith(("- ", "#")):
+            if current:
+                entries.append("\n".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        entries.append("\n".join(current))
+    return entries
+
+
+def _uncorrected_meta_safety_claims(text: str) -> list[str]:
+    offenders = []
+    for entry in _changelog_entries(text):
+        lowered = entry.lower()
+        if (
+            _META_NAMES.search(entry)
+            and any(phrase in lowered for phrase in _SAFETY_CLAIMS)
+            and not any(marker in lowered for marker in _CORRECTION_MARKERS)
+        ):
+            offenders.append(entry[:120])
+    return offenders
+
+
 def test_every_changelog_entry_mentioning_meta_retry_safety_carries_the_correction() -> None:
     """No release entry may call Meta server retries safe without the amendment note."""
-    changelog = (_ROOT / "CHANGELOG.md").read_text()
-    correction_markers = (
-        "superseded for `meta_conversions`",
-        "unclassified",
-        "not proven safe",
-        "does not make an ambiguous server-to-server retry proven safe",
-        "Pixel-to-server",
-    )
-    offenders = []
-    for line in changelog.splitlines():
-        lowered = line.lower()
-        mentions_meta = "meta_conversions" in lowered or "meta (facebook) conversions" in lowered
-        claims_safety = any(
-            phrase in lowered
-            for phrase in ("already safe", "deduplicat", "dedup mechanism", "event-dedup")
-        )
-        if mentions_meta and claims_safety and not any(m in line for m in correction_markers):
-            offenders.append(line[:120])
+    assert _uncorrected_meta_safety_claims((_ROOT / "CHANGELOG.md").read_text()) == []
 
-    assert offenders == []
+
+@pytest.mark.parametrize(
+    "name",
+    ["Meta Conversions", "meta_conversions", "Meta (Facebook) Conversions", "META CONVERSIONS"],
+)
+def test_claim_guard_flags_a_stale_claim_under_every_spelling(name: str) -> None:
+    stale = (
+        f"- **{name} retries**: an ambiguous retry is already safe\n"
+        "  because of event deduplication.\n"
+    )
+    assert _uncorrected_meta_safety_claims(stale) != []
+    corrected = stale + "  Server-to-server dedup is not proven safe.\n"
+    assert _uncorrected_meta_safety_claims(corrected) == []
